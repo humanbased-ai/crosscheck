@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import chalk from 'chalk'
+import { execa } from 'execa'
 import { parseDuration } from '../lib/durations.js'
 import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
@@ -13,7 +14,10 @@ import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.j
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { hintForError } from '../lib/remediation.js'
 import { runWorkflow } from '../lib/runner.js'
-import { DEFAULT_RECHECK_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
+import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
+import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
+import { resolveCliInvocation } from '../lib/cli-invocation.js'
+import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, type ConcurrencyOpts } from '../lib/multi-run.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
@@ -87,6 +91,19 @@ function synthesizeRecheckStep(allSteps: WorkflowStep[], assignedReviewer: 'clau
   }
 }
 
+// conflict-resolve only resolves git conflict markers — it needs no prior review
+// step, so (unlike recheck) it can be synthesized from scratch when the workflow
+// has no conflict-resolve step but `ck resolve` / `--steps conflict-resolve` asks for one.
+function synthesizeConflictResolveStep(assignedReviewer: 'claude' | 'codex', vendorOverride?: Vendor): WorkflowStep {
+  return {
+    name: 'conflict-resolve',
+    type: 'conflict-resolve',
+    reviewer: vendorOverride ?? assignedReviewer,
+    max_rounds: 1,
+    instructions: DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS,
+  }
+}
+
 function appendAfterLastFix(steps: WorkflowStep[], step: WorkflowStep): WorkflowStep[] {
   const lastFix = steps.map(s => s.type).lastIndexOf('fix')
   if (lastFix === -1) return [...steps, step]
@@ -107,6 +124,10 @@ export function resolveWorkflowSteps(
   if (stepFilter?.includes('recheck') && !steps.some(s => s.type === 'recheck')) {
     const synthetic = synthesizeRecheckStep(allSteps, assignedReviewer)
     if (synthetic) steps = appendAfterLastFix(steps, synthetic)
+  }
+
+  if (stepFilter?.includes('conflict-resolve') && !steps.some(s => s.type === 'conflict-resolve')) {
+    steps = [...steps, synthesizeConflictResolveStep(assignedReviewer, overrides.vendor)]
   }
 
   return steps
@@ -706,4 +727,97 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     process.removeListener('SIGINT', onSignal)
     process.removeListener('SIGTERM', onSignal)
   }
+}
+
+export type RunSpecOpts = RunOpts & ConcurrencyOpts
+
+// Builds the argv for a `crosscheck run <url>` child process from the resolved
+// RunOpts. Used by the multi-PR dispatcher to fan out one subprocess per PR,
+// isolating each PR's locking, signal handling, and process.exit.
+export function buildRunChildArgs(ref: PRRef, opts: RunOpts): string[] {
+  const args = ['run', ref.url]
+  if (opts.config) args.push('-c', opts.config)
+  if (opts.reviewer) args.push('--reviewer', opts.reviewer)
+  if (opts.fixer) args.push('--fixer', opts.fixer)
+  if (opts.vendor) args.push('--vendor', opts.vendor)
+  if (opts.steps) args.push('--steps', opts.steps)
+  if (opts.dryRun) args.push('--dry-run')
+  // --crazy/--half-crazy already imply --no-timeout; don't also pass a timeout flag.
+  if (opts.roundMode === 'crazy') args.push('--crazy')
+  else if (opts.roundMode === 'halfcrazy') args.push('--half-crazy')
+  else if (opts.noTimeout) args.push('--no-timeout')
+  else if (opts.timeout) args.push('--timeout', opts.timeout)
+  args.push('--trigger', opts.trigger ?? 'run')
+  return args
+}
+
+// Entry point for the `run` command (and the recheck/fix/resolve aliases). Expands
+// the PR spec; a single PR runs in-process (preserving exit codes and signal
+// handling); multiple PRs fan out to concurrent `crosscheck run` subprocesses.
+export async function runRunSpec(spec: string, opts: RunSpecOpts = {}): Promise<void> {
+  const concErr = concurrencyError(opts)
+  if (concErr) {
+    console.error(chalk.red(`✗ ${concErr}`))
+    process.exit(1)
+  }
+
+  let refs: PRRef[]
+  try {
+    refs = parsePRSpec(spec)
+  } catch (err: unknown) {
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(1)
+  }
+
+  if (refs.length === 1) {
+    await runRun(refs[0].url, opts)
+    return
+  }
+
+  // expected-head-sha is a single-PR guard (set by kickass dispatch); it can't
+  // apply to a fan-out across many heads.
+  if (opts.expectedHeadSha !== undefined) {
+    console.error(chalk.red('✗ --expected-head-sha cannot be combined with multiple PRs'))
+    process.exit(1)
+  }
+
+  const { concurrency, staggerMs } = resolveRunConcurrency(refs.length, opts)
+  if (concurrency > 1) {
+    console.log(chalk.dim(`\n  running ${Math.min(concurrency, refs.length)} agents in parallel across ${refs.length} PRs (${staggerMs}ms stagger)`))
+  } else {
+    console.log(chalk.dim(`\n  running ${refs.length} PRs sequentially`))
+  }
+
+  const invocation = resolveCliInvocation()
+  const capture = concurrency > 1
+  const dispatch = async (ref: PRRef): Promise<string | void> => {
+    const args = [...invocation.args, ...buildRunChildArgs(ref, opts)]
+    if (!capture) {
+      // Sequential: stream child output live for an interactive single-stream feel.
+      await execa(invocation.command, args, { stdio: 'inherit' })
+      return
+    }
+    // Concurrent: capture combined output so executeMultiPR can print it per-PR
+    // without interleaving. On failure, execa attaches captured output as err.all.
+    const result = await execa(invocation.command, args, { stdio: 'pipe', all: true })
+    return result.all ?? ''
+  }
+
+  const results = await executeMultiPR(refs, { dispatch }, concurrency, staggerMs)
+  printMultiPRSummary(results)
+  if (results.some(r => r.status === 'failed')) process.exitCode = 2
+}
+
+// Step-forcing aliases: run only the named step against the PR spec, bypassing
+// next-step auto-detection. Mirrors `ck run --steps <type>` but as first-class commands.
+export function runRecheckSpec(spec: string, opts: RunSpecOpts = {}): Promise<void> {
+  return runRunSpec(spec, { ...opts, steps: 'recheck' })
+}
+
+export function runFixSpec(spec: string, opts: RunSpecOpts = {}): Promise<void> {
+  return runRunSpec(spec, { ...opts, steps: 'fix' })
+}
+
+export function runResolveSpec(spec: string, opts: RunSpecOpts = {}): Promise<void> {
+  return runRunSpec(spec, { ...opts, steps: 'conflict-resolve' })
 }

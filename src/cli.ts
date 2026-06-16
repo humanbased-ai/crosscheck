@@ -7,13 +7,13 @@ import { runInit } from './commands/init.js'
 import { runOnboard } from './commands/onboard.js'
 import { runServe } from './commands/serve.js'
 import { runWatch } from './commands/watch.js'
-import { runReview } from './commands/review.js'
+import { runReviewSpec } from './commands/review.js'
 import { runStatus } from './commands/status.js'
 import { runDiagnose } from './commands/diagnose.js'
 import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
 import { runIssue } from './commands/issue.js'
-import { runRun } from './commands/run.js'
+import { runRunSpec, runRecheckSpec, runFixSpec, runResolveSpec, type RunSpecOpts } from './commands/run.js'
 import { runDetectStep } from './commands/detect-step.js'
 import { runScan } from './commands/scan.js'
 import { runKickass } from './commands/kickass.js'
@@ -30,6 +30,69 @@ program
   .name(programName)
   .description('Cross-vendor AI code review — Claude Code ↔ Codex')
   .version(`❤️  ${version}`)
+
+// Flags shared by the run-family commands (run, recheck, fix, resolve).
+interface StepRunFlags {
+  config?: string
+  reviewer?: string
+  fixer?: string
+  vendor?: string
+  steps?: string
+  dryRun?: boolean
+  expectedHeadSha?: string
+  crazy?: boolean
+  halfCrazy?: boolean
+  halfcrazy?: boolean
+  timeout?: string | false
+  noTimeout?: boolean
+  trigger?: string
+  concurrent?: string | true
+  sequential?: boolean
+  stagger?: string
+}
+
+function addStepRunOptions(cmd: Command): Command {
+  return cmd
+    .option('-c, --config <path>', 'config file path')
+    .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude')
+    .option('--fixer <vendor>', 'force a specific fixer for fix steps: codex | claude')
+    .option('--vendor <vendor>', 'force one vendor for review, recheck, and fix steps')
+    .option('--dry-run', 'run but do not post a comment or apply fixes')
+    .option('--crazy', 'loop fix→recheck until APPROVE; disables all timeout constraints')
+    .option('--half-crazy', 'loop fix→recheck until verdict is not BLOCK; disables all timeout constraints')
+    .option('--halfcrazy', '(deprecated alias for --half-crazy)')
+    .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m')
+    .option('--no-timeout', 'remove the reviewer subprocess timeout cap (implied by --crazy/--half-crazy)')
+    .option('--concurrent [n]', 'multi-PR: cap parallel agents; omit n for one agent per PR (default)')
+    .option('--sequential', 'multi-PR: run PRs one at a time instead of in parallel')
+    .option('--stagger <ms>', 'multi-PR: ms delay between concurrent worker starts; default 2000')
+    .addOption(new Option('--trigger <source>').hideHelp())  // internal: set by kickass/watch/serve
+}
+
+function buildRunSpecOpts(opts: StepRunFlags): RunSpecOpts {
+  const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
+  // Commander sets opts.timeout = false (not opts.noTimeout) when --no-timeout is passed
+  const noTimeout = opts.noTimeout || opts.timeout === false
+  const trigger = (opts.trigger as import('./lib/runner.js').WorkflowTrigger | undefined) ?? 'run'
+  const concurrent = opts.concurrent === undefined ? undefined : opts.concurrent === true ? 0 : Number(opts.concurrent)
+  const staggerMs = opts.stagger !== undefined ? Number(opts.stagger) : undefined
+  return {
+    config: opts.config,
+    reviewer: opts.reviewer,
+    fixer: opts.fixer,
+    vendor: opts.vendor,
+    steps: opts.steps,
+    dryRun: opts.dryRun,
+    expectedHeadSha: opts.expectedHeadSha,
+    roundMode,
+    noTimeout,
+    timeout: typeof opts.timeout === 'string' ? opts.timeout : undefined,
+    trigger,
+    concurrent,
+    sequential: opts.sequential,
+    staggerMs,
+  }
+}
 
 program
   .command('init')
@@ -70,36 +133,46 @@ program
   .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runWatch(opts))
 
 program
-  .command('review <pr-url>')
-  .description('Manually trigger a review for a single PR URL')
+  .command('review <pr-urls...>')
+  .description('Trigger a review for one or more PRs. Accepts comma-separated URLs, bare numbers, and ranges (e.g. .../pull/245,255 or .../pull/245-256)')
   .option('-c, --config <path>', 'config file path')
   .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses auto-detection)')
   .option('--vendor <vendor>', 'alias for --reviewer')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string }) => void runReview(prUrl, opts.config, opts.reviewer ?? opts.vendor))
-
-program
-  .command('run <pr-url>')
-  .description('Execute the full configured workflow against a single PR (review → fix → recheck)')
-  .option('-c, --config <path>', 'config file path')
-  .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses attribution detection)')
-  .option('--fixer <vendor>', 'force a specific fixer for fix steps: codex | claude')
-  .option('--vendor <vendor>', 'force one vendor for review, recheck, and fix steps')
-  .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
-  .option('--dry-run', 'run the review but do not post a comment or apply fixes')
-  .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection')
-  .option('--crazy', 'loop fix→recheck until APPROVE; disables all timeout constraints')
-  .option('--half-crazy', 'loop fix→recheck until verdict is not BLOCK; disables all timeout constraints')
-  .option('--halfcrazy', '(deprecated alias for --half-crazy)')
-  .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
-  .option('--no-timeout', 'remove the reviewer subprocess timeout cap (implied by --crazy/--half-crazy; used internally by kickass fix legs)')
-  .addOption(new Option('--trigger <source>').hideHelp())  // internal: set by kickass/watch/serve
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; fixer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string | false; noTimeout?: boolean; trigger?: string }) => {
-    const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
-    // Commander sets opts.timeout = false (not opts.noTimeout) when --no-timeout is passed
-    const noTimeout = opts.noTimeout || opts.timeout === false
-    const trigger = (opts.trigger as import('./lib/runner.js').WorkflowTrigger | undefined) ?? 'run'
-    void runRun(prUrl, { ...opts, roundMode, noTimeout, timeout: typeof opts.timeout === 'string' ? opts.timeout : undefined, trigger })
+  .option('--concurrent [n]', 'multi-PR: cap parallel agents; omit n for one agent per PR (default)')
+  .option('--sequential', 'multi-PR: run PRs one at a time instead of in parallel')
+  .option('--stagger <ms>', 'multi-PR: ms delay between concurrent worker starts; default 2000')
+  .action((prUrls: string[], opts: { config?: string; reviewer?: string; vendor?: string; concurrent?: string | true; sequential?: boolean; stagger?: string }) => {
+    const concurrent = opts.concurrent === undefined ? undefined : opts.concurrent === true ? 0 : Number(opts.concurrent)
+    const staggerMs = opts.stagger !== undefined ? Number(opts.stagger) : undefined
+    void runReviewSpec(prUrls.join(','), { config: opts.config, reviewer: opts.reviewer ?? opts.vendor, concurrent, sequential: opts.sequential, staggerMs })
   })
+
+addStepRunOptions(
+  program
+    .command('run <pr-urls...>')
+    .description('Execute the full configured workflow against one or more PRs (review → fix → recheck). Accepts comma-separated URLs, bare numbers, and ranges (e.g. .../pull/245,255 or .../pull/245-256)'),
+)
+  .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
+  .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection (single PR only)')
+  .action((prUrls: string[], opts: StepRunFlags) => void runRunSpec(prUrls.join(','), buildRunSpecOpts(opts)))
+
+addStepRunOptions(
+  program
+    .command('recheck <pr-urls...>')
+    .description('Force the recheck step against one or more PRs (re-evaluate against the latest review). Accepts comma-separated URLs, bare numbers, and ranges'),
+).action((prUrls: string[], opts: StepRunFlags) => void runRecheckSpec(prUrls.join(','), buildRunSpecOpts(opts)))
+
+addStepRunOptions(
+  program
+    .command('fix <pr-urls...>')
+    .description('Force the fix step against one or more PRs (apply fixes for the latest review). Accepts comma-separated URLs, bare numbers, and ranges'),
+).action((prUrls: string[], opts: StepRunFlags) => void runFixSpec(prUrls.join(','), buildRunSpecOpts(opts)))
+
+addStepRunOptions(
+  program
+    .command('resolve <pr-urls...>')
+    .description('Force the conflict-resolve step against one or more PRs (resolve merge conflicts). Accepts comma-separated URLs, bare numbers, and ranges'),
+).action((prUrls: string[], opts: StepRunFlags) => void runResolveSpec(prUrls.join(','), buildRunSpecOpts(opts)))
 
 program
   .command('detect-step <pr-url>')

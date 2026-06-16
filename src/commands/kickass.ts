@@ -1,9 +1,8 @@
 import chalk from 'chalk'
-import { existsSync } from 'fs'
 import { stdin as input, stdout as output } from 'process'
 import { createInterface } from 'readline/promises'
-import { fileURLToPath } from 'url'
 import { execa } from 'execa'
+import { resolveCliInvocation, type CliInvocation } from '../lib/cli-invocation.js'
 import { createGithubClient } from '../github/client.js'
 import { getGithubToken, loadConfig } from '../config/loader.js'
 import type { Config } from '../config/schema.js'
@@ -518,37 +517,8 @@ export function buildKickassRunArgs(
   return args
 }
 
-export interface CliInvocation {
-  command: string
-  args: string[]
-}
-
-interface ResolveCliInvocationOptions {
-  argvEntry?: string
-  execPath?: string
-  exists?: (path: string) => boolean
-  urlToPath?: (url: URL) => string
-}
-
-export function resolveCliInvocation(options: ResolveCliInvocationOptions = {}): CliInvocation {
-  const exists = options.exists ?? existsSync
-  const urlToPath = options.urlToPath ?? fileURLToPath
-  const execPath = options.execPath ?? process.execPath
-  const argvEntry = options.argvEntry ?? process.argv[1]
-  const localTsx = urlToPath(new URL('../../node_modules/.bin/tsx', import.meta.url))
-
-  if (argvEntry && exists(argvEntry)) {
-    return invocationForEntry(argvEntry, execPath, localTsx, exists)
-  }
-
-  const builtCli = urlToPath(new URL('../cli.js', import.meta.url))
-  if (exists(builtCli)) return { command: execPath, args: [builtCli] }
-
-  const sourceCli = urlToPath(new URL('../cli.ts', import.meta.url))
-  if (exists(sourceCli)) return invocationForEntry(sourceCli, execPath, localTsx, exists)
-
-  throw new Error('Cannot resolve crosscheck CLI entrypoint. Run npm run build before kickass, or run from a source checkout with dev dependencies installed.')
-}
+// Re-exported for backward compatibility — the implementation now lives in lib/cli-invocation.
+export { resolveCliInvocation, type CliInvocation } from '../lib/cli-invocation.js'
 
 function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDeps {
   let cli: CliInvocation | undefined
@@ -730,15 +700,4 @@ function stepsForItem(item: PreflightItem): string {
 
 function formatPRSignature(pr: PRStatus): string {
   return `${pr.owner}/${pr.repo}#${pr.number}@${pr.headSha.slice(0, 7)}`
-}
-
-function invocationForEntry(
-  entry: string,
-  execPath: string,
-  localTsx: string,
-  exists: (path: string) => boolean,
-): CliInvocation {
-  if (!entry.endsWith('.ts')) return { command: execPath, args: [entry] }
-  if (exists(localTsx)) return { command: localTsx, args: [entry] }
-  throw new Error('Cannot run kickass actions from a TypeScript entrypoint without the local tsx dev dependency. Run npm run build first.')
 }

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import chalk from 'chalk'
+import { execa } from 'execa'
 import ora from 'ora'
 import { createGithubClient, postReviewComment } from '../github/client.js'
 import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detector.js'
@@ -12,6 +13,9 @@ import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
+import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
+import { resolveCliInvocation } from '../lib/cli-invocation.js'
+import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, type ConcurrencyOpts } from '../lib/multi-run.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -166,4 +170,62 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
   }
+}
+
+export interface ReviewSpecOpts extends ConcurrencyOpts {
+  config?: string
+  reviewer?: string
+}
+
+export function buildReviewChildArgs(ref: PRRef, opts: ReviewSpecOpts): string[] {
+  const args = ['review', ref.url]
+  if (opts.config) args.push('-c', opts.config)
+  if (opts.reviewer) args.push('--reviewer', opts.reviewer)
+  return args
+}
+
+// Entry point for the `review` command. A single PR reviews in-process; multiple
+// PRs fan out to concurrent `crosscheck review` subprocesses.
+export async function runReviewSpec(spec: string, opts: ReviewSpecOpts = {}): Promise<void> {
+  const concErr = concurrencyError(opts)
+  if (concErr) {
+    console.error(chalk.red(`✗ ${concErr}`))
+    process.exit(1)
+  }
+
+  let refs: PRRef[]
+  try {
+    refs = parsePRSpec(spec)
+  } catch (err: unknown) {
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(1)
+  }
+
+  if (refs.length === 1) {
+    await runReview(refs[0].url, opts.config, opts.reviewer)
+    return
+  }
+
+  const { concurrency, staggerMs } = resolveRunConcurrency(refs.length, opts)
+  if (concurrency > 1) {
+    console.log(chalk.dim(`\n  reviewing ${refs.length} PRs (${Math.min(concurrency, refs.length)} in parallel, ${staggerMs}ms stagger)`))
+  } else {
+    console.log(chalk.dim(`\n  reviewing ${refs.length} PRs sequentially`))
+  }
+
+  const invocation = resolveCliInvocation()
+  const capture = concurrency > 1
+  const dispatch = async (ref: PRRef): Promise<string | void> => {
+    const args = [...invocation.args, ...buildReviewChildArgs(ref, opts)]
+    if (!capture) {
+      await execa(invocation.command, args, { stdio: 'inherit' })
+      return
+    }
+    const result = await execa(invocation.command, args, { stdio: 'pipe', all: true })
+    return result.all ?? ''
+  }
+
+  const results = await executeMultiPR(refs, { dispatch }, concurrency, staggerMs)
+  printMultiPRSummary(results)
+  if (results.some(r => r.status === 'failed')) process.exitCode = 2
 }
