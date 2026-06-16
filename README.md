@@ -115,8 +115,9 @@ crosscheck serve        # always-on team server
 crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
 crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
 crosscheck serve                    # team use — fixed port, register webhook once
-crosscheck review <pr-url>          # one-shot review of a specific PR
-crosscheck run <pr-url>             # run the full workflow: review → (fix → recheck) × max_rounds
+crosscheck review <pr-urls...>      # review one or more PRs (comma lists, ranges, cross-repo)
+crosscheck run <pr-urls...>         # run the full workflow: review → (fix → recheck) × max_rounds
+crosscheck recheck|fix|resolve <pr-urls...>   # force one workflow step on one or more PRs
 crosscheck scan                     # show open PR workflow state across monitored repos
 crosscheck detect-step <pr-url>     # explain the next workflow step for one PR
 crosscheck kickass                  # advance stale PRs from an interactive operator queue
@@ -216,9 +217,9 @@ crosscheck serve --reconfigure        # re-run deployment setup
 
 ---
 
-### `crosscheck review <pr-url>`
+### `crosscheck review <pr-urls...>`
 
-One-shot review of a single PR. Clones, checks out, reviews, and posts the comment.
+Reviews one or more PRs. Clones, checks out, reviews, and posts the comment. The PR argument accepts the [multi-PR spec syntax](#multi-pr-syntax) — multiple PRs are reviewed concurrently.
 
 ```bash
 crosscheck review https://github.com/org/repo/pull/42
@@ -226,13 +227,15 @@ crosscheck review <pr-url> --reviewer claude    # force Claude regardless of det
 crosscheck review <pr-url> --reviewer codex     # force Codex regardless of detection
 crosscheck review <pr-url> --reviewer cc        # alias for Claude
 crosscheck review <pr-url> --reviewer openai    # alias for Codex
+crosscheck review .../pull/245,255              # review several PRs at once
+crosscheck review .../pull/245-256              # review an inclusive range
 ```
 
 ---
 
-### `crosscheck run <pr-url>`
+### `crosscheck run <pr-urls...>`
 
-Runs the full configured workflow against one PR: review → (fix → recheck) × `max_rounds`. Loops autonomously through fix→recheck cycles up to the `max_rounds` value configured in `workflow.yml` (default: 1). Use `--crazy` or `--half-crazy` to loop until approved or unblocked, ignoring `max_rounds`.
+Runs the full configured workflow against one or more PRs: review → (fix → recheck) × `max_rounds`. Loops autonomously through fix→recheck cycles up to the `max_rounds` value configured in `workflow.yml` (default: 1). Use `--crazy` or `--half-crazy` to loop until approved or unblocked, ignoring `max_rounds`. The PR argument accepts the [multi-PR spec syntax](#multi-pr-syntax); multiple PRs run concurrently (one agent per PR by default).
 
 ```bash
 crosscheck run <pr-url>
@@ -245,7 +248,43 @@ crosscheck run <pr-url> --dry-run                # review without posting or fix
 crosscheck run <pr-url> --crazy                  # 🔥🔥 loop until APPROVE
 crosscheck run <pr-url> --half-crazy             # 🔥  loop until not BLOCK
 crosscheck run <pr-url> --timeout 10m            # custom reviewer timeout
+crosscheck run .../pull/245,255                  # several PRs, concurrently
+crosscheck run .../pull/245-256 --concurrent 3   # range, max 3 agents in parallel
 ```
+
+---
+
+### `crosscheck recheck` / `fix` / `resolve <pr-urls...>`
+
+Force a single workflow step against one or more PRs, bypassing next-step auto-detection. Each is sugar for `crosscheck run <spec> --steps <type>` and accepts the same [multi-PR spec syntax](#multi-pr-syntax) and `--concurrent` / `--sequential` / `--stagger` flags as `run`.
+
+| Command | Forces the step |
+|---|---|
+| `crosscheck recheck <spec>` | `recheck` — re-evaluate against the latest review |
+| `crosscheck fix <spec>` | `fix` — apply fixes for the latest review |
+| `crosscheck resolve <spec>` | `conflict-resolve` — resolve merge conflicts (Claude only) |
+
+```bash
+crosscheck recheck https://github.com/org/repo/pull/42
+crosscheck fix .../pull/245,255 --fixer claude
+crosscheck resolve .../pull/245-256 --vendor claude
+```
+
+When the step is absent from the active `workflow.yml`, `recheck` and `conflict-resolve` are synthesized with built-in defaults so the command still runs.
+
+---
+
+### Multi-PR syntax
+
+`run`, `review`, `recheck`, `fix`, and `resolve` accept a single PR URL or a **spec** that expands to many PRs — a comma-separated list of full URLs, bare numbers, and `N-M` ranges:
+
+```bash
+.../pull/245,255                                   # two PRs in the same repo
+.../pull/245-256                                   # an inclusive range
+.../repo/pull/245,https://github.com/o/other/pull/3  # across repos
+```
+
+The first token must be a full URL (a bare number inherits the most recent repo). Duplicates are de-duplicated and a spec expands to at most 100 PRs. Multiple PRs run concurrently by default — control parallelism with `--concurrent <n>`, `--sequential`, or `--stagger <ms>`.
 
 ---
 

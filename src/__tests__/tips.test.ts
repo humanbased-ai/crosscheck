@@ -48,4 +48,14 @@ describe('selectTip', () => {
     }
     expect(seen.size).toBe(TIPS.length)
   })
+
+  it('leads the rotation with high-priority fire tips', () => {
+    // Fire-badged (new-feature) tips sit at the front so a fresh session shows them first.
+    expect(TIPS[0].badge).toBe('fire')
+    expect(selectTip(0, 0).badge).toBe('fire')
+    const fireCount = TIPS.filter(t => t.badge === 'fire').length
+    expect(fireCount).toBeGreaterThanOrEqual(1)
+    // The leading run of tips are all fire tips (contiguous priority block).
+    expect(TIPS.slice(0, fireCount).every(t => t.badge === 'fire')).toBe(true)
+  })
 })
