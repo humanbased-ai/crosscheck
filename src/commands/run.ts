@@ -17,7 +17,7 @@ import { runWorkflow } from '../lib/runner.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
-import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, type ConcurrencyOpts } from '../lib/multi-run.js'
+import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
@@ -805,7 +805,7 @@ export async function runRunSpec(spec: string, opts: RunSpecOpts = {}): Promise<
 
   const results = await executeMultiPR(refs, { dispatch }, concurrency, staggerMs)
   printMultiPRSummary(results)
-  if (results.some(r => r.status === 'failed')) process.exitCode = 2
+  process.exitCode = aggregateExitCode(results)
 }
 
 // Step-forcing aliases: run only the named step against the PR spec, bypassing

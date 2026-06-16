@@ -15,7 +15,7 @@ import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARN
 import { clonePRForReview } from '../lib/clone.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
-import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, type ConcurrencyOpts } from '../lib/multi-run.js'
+import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -227,5 +227,5 @@ export async function runReviewSpec(spec: string, opts: ReviewSpecOpts = {}): Pr
 
   const results = await executeMultiPR(refs, { dispatch }, concurrency, staggerMs)
   printMultiPRSummary(results)
-  if (results.some(r => r.status === 'failed')) process.exitCode = 2
+  process.exitCode = aggregateExitCode(results)
 }

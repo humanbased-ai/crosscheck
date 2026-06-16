@@ -12,6 +12,8 @@ export interface MultiPRResult {
   ref: PRRef
   status: 'executed' | 'failed'
   reason?: ErrorCategory
+  /** Child process exit code, when the dispatch reported one (execa attaches it). */
+  exitCode?: number
 }
 
 export interface MultiRunDeps {
@@ -107,7 +109,8 @@ export async function executeMultiPR(
       const captured = (err as Record<string, unknown>).all
       if (typeof captured === 'string' && captured.trim()) printCapturedOutput(sig, captured, log)
       log(chalk.red(`✗ failed  ${sig}`) + chalk.dim(` [${category}]`) + (hint ? `\n    ${chalk.yellow('→')} ${hint}` : ''))
-      results[index] = { ref, status: 'failed', reason: category }
+      const exitCode = (err as Record<string, unknown>).exitCode
+      results[index] = { ref, status: 'failed', reason: category, exitCode: typeof exitCode === 'number' ? exitCode : undefined }
     }
   }
 
@@ -140,6 +143,16 @@ export function summarizeMultiPR(results: MultiPRResult[]): string {
   const executed = results.filter(r => r.status === 'executed').length
   const failed = results.filter(r => r.status === 'failed').length
   return `Multi-PR summary: ${executed} executed, ${failed} failed`
+}
+
+// Parent exit code for a multi-PR fan-out. Mirrors the single-PR contract: a child
+// that fails on a usage error exits 1, so a spec whose only failures are usage errors
+// stays 1 instead of being masked as 2 (unexpected). Any failure without a numeric
+// exit code (timeout, signal) or with a code other than 1 is treated as unexpected.
+export function aggregateExitCode(results: MultiPRResult[]): number {
+  const failures = results.filter(r => r.status === 'failed')
+  if (failures.length === 0) return 0
+  return failures.every(r => r.exitCode === 1) ? 1 : 2
 }
 
 export function printMultiPRSummary(results: MultiPRResult[], log: (msg: string) => void = console.log): void {
