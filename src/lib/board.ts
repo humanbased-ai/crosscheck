@@ -55,6 +55,7 @@ interface PRSlot {
   crReviewer?: string       // vendor that ran the CR step (claude | codex)
   recheckReviewer?: string  // vendor that ran the recheck step
   qualityTier?: string      // quality tier used for this run
+  stickyFolded?: boolean    // once folded on the count threshold, stays folded (see renderPRWorkspace)
 }
 
 export interface PRUpdate {
@@ -747,7 +748,7 @@ export class PRBoard {
     for (const slot of this.slots.values()) {
       if (slot.completedAt !== undefined) completedCount++
     }
-    const foldCompleted = foldAll || completedCount > FOLD_THRESHOLD
+    const foldByCount = completedCount > FOLD_THRESHOLD
 
     const lines: string[] = []
     let prevWasExpanded = false
@@ -755,7 +756,14 @@ export class PRBoard {
 
     for (const slot of this.slots.values()) {
       const isCompleted = slot.completedAt !== undefined
-      const useFolded = foldCompleted && isCompleted
+      // Sticky fold: once a completed slot folds because the count crossed
+      // FOLD_THRESHOLD, keep it folded. Otherwise a later recheck round drops
+      // completedCount back under the threshold and reflows the whole history
+      // (a settled PR jumping from one line back to the full pipeline). The
+      // height-driven foldAll is deliberately NOT sticky — a taller terminal
+      // should re-expand.
+      if (isCompleted && foldByCount) slot.stickyFolded = true
+      const useFolded = isCompleted && (foldAll || slot.stickyFolded === true)
 
       if (useFolded) {
         lines.push(this.renderPRSlotFolded(slot))
