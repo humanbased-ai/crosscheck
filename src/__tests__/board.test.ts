@@ -210,6 +210,26 @@ describe('PRBoard — TTY workspace retention', () => {
     expect(idxStats).toBeGreaterThan(idxBrand)
     expect(idxPR).toBeGreaterThan(idxStats)
   })
+
+  it('keeps settled slots folded when a recheck round drops the completed count', () => {
+    // 4 completed → completedCount (4) > FOLD_THRESHOLD (3) → all fold to one line.
+    // Folded form shows "CR: APPROVE"; expanded form shows "N issues (APPROVE…)".
+    for (let i = 0; i < 4; i++) {
+      board.addPR(`k${i}`, 200 + i, 'a/b', `branch-${i}`, 1)
+      board.updatePR(`k${i}`, { verdict: 'APPROVE', commentCount: 2 })
+      board.completePR(`k${i}`, { elapsedMs: 1000, url: `https://github.com/a/b/pull/${200 + i}` })
+    }
+    let output = stripAnsi(invokeRender())
+    expect(output).toContain('CR: APPROVE')
+    expect(output).not.toContain('issues')
+
+    // One PR enters round 2 → active again → completedCount drops to 3 (≤ threshold).
+    // Without sticky fold the other three would reflow to the expanded pipeline.
+    board.addPR('k0@r2', 200, 'a/b', 'branch-0', 2)
+    output = stripAnsi(invokeRender())
+    expect(output).not.toContain('issues')   // settled slots stay folded
+    expect(output).toContain('CR: APPROVE')
+  })
 })
 
 // ── Viewport height fitting ───────────────────────────────────────────────────
