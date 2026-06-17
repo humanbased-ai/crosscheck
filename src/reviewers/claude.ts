@@ -1,7 +1,7 @@
 import { execa } from 'execa'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
-import { resolveClaudeModel } from '../lib/review-models.js'
+import { primaryModelFromUsage, resolveClaudeModel } from '../lib/review-models.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 
@@ -30,6 +30,7 @@ interface ClaudeJsonOutput {
     input_tokens?: unknown
     output_tokens?: unknown
   }
+  modelUsage?: unknown
 }
 
 export async function runClaudeReview(
@@ -100,7 +101,11 @@ export async function runClaudeReview(
       const inputTokens = typeof parsed.usage?.input_tokens === 'number' ? parsed.usage.input_tokens : undefined
       const outputTokens = typeof parsed.usage?.output_tokens === 'number' ? parsed.usage.output_tokens : undefined
       const tokensUsed = inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined
-      return { review, tokensUsed, inputTokens, outputTokens, model, retried }
+      // Report the model that actually served the review, not the requested
+      // string: `model` may be an alias ("opus") and the CLI resolves or
+      // substitutes it. Fall back to the requested value when absent.
+      const actualModel = primaryModelFromUsage(parsed.modelUsage)
+      return { review, tokensUsed, inputTokens, outputTokens, model: actualModel ?? model, retried }
     } catch {
       return { review: raw, model, retried }
     }

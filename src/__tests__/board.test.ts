@@ -75,11 +75,16 @@ const reviewStep: WorkflowStep = {
 describe('PRBoard — TTY workspace retention', () => {
   let board: PRBoard
   let originalIsTTY: boolean | undefined
+  let originalRows: number | undefined
   let originalWrite: typeof process.stdout.write
 
   beforeEach(() => {
     originalIsTTY = process.stdout.isTTY
+    originalRows = process.stdout.rows
     Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true })
+    // Tall viewport so height fitting never kicks in — these tests cover
+    // count-based retention (WORKSPACE_MAX / FOLD_THRESHOLD) semantics only.
+    Object.defineProperty(process.stdout, 'rows', { value: 200, configurable: true })
     originalWrite = process.stdout.write.bind(process.stdout)
     process.stdout.write = (() => true) as typeof process.stdout.write
     board = new PRBoard()
@@ -90,6 +95,7 @@ describe('PRBoard — TTY workspace retention', () => {
     board.stop()
     process.stdout.write = originalWrite
     Object.defineProperty(process.stdout, 'isTTY', { value: originalIsTTY, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: originalRows, configurable: true })
   })
 
   // Tests reach into private state because the relevant invariants live
@@ -204,4 +210,185 @@ describe('PRBoard — TTY workspace retention', () => {
     expect(idxStats).toBeGreaterThan(idxBrand)
     expect(idxPR).toBeGreaterThan(idxStats)
   })
+
+  it('keeps settled slots folded when a recheck round drops the completed count', () => {
+    // 4 completed → completedCount (4) > FOLD_THRESHOLD (3) → all fold to one line.
+    // Folded form shows "CR: APPROVE"; expanded form shows "N issues (APPROVE…)".
+    for (let i = 0; i < 4; i++) {
+      board.addPR(`k${i}`, 200 + i, 'a/b', `branch-${i}`, 1)
+      board.updatePR(`k${i}`, { verdict: 'APPROVE', commentCount: 2 })
+      board.completePR(`k${i}`, { elapsedMs: 1000, url: `https://github.com/a/b/pull/${200 + i}` })
+    }
+    let output = stripAnsi(invokeRender())
+    expect(output).toContain('CR: APPROVE')
+    expect(output).not.toContain('issues')
+
+    // One PR enters round 2 → active again → completedCount drops to 3 (≤ threshold).
+    // Without sticky fold the other three would reflow to the expanded pipeline.
+    board.addPR('k0@r2', 200, 'a/b', 'branch-0', 2)
+    output = stripAnsi(invokeRender())
+    expect(output).not.toContain('issues')   // settled slots stay folded
+    expect(output).toContain('CR: APPROVE')
+  })
 })
+
+// ── Viewport height fitting ───────────────────────────────────────────────────
+//
+// The live block is erased each frame with cursor-up + clear-to-end. Cursor-up
+// clamps at the viewport top, so any row that scrolls out of the viewport can
+// never be erased and leaks into scrollback as a permanent duplicate. These
+// tests pin the invariant: rendered live block ≤ rows - 1 (one row reserved
+// for the trailing newline writeLive appends).
+
+describe('PRBoard — viewport height fitting', () => {
+  let board: PRBoard
+  let originalIsTTY: boolean | undefined
+  let originalRows: number | undefined
+  let originalColumns: number | undefined
+  let originalWrite: typeof process.stdout.write
+  let captured: string[]
+
+  const setViewport = (rows: number, columns: number) => {
+    Object.defineProperty(process.stdout, 'rows', { value: rows, configurable: true })
+    Object.defineProperty(process.stdout, 'columns', { value: columns, configurable: true })
+  }
+
+  beforeEach(() => {
+    originalIsTTY = process.stdout.isTTY
+    originalRows = process.stdout.rows
+    originalColumns = process.stdout.columns
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true })
+    originalWrite = process.stdout.write.bind(process.stdout)
+    captured = []
+    process.stdout.write = ((chunk: unknown) => { captured.push(String(chunk)); return true }) as typeof process.stdout.write
+    board = new PRBoard()
+    board.setConfig(baseConfig, [reviewStep])
+  })
+
+  afterEach(() => {
+    board.stop()
+    process.stdout.write = originalWrite
+    Object.defineProperty(process.stdout, 'isTTY', { value: originalIsTTY, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: originalRows, configurable: true })
+    Object.defineProperty(process.stdout, 'columns', { value: originalColumns, configurable: true })
+  })
+
+  const slots = () => (board as unknown as { slots: Map<string, unknown> }).slots
+  const invokeRender = () => (board as unknown as { render: () => string }).render()
+  const invokeRedraw = () => (board as unknown as { redraw: () => void }).redraw()
+
+  const countRows = (content: string, w: number): number =>
+    content.split('\n').reduce((sum, l) => sum + Math.max(1, Math.ceil(stripAnsi(l).length / w)), 0)
+
+  const addCompleted = (n: number) => {
+    for (let i = 0; i < n; i++) {
+      board.addPR(`k${i}`, i, 'acme/api', `branch-${i}`)
+      board.updatePR(`k${i}`, { verdict: 'APPROVE', commentCount: 2 })
+      board.completePR(`k${i}`, { elapsedMs: 60_000, url: `https://github.com/acme/api/pull/${i}` })
+    }
+  }
+
+  it('keeps the live block within rows - 1 when many PRs complete', () => {
+    setViewport(20, 100)
+    addCompleted(12)
+    for (let i = 0; i < 6; i++) board.logConnectivity(`conn event ${i}`)
+    expect(countRows(invokeRender(), 100)).toBeLessThanOrEqual(19)
+  })
+
+  it('folds completed slots below FOLD_THRESHOLD when the normal layout overflows', () => {
+    setViewport(12, 100)
+    addCompleted(2)
+    const output = stripAnsi(invokeRender())
+    // Folded form shows "CR: APPROVE"; expanded form shows "N issues (APPROVE...)"
+    expect(output).toContain('CR: APPROVE')
+    expect(output).not.toContain('issues')
+    expect(countRows(invokeRender(), 100)).toBeLessThanOrEqual(11)
+  })
+
+  it('evicts completed slots to scrollback when the compact layout still overflows', () => {
+    setViewport(12, 100)
+    addCompleted(15)
+    const output = invokeRender()
+    expect(countRows(output, 100)).toBeLessThanOrEqual(11)
+    expect(slots().size).toBeLessThan(15)
+  })
+
+  it('truncates from the top as a last resort when active slots alone overflow', () => {
+    setViewport(8, 100)
+    for (let i = 0; i < 6; i++) {
+      board.addPR(`a${i}`, 100 + i, 'acme/api', `active-${i}`)
+      board.updatePR(`a${i}`, { prLoc: 500, phase: 'reviewing' })
+    }
+    const output = invokeRender()
+    expect(countRows(output, 100)).toBeLessThanOrEqual(7)
+    expect(stripAnsi(output)).toMatch(/^\s*…/)
+    expect(slots().size).toBe(6)  // active slots are never evicted
+  })
+
+  it('leaves no live-block residue in scrollback when redrawing (VT regression)', () => {
+    const ROWS = 30, COLS = 100
+    setViewport(ROWS, COLS)
+    board.setTunnel('smee', 'https://smee.io/test', true)
+    for (let i = 0; i < 5; i++) board.logConnectivity(`conn event ${i}`)
+    invokeRedraw()
+    for (let i = 0; i < 8; i++) {
+      board.addPR(`k${i}`, 150 + i, 'humanbased-ai/codatta-onchain-protocol', `kayl/in-78x-t${i}-branch`)
+      invokeRedraw()
+      board.updatePR(`k${i}`, { prLoc: 1200, phase: 'reviewing' })
+      invokeRedraw()
+      board.updatePR(`k${i}`, { phase: 'reviewed', verdict: 'APPROVE', commentCount: 4, crTokens: 16400 })
+      board.completePR(`k${i}`, { elapsedMs: 100_000, url: `https://github.com/humanbased-ai/codatta-onchain-protocol/pull/${150 + i}` })
+      invokeRedraw()
+    }
+    board.log('PR #160 synchronize', 'origin=claude via=author_routes reviewer=claude')
+    invokeRedraw()
+    invokeRedraw()
+
+    const { scrollback } = emulateVT(captured.join(''), ROWS, COLS)
+    const liveOnlyMarkers = ['crosscheck', 'workflow:', 'vendors:', 'PRs:', 'tunnel:']
+    const residue = scrollback.filter(l => liveOnlyMarkers.some(m => l.includes(m)))
+    expect(residue).toEqual([])
+  })
+})
+
+// Minimal VT emulator: LF scrolls at the bottom row, CUU clamps at the viewport
+// top, ED-0J clears cursor→end-of-screen, autowrap is deferred at the last
+// column. Rows pushed off the top are collected as scrollback.
+function emulateVT(data: string, rows: number, cols: number): { scrollback: string[]; screen: string[] } {
+  const screen: string[][] = Array.from({ length: rows }, () => [])
+  let r = 0, c = 0, pendingWrap = false
+  const scrollback: string[] = []
+  const flush = (row: string[]) => row.map(ch => ch ?? ' ').join('').replace(/\s+$/, '')
+  const lineFeed = (): void => {
+    if (r === rows - 1) { scrollback.push(flush(screen[0])); screen.shift(); screen.push([]) }
+    else r++
+  }
+  let i = 0
+  while (i < data.length) {
+    const ch = data[i]
+    if (ch === '\x1B') {
+      const m = /^\x1B\[([0-9;]*)([A-Za-z])/.exec(data.slice(i))
+      if (m) {
+        const [full, params, cmd] = m
+        if (cmd === 'A') { r = Math.max(0, r - (parseInt(params || '1', 10) || 1)); pendingWrap = false }
+        else if (cmd === 'J') {
+          screen[r] = screen[r].slice(0, c)
+          for (let k = r + 1; k < rows; k++) screen[k] = []
+          pendingWrap = false
+        }
+        i += full.length
+        continue
+      }
+      i++
+      continue
+    }
+    if (ch === '\n') { c = 0; pendingWrap = false; lineFeed(); i++; continue }
+    if (ch === '\r') { c = 0; pendingWrap = false; i++; continue }
+    if (pendingWrap) { c = 0; pendingWrap = false; lineFeed() }
+    screen[r][c] = ch
+    if (c === cols - 1) pendingWrap = true
+    else c++
+    i++
+  }
+  return { scrollback, screen: screen.map(flush) }
+}
