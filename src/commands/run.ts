@@ -16,6 +16,7 @@ import { hintForError } from '../lib/remediation.js'
 import { runWorkflow } from '../lib/runner.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
+import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
@@ -214,6 +215,12 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   const spinner = ora(`Fetching PR #${number}...`).start()
   const octokit = createGithubClient(token)
   const { data: prData } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
+  const closedSkip = closedPRSkip(prData)
+  if (closedSkip) {
+    spinner.info(`PR #${number} is ${closedSkip.status} — nothing to do`)
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: closedSkip.reason })
+    return
+  }
   if (opts.expectedHeadSha !== undefined && prData.head.sha !== opts.expectedHeadSha) {
     spinner.warn(`PR #${number} head changed since selection — skipping stale_signature`)
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'stale_signature', expected_sha: opts.expectedHeadSha, actual_sha: prData.head.sha })
