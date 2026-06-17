@@ -644,6 +644,6 @@ describe('resolveCliInvocation', () => {
       execPath: '/usr/local/bin/node',
       exists: path => path === '/repo/src/cli.ts',
       urlToPath: url => url.pathname,
-    })).toThrow('Cannot run kickass actions from a TypeScript entrypoint')
+    })).toThrow('Cannot run crosscheck actions from a TypeScript entrypoint')
   })
 })

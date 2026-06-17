@@ -2877,6 +2877,7 @@ Phase 3: `--build` — full autonomous contribution. Requires careful scoping of
 - [ ] **Per-repo routing overrides** — allow different quality tiers or reviewers per repo in config
 - [ ] **Slack/email notification** — optional ping when a review is posted
 - [ ] **Graduate `serve` out of beta** — battle-test on an always-on machine, document pm2/launchd setup
+- [ ] **`crosscheck run` early PR-fetch is unguarded** — in `runRun`, the initial `octokit.rest.pulls.get` (before the workflow try/catch) is not wrapped, so a 404/401/network failure crashes the process with a raw V8 unhandled-rejection dump instead of the clean `✗ <message>` + exit code path used elsewhere. Surfaced while building the multi-PR fan-out (a bad PR in a spec prints the raw dump in the captured child output). Wrap the fetch and route failures through the same `logError`/`chalk.red`/`process.exit(2)` boundary as the rest of the command. Low risk, contained to `src/commands/run.ts`.
 
 ### ✅ Done
 

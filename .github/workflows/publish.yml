@@ -15,7 +15,6 @@ jobs:
     name: Publish @beta
     if: github.ref == 'refs/heads/staging'
     runs-on: ubuntu-latest
-    environment: staging
     # id-token: write enables npm --provenance (signed attestation linking the
     # tarball to this workflow run) and is also a prerequisite if the @humanbased
     # scope is ever migrated to npm Trusted Publishers (OIDC-only, no NPM_TOKEN).

@@ -335,10 +335,17 @@ export async function runWatch(opts: WatchOpts = {}) {
       // Exception: comment-triggered runs must always do live detection —
       // reviewedPRKeys is SHA-agnostic and would misroute a kickass review
       // annotation for a new SHA as a recheck run instead of routing to fix.
+      // auto_loop runs also skip the session fast-path so history detection
+      // picks the correct starting step (fix, not recheck); round is instead
+      // incremented from prRoundCounts to match the completed round count.
       let isRecheckRun = params.action === 'comment'
         ? reviewedPRShaKeys.has(key)    // SHA-specific: already processed this exact sha
+        : params.action === 'auto_loop'
+        ? false                          // always use history detection for auto-loop rounds
         : reviewedPRKeys.has(prKey)     // session fast-path for webhook/backtrace events
-      let round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
+      let round = params.action === 'auto_loop'
+        ? (prRoundCounts.get(prKey) ?? 1) + 1
+        : isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
       let resolvedSteps: WorkflowStep[] | undefined
       let detectedReviewComment: { id?: number; body: string } | undefined
 
@@ -357,7 +364,10 @@ export async function runWatch(opts: WatchOpts = {}) {
           }
           if (nextResult.hasExistingReview) {
             isRecheckRun = nextResult.step.type !== 'review'
-            round = nextResult.round
+            // auto_loop pre-computed the correct incremented round from prRoundCounts;
+            // history detection returns the last recheck's round (unchanged across
+            // iterations), so overwriting here would defeat the max_rounds cap.
+            if (params.action !== 'auto_loop') round = nextResult.round
             detectedReviewComment = nextResult.reviewComment
             const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
             if (nextStepIdx >= 0) {
@@ -381,9 +391,30 @@ export async function runWatch(opts: WatchOpts = {}) {
                 }
               }
               resolvedSteps = steps
+            } else if (nextResult.step.type === 'recheck') {
+              // identifyNextWorkflowStep returned a synthetic recheck (fixedCurrentSha
+              // path) but the type 'recheck' is not in allSteps, so nextStepIdx === -1.
+              // Build resolvedSteps directly here so runWorkflow uses
+              // DEFAULT_RECHECK_INSTRUCTIONS rather than falling back to a coerced
+              // review step with review instructions.
+              const deliveryMode = config.post_review.auto_fix.delivery.mode
+              if (deliveryMode === 'commit') {
+                const reviewStep = allSteps.find(s => s.type === 'review')
+                if (reviewStep) {
+                  resolvedSteps = [{
+                    ...reviewStep, name: 'recheck', type: 'recheck' as const, reviewer,
+                    when: undefined, instructions: DEFAULT_RECHECK_INSTRUCTIONS,
+                  }]
+                }
+              }
             }
           }
-        } catch { /* best-effort — fall back to session-based detection */ }
+        } catch {
+          // best-effort — fall back to session-based detection.
+          // For auto_loop, force isRecheckRun=true so a transient history-fetch
+          // failure does not restart the workflow from the review step.
+          if (params.action === 'auto_loop') isRecheckRun = true
+        }
       }
 
       const reviewStart = Date.now()
@@ -440,7 +471,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         board.updatePR(key, { prLoc })
         stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
-        const { verdict } = await runWorkflow({
+        const { verdict, fixAppliedCount } = await runWorkflow({
           owner, repoName, prNumber, pr,
           tmpDir, token, config: effectiveConfig, origin,
           reviewStart,
@@ -469,12 +500,37 @@ export async function runWatch(opts: WatchOpts = {}) {
         // so the pre-workflow hash may not represent the content that was actually
         // reviewed. Caching the stale hash would cause a later force-push back to
         // the pre-mutation diff to be skipped incorrectly as `no_diff_change`.
-        if (newDiffHash) {
-          let reviewedHash: string | null = null
+        // Capture the fix commit SHA independently of diff-hash availability.
+        // fixCommitSha must be set even when newDiffHash is null (e.g. shallow
+        // clone, base-branch fetch skipped) so the auto-loop can still fire after
+        // a successful commit-mode fix in those environments.
+        const deliveryMode = effectiveConfig.post_review.auto_fix.delivery.mode
+        let fixCommitSha: string | null = null
+        if (fixAppliedCount && deliveryMode === 'commit') {
           try {
-            reviewedHash = computeDiffHash(tmpDir, params.baseRef)
-          } catch { /* base unavailable post-workflow — skip cache update */ }
-          if (reviewedHash) diffHashes.upsert(prKey, { sha: params.headSha, hash: reviewedHash })
+            const headSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
+            if (headSha !== params.headSha) fixCommitSha = headSha
+          } catch { /* fall back — skip auto-loop this cycle */ }
+        }
+        if (newDiffHash) {
+          // For non-commit delivery with an applied fix the checkout may be on a fix
+          // branch; computeDiffHash would return the post-fix diff, not the original PR
+          // diff. Caching that under prKey corrupts future no_diff_change checks for the
+          // original PR. Only update the cache when no fix was applied, or delivery is
+          // commit (fix stays on the same branch/checkout).
+          if (!fixAppliedCount || deliveryMode === 'commit') {
+            let reviewedHash: string | null = null
+            try {
+              reviewedHash = computeDiffHash(tmpDir, params.baseRef)
+            } catch { /* base unavailable post-workflow — skip cache update */ }
+            if (reviewedHash) {
+              // When a fix was applied the HEAD advanced; cache the new SHA so the
+              // auto-loop call on that SHA correctly sees prev.sha === headSha and
+              // skips the no_diff_change guard (which would otherwise block round 2+).
+              const reviewedSha = fixCommitSha ?? params.headSha
+              diffHashes.upsert(prKey, { sha: reviewedSha, hash: reviewedHash })
+            }
+          }
         }
         board.completePR(key, {
           elapsedMs: Date.now() - reviewStart,
@@ -485,6 +541,41 @@ export async function runWatch(opts: WatchOpts = {}) {
         notifyReviewSuccess(reviewer, bLog)
         stopHeartbeat()
         await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+        // Auto-loop: if verdict is non-APPROVE, fixes were applied, and max_rounds
+        // allows another iteration, trigger the next round directly. This makes
+        // max_rounds behave as an autonomous fix→recheck cycle count rather than
+        // requiring a human push to start each subsequent round.
+        // Only safe under commit delivery — pull_request delivery leaves the local
+        // checkout on a separate fix branch, so git rev-parse HEAD is not the PR
+        // head and fixCommitSha would be wrong. Also verify the live PR head on
+        // GitHub matches before scheduling to guard against the PR advancing
+        // concurrently while the recheck was running.
+        if (verdict && verdict !== 'APPROVE' && fixCommitSha) {
+          if (deliveryMode === 'commit') {
+            const allSteps = loadWorkflow(process.cwd())
+            const fixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
+            const maxRounds = fixRecheckSteps.length > 0
+              ? Math.min(...fixRecheckSteps.map(s => s.max_rounds ?? 1))
+              : 1
+            // Also allow when round === maxRounds but the current run had no recheck
+            // step (workflow.yml has fix but not recheck). The next auto_loop invocation
+            // will run only the synthetic recheck; it pushes no new commit so the outer
+            // fixCommitSha guard prevents any further scheduling after that recheck.
+            const effectiveSteps = resolvedSteps ?? allSteps
+            const ranRecheck = effectiveSteps.some(s => s.type === 'recheck')
+            if (round < maxRounds || !ranRecheck) {
+              let prHeadSha: string | null = null
+              try {
+                const { data: freshPR } = await lockOctokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+                prHeadSha = freshPR.head.sha
+              } catch { /* skip auto-loop if PR head is unverifiable */ }
+              if (prHeadSha === fixCommitSha) {
+                fileLog({ level: 'info', event: 'auto_loop_triggered', repo: `${owner}/${repoName}`, pr: prNumber, round, maxRounds, verdict, nextSha: fixCommitSha })
+                setImmediate(() => void reviewPR({ ...params, headSha: fixCommitSha!, action: 'auto_loop' }))
+              }
+            }
+          }
+        }
       } catch (err: unknown) {
         stopHeartbeat()
         const message = err instanceof Error ? err.message : String(err)

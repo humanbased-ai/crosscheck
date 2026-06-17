@@ -82,10 +82,20 @@ PR #49 opened: implement caching layer
 ```bash
 crosscheck init                     # 检查环境，生成初始配置文件
 crosscheck onboard                  # 引导式配置——选择仓库、模式和流水线
-crosscheck review <pr-url>          # 对指定 PR 进行一次性审查
+crosscheck review <pr-urls...>      # 审查一个或多个 PR（逗号列表、区间、跨仓库）
+crosscheck run <pr-urls...>         # 运行完整流水线：review → (fix → recheck) × max_rounds
+crosscheck recheck|fix|resolve <pr-urls...>   # 对一个或多个 PR 强制执行某个工作流步骤
 crosscheck watch                    # 个人使用——隧道 + 自动 Webhook + 本地监听
 crosscheck serve                    # 团队使用——固定端口，一次性注册 Webhook
 crosscheck status                   # 查看认证状态、配置摘要、CLI 版本
+```
+
+**多 PR 语法**：`run`、`review`、`recheck`、`fix`、`resolve` 的 PR 参数支持展开为多个 PR 的 **spec**——由逗号分隔的完整 URL、纯数字、`N-M` 区间组成。首个 token 必须是完整 URL（纯数字会继承最近一个仓库），最多展开 100 个 PR，多个 PR 默认并发执行（用 `--concurrent <n>` / `--sequential` / `--stagger <ms>` 控制）。
+
+```bash
+.../pull/245,255      # 同一仓库的两个 PR
+.../pull/245-256      # 区间（含端点）
+.../repo/pull/245,https://github.com/o/other/pull/3   # 跨仓库
 ```
 
 **持续改进** *（实验性）*

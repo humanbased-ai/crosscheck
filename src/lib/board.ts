@@ -725,9 +725,11 @@ export class PRBoard {
     const t = this.theme
     const tip = selectTip(this.stats.sessionStart)
 
-    const badge = tip.badge === 'new'
-      ? chalk.bold.cyanBright('new') + chalk.dim('  ')
-      : chalk.dim('tip  ')
+    const badge = tip.badge === 'fire'
+      ? chalk.bold.yellow('🔥 NEW') + chalk.dim('  ')
+      : tip.badge === 'new'
+        ? chalk.bold.cyanBright('new') + chalk.dim('  ')
+        : chalk.dim('tip  ')
 
     // Backtick-enclosed spans in accent colour; surrounding prose in dim
     const parts = tip.text.split(/(`[^`]+`)/)
