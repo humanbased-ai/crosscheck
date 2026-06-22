@@ -26,6 +26,7 @@ import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
+const GIT_PUSH_RETRY_DELAY_MS = 3000
 
 // Per-vendor configured timeout (seconds) → execa milliseconds, or undefined when
 // unset so the reviewer falls back to its built-in default. A per-run override
@@ -406,6 +407,79 @@ function emitPRComplexity(ctx: WorkflowContext, triggerField: Record<string, unk
       ...triggerField,
     })
   } catch { /* best-effort — never fail the workflow for a logging event */ }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Detect non-fast-forward git push errors that indicate upstream commits
+function isNonFastForwardError(message: string): boolean {
+  return /rejected.*fetch first|updates were rejected.*remote contains work|non-fast-forward/i.test(message)
+}
+
+// Push with handling for non-fast-forward rejection. When the remote has new
+// commits, we fetch + rebase onto the PR branch and retry the push once.
+async function pushWithNonFastForwardHandling(params: {
+  tmpDir: string
+  branch: string
+  token: string
+  log: (msg: string) => void
+  fileLog: (entry: Record<string, unknown>) => void
+  owner: string
+  repoName: string
+  prNumber: number
+}): Promise<void> {
+  const { tmpDir, branch, token, log, fileLog, owner, repoName, prNumber } = params
+  const env = { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token }
+  
+  try {
+    execSync(`git push origin HEAD:${branch}`, { cwd: tmpDir, env })
+  } catch (pushErr: unknown) {
+    const pushMsg = pushErr instanceof Error ? pushErr.message : String(pushErr)
+    
+    if (isNonFastForwardError(pushMsg)) {
+      // Non-fast-forward rejection — fetch latest and rebase
+      fileLog({
+        level: 'warn',
+        event: 'push_non_fast_forward',
+        repo: `${owner}/${repoName}`,
+        pr: prNumber,
+        branch,
+      })
+      log(chalk.yellow(`⚠  push rejected (non-fast-forward) — fetching latest and rebasing...`))
+      
+      try {
+        // Fetch the latest state of the branch
+        execSync(`git fetch origin ${branch}`, { cwd: tmpDir, env, stdio: 'pipe' })
+        // Rebase our changes onto the latest branch state
+        execSync(`git rebase origin/${branch}`, { cwd: tmpDir, env, stdio: 'pipe' })
+        // Retry the push
+        execSync(`git push origin HEAD:${branch}`, { cwd: tmpDir, env })
+        fileLog({
+          level: 'info',
+          event: 'push_rebase_succeeded',
+          repo: `${owner}/${repoName}`,
+          pr: prNumber,
+          branch,
+        })
+        return
+      } catch (rebaseErr: unknown) {
+        // Rebase failed — log and re-throw the original error
+        const rebaseMsg = rebaseErr instanceof Error ? rebaseErr.message : String(rebaseErr)
+        fileLog({
+          level: 'error',
+          event: 'push_rebase_failed',
+          repo: `${owner}/${repoName}`,
+          pr: prNumber,
+          branch,
+          error: rebaseMsg.slice(0, 500),
+        })
+        log(chalk.red(`✗  rebase failed: ${rebaseMsg.slice(0, 100)}`))
+      }
+    }
+    
+    // Re-throw original error
+    throw pushErr
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -808,9 +882,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           { cwd: tmpDir },
         )
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
-        execSync(`git push origin HEAD:${pr.head.ref}`, {
-          cwd: tmpDir,
-          env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
+        await pushWithNonFastForwardHandling({
+          tmpDir,
+          branch: pr.head.ref,
+          token,
+          log,
+          fileLog: (entry) => fileLog({ ...entry, phase: 'fix' } as any),
+          owner,
+          repoName,
+          prNumber,
         })
         ctx.crosscheckShas.add(newSha)
         // Set a pending status on the pushed commit only when a review/recheck
@@ -1064,9 +1144,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         { cwd: tmpDir },
       )
       const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
-      execSync(`git push origin HEAD:${pr.head.ref}`, {
-        cwd: tmpDir,
-        env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
+      await pushWithNonFastForwardHandling({
+        tmpDir,
+        branch: pr.head.ref,
+        token,
+        log,
+        fileLog: (entry) => fileLog({ ...entry, phase: 'conflict-resolve' } as any),
+        owner,
+        repoName,
+        prNumber,
       })
       ctx.crosscheckShas.add(newSha)
       // Move the in-flight pending status to newSha so watchers on other
