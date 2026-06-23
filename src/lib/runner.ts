@@ -21,7 +21,7 @@ import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
-import { isSubscriptionLimitError } from '../lib/smart-switch.js'
+import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
@@ -518,7 +518,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           log(chalk.yellow(`⚠  codex connection dropped — retrying in 30s...`))
           await new Promise<void>(r => setTimeout(r, 30_000))
           await runReviewWithVendor(reviewer)
-        } else if (!isSubscriptionLimitError(err)) {
+        } else if (!isSubscriptionLimitError(err) && !isVendorUnavailableError(err)) {
           throw err
         } else {
           const failedVendor = reviewer
@@ -539,7 +539,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             fallback_vendor: fallbackVendor,
             reason: reason.slice(0, 300),
           })
-          log(chalk.yellow(`⚠  ${failedVendor} hit a usage limit — switching ${effectiveType} step to ${fallbackVendor}`))
+          log(chalk.yellow(`⚠  ${failedVendor} ${isSubscriptionLimitError(err) ? 'hit a usage limit' : 'is unavailable'} — switching ${effectiveType} step to ${fallbackVendor}`))
           reviewer = fallbackVendor
           onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
           await runReviewWithVendor(reviewer)
