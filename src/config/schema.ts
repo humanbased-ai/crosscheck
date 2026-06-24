@@ -28,11 +28,11 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
 
 export const QualityConfigSchema = z.object({
   tier: z.enum(['fast', 'balanced', 'thorough']).default('balanced'),
-  // fixed: every agent call uses the same tier (legacy behaviour, default).
+  // fixed: every agent call uses the same tier (legacy behaviour; applied when unset).
   // smart: the effective tier is chosen per-call based on diff size, prior
   //        BLOCK verdicts, and step type — reducing cost on small/low-risk PRs
   //        while still promoting hard calls to stronger models.
-  mode: z.enum(['fixed', 'smart']).default('fixed'),
+  mode: z.enum(['fixed', 'smart']).optional(),
   focus: z.array(z.string()).default([]),
   custom_prompt: z.string().optional(),
 })
