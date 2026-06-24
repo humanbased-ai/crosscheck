@@ -12,6 +12,7 @@ export const WorkflowStepSchema = z.object({
   when: z.string().optional(),
   max_rounds: z.number().int().positive().default(1),
   instructions: z.string().optional(),
+  harness: z.string().optional(),
 })
 
 export const WorkflowSchema = z.object({
@@ -92,8 +93,8 @@ export function loadHarnessSection(ref: string, baseDir?: string): string | null
   const searchDirs = [
     ...(baseDir ? [join(baseDir, '.crosscheck', 'harness'), join(baseDir, 'harness')] : []),
     join(homedir(), '.crosscheck', 'harness'),
-    // Built-in bundled harness shipped alongside the package
-    new URL('../../harness', import.meta.url).pathname,
+    // Built-in bundled harness shipped alongside the package (dist/harness when built, src/harness in dev)
+    new URL('../harness', import.meta.url).pathname,
   ]
   for (const dir of searchDirs) {
     const harnesPath = join(dir, filePart)
@@ -123,7 +124,13 @@ export function loadWorkflow(operatorDir?: string): WorkflowStep[] {
     if (!existsSync(path)) continue
     try {
       const raw = yaml.load(readFileSync(path, 'utf8'))
-      return WorkflowSchema.parse(raw).steps
+      const steps = WorkflowSchema.parse(raw).steps
+      // Resolve any `harness: file.md#section` ref into the step's instructions.
+      return steps.map(step => {
+        if (!step.harness) return step
+        const resolved = loadHarnessSection(step.harness, operatorDir)
+        return resolved ? { ...step, instructions: resolved } : step
+      })
     } catch {
       // Malformed workflow file — fall through to default
     }

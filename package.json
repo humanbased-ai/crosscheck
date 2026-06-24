@@ -23,7 +23,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc && chmod +x dist/cli.js dist/ck.js",
+    "build": "tsc && cp -r src/harness dist/harness && chmod +x dist/cli.js dist/ck.js",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
