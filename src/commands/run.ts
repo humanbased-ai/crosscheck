@@ -477,7 +477,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
     let workflowError: unknown
     try {
-      clonePRForReview({
+      await clonePRForReview({
         owner, repo, prNumber: number, baseRef: prData.base.ref,
         tmpDir, token, protocol: config.clone_protocol,
         onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref }),
