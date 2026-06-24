@@ -12,6 +12,9 @@ export const WorkflowStepSchema = z.object({
   when: z.string().optional(),
   max_rounds: z.number().int().positive().default(1),
   instructions: z.string().optional(),
+  // Optional harness section injected into the agent, format: <file>.md#<section>.
+  // Overrides the default per-step instructions when specified.
+  harness: z.string().optional(),
 })
 
 export const WorkflowSchema = z.object({
