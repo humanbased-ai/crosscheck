@@ -17,7 +17,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     repos: [],
     routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], allowed_authors: [], author_routes: {}, fallback_reviewer: 'auto' },
     server: { port: 7892, webhook_path: '/webhook' },
-    quality: { tier: 'balanced', focus: [], custom_prompt: undefined },
+    quality: { tier: 'balanced', mode: 'fixed', focus: [], custom_prompt: undefined },
     budget: { codex_monthly_usd: null, per_review_usd: 1 },
     vendors: {
       claude: { enabled: claudeEnabled, model: null, auth: 'subscription', effort: 'medium', timeout_sec: null },
@@ -125,7 +125,7 @@ describe('deriveConfigChanges', () => {
   function makeFullConfig(tier: 'fast' | 'balanced' | 'thorough', budgetUsd = 2): Config {
     return {
       ...makeConfig(true, true),
-      quality: { tier, focus: [], custom_prompt: undefined },
+      quality: { tier, mode: 'fixed', focus: [], custom_prompt: undefined },
       budget: { codex_monthly_usd: null, per_review_usd: budgetUsd },
     }
   }
