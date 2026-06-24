@@ -80,6 +80,37 @@ export const DEFAULT_WORKFLOW: WorkflowStep[] = [
   },
 ]
 
+/**
+ * Loads a named section from a harness markdown file.
+ * Sections are delimited by `## <name>` headings (level 2).
+ * Returns the section body (trimmed), or null if the file/section is not found.
+ * Throws if the file exists but cannot be read.
+ */
+export function loadHarnessSection(ref: string, baseDir?: string): string | null {
+  const [filePart, section] = ref.split('#')
+  if (!filePart || !section) return null
+  const searchDirs = [
+    ...(baseDir ? [join(baseDir, '.crosscheck', 'harness'), join(baseDir, 'harness')] : []),
+    join(homedir(), '.crosscheck', 'harness'),
+    // Built-in bundled harness shipped alongside the package
+    new URL('../../harness', import.meta.url).pathname,
+  ]
+  for (const dir of searchDirs) {
+    const harnesPath = join(dir, filePart)
+    if (!existsSync(harnesPath)) continue
+    const raw = readFileSync(harnesPath, 'utf8')
+    const sectionRegex = new RegExp(`^## ${section}\s*$`, 'm')
+    const nextSectionRegex = /^## /m
+    const start = raw.search(sectionRegex)
+    if (start === -1) return null
+    const afterHeading = raw.slice(start).indexOf('\n') + start + 1
+    const rest = raw.slice(afterHeading)
+    const nextMatch = rest.search(nextSectionRegex)
+    return (nextMatch === -1 ? rest : rest.slice(0, nextMatch)).trim()
+  }
+  return null
+}
+
 export function loadWorkflow(operatorDir?: string): WorkflowStep[] {
   // Only look in operator-controlled directories — never inside the PR checkout.
   // Loading workflow config from untrusted PR code would let a PR hijack the runner.
