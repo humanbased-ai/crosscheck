@@ -5,13 +5,13 @@ Reference individual sections in `workflow.yml` using `harness: default.md#<sect
 
 ## review
 
-## Constraints
+### Constraints
 - Do not run tsc, ts-node, or build commands — inspect source files directly with git diff/log.
 - Do not install packages or modify lock files.
-## Output format
-Structure your output as: ## Summary, ## Critical Issues, ## Warnings, ## Suggestions.
+### Output format
+Structure your output as: ### Summary, ### Critical Issues, ### Warnings, ### Suggestions.
 Be concise. Skip praise.
-## Verdict (required — machine-parsed)
+### Verdict (required — machine-parsed)
 The very last line of your response MUST be exactly one of these three lines.
 Do not add bold, italics, punctuation, headers, or any other text after it:
 VERDICT: APPROVE
