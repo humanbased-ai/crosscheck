@@ -26,6 +26,7 @@ import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
+const REVIEW_RETRY_DELAY_MS = 2 * 60 * 1000
 
 // Per-vendor configured timeout (seconds) → execa milliseconds, or undefined when
 // unset so the reviewer falls back to its built-in default. A per-run override
@@ -40,6 +41,14 @@ function vendorTimeoutMs(timeoutSec: number | null): number | undefined {
 export function isRetryableFixError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err)
   return !/auth failure|not logged in|claude auth/i.test(msg) && !isSubscriptionLimitError(err)
+}
+
+// Transient model API errors (rate-limit 429, overloaded 529) are safe to retry
+// with a delay. Auth, budget, and subscription-limit errors are operator/capacity
+// issues that don't self-heal and should surface immediately.
+function isTransientApiError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /\b429\b|rate.?limit|\b529\b|overloaded/i.test(msg)
 }
 
 // When a PR has already been reviewed, subsequent webhook runs treat every
@@ -517,6 +526,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           fileLog({ level: 'warn', event: 'review_reconnect_retry', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity })
           log(chalk.yellow(`⚠  codex connection dropped — retrying in 30s...`))
           await new Promise<void>(r => setTimeout(r, 30_000))
+          await runReviewWithVendor(reviewer)
+        } else if (isTransientApiError(err)) {
+          fileLog({ level: 'warn', event: 'review_transient_retry', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity })
+          log(chalk.yellow(`⚠  transient API error — retrying ${effectiveType} step in 2 min...`))
+          onPhaseChange('retry in 2 min...', { phase: startPhase })
+          await new Promise<void>(resolve => setTimeout(resolve, REVIEW_RETRY_DELAY_MS))
+          onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'} (retry)...`, { phase: startPhase })
           await runReviewWithVendor(reviewer)
         } else if (!isSubscriptionLimitError(err)) {
           throw err
