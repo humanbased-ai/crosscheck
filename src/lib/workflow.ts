@@ -94,7 +94,7 @@ export function loadHarnessSection(ref: string, baseDir?: string): string | null
     ...(baseDir ? [join(baseDir, '.crosscheck', 'harness'), join(baseDir, 'harness')] : []),
     join(homedir(), '.crosscheck', 'harness'),
     // Built-in bundled harness shipped alongside the package (dist/harness when built, src/harness in dev)
-    new URL('../harness', import.meta.url).pathname,
+    decodeURIComponent(new URL('../harness', import.meta.url).pathname),
   ]
   for (const dir of searchDirs) {
     const harnesPath = join(dir, filePart)
