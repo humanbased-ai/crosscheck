@@ -1,0 +1,44 @@
+name: Promote staging → main
+
+on:
+  schedule:
+    - cron: '0 18 * * 5'   # Every Friday at 18:00 UTC
+  workflow_dispatch:
+
+jobs:
+  promote:
+    name: Merge staging into main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check if staging is ahead of main
+        id: check
+        run: |
+          git fetch origin main staging
+          AHEAD=$(git rev-list origin/main..origin/staging --count)
+          echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
+          if [ "$AHEAD" = "0" ]; then
+            echo "staging is already up to date with main — nothing to promote"
+          else
+            echo "staging is $AHEAD commits ahead of main"
+          fi
+
+      - name: Merge staging into main
+        if: steps.check.outputs.ahead != '0'
+        run: |
+          git checkout -B main origin/main
+          git merge origin/staging --no-ff \
+            -m "chore: weekly staging → main promotion ($(date -u +%Y-%m-%d))"
+          git push origin main
