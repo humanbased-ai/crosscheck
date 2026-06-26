@@ -544,7 +544,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           }
 
           if (fallbackErr !== null) {
-            if (!isSubscriptionLimitError(fallbackErr) && !isTransientApiError(fallbackErr)) throw fallbackErr
+            if (!isSubscriptionLimitError(fallbackErr)) throw fallbackErr
 
             const failedVendor = reviewer
             const fallbackVendor = resolveLimitFallbackVendor(failedVendor, effectiveType, config)
