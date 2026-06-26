@@ -527,38 +527,48 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           log(chalk.yellow(`⚠  codex connection dropped — retrying in 30s...`))
           await new Promise<void>(r => setTimeout(r, 30_000))
           await runReviewWithVendor(reviewer)
-        } else if (isTransientApiError(err)) {
-          fileLog({ level: 'warn', event: 'review_transient_retry', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity })
-          log(chalk.yellow(`⚠  transient API error — retrying ${effectiveType} step in 2 min...`))
-          onPhaseChange('retry in 2 min...', { phase: startPhase })
-          await new Promise<void>(resolve => setTimeout(resolve, REVIEW_RETRY_DELAY_MS))
-          onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'} (retry)...`, { phase: startPhase })
-          await runReviewWithVendor(reviewer)
-        } else if (!isSubscriptionLimitError(err)) {
-          throw err
         } else {
-          const failedVendor = reviewer
-          const fallbackVendor = resolveLimitFallbackVendor(failedVendor, effectiveType, config)
-          const reason = err instanceof Error ? err.message : String(err)
-          ctx.onVendorLimit?.(failedVendor, fallbackVendor, reason, step.name)
+          let fallbackErr: unknown = err
+          if (isTransientApiError(err)) {
+            fileLog({ level: 'warn', event: 'review_transient_retry', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity })
+            log(chalk.yellow(`⚠  transient API error — retrying ${effectiveType} step in 2 min...`))
+            onPhaseChange('retry in 2 min...', { phase: startPhase })
+            await new Promise<void>(resolve => setTimeout(resolve, REVIEW_RETRY_DELAY_MS))
+            onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'} (retry)...`, { phase: startPhase })
+            try {
+              await runReviewWithVendor(reviewer)
+              fallbackErr = null
+            } catch (retryErr: unknown) {
+              fallbackErr = retryErr
+            }
+          }
 
-          if (!fallbackVendor) throw err
+          if (fallbackErr !== null) {
+            if (!isSubscriptionLimitError(fallbackErr)) throw fallbackErr
 
-          fileLog({
-            level: 'warn',
-            event: 'vendor_fallback',
-            repo: `${owner}/${repoName}`,
-            pr: prNumber,
-            step: step.name,
-            step_type: effectiveType,
-            failed_vendor: failedVendor,
-            fallback_vendor: fallbackVendor,
-            reason: reason.slice(0, 300),
-          })
-          log(chalk.yellow(`⚠  ${failedVendor} hit a usage limit — switching ${effectiveType} step to ${fallbackVendor}`))
-          reviewer = fallbackVendor
-          onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
-          await runReviewWithVendor(reviewer)
+            const failedVendor = reviewer
+            const fallbackVendor = resolveLimitFallbackVendor(failedVendor, effectiveType, config)
+            const reason = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+            ctx.onVendorLimit?.(failedVendor, fallbackVendor, reason, step.name)
+
+            if (!fallbackVendor) throw fallbackErr
+
+            fileLog({
+              level: 'warn',
+              event: 'vendor_fallback',
+              repo: `${owner}/${repoName}`,
+              pr: prNumber,
+              step: step.name,
+              step_type: effectiveType,
+              failed_vendor: failedVendor,
+              fallback_vendor: fallbackVendor,
+              reason: reason.slice(0, 300),
+            })
+            log(chalk.yellow(`⚠  ${failedVendor} hit a usage limit — switching ${effectiveType} step to ${fallbackVendor}`))
+            reviewer = fallbackVendor
+            onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
+            await runReviewWithVendor(reviewer)
+          }
         }
       }
 
