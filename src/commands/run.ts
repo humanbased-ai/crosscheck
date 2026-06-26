@@ -455,6 +455,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       if (await checkRemoteLock(octokit, owner, repo, sha)) {
         releasePRLock(owner, repo, number, sha)
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote' })
+        fileLog({ level: 'warn', event: 'lock_busy', repo: `${owner}/${repo}`, pr: number, sha })
         console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed on another machine — skipping`))
         return
       }
@@ -571,6 +572,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
             stopHeartbeat()
             if (await checkRemoteLock(octokit, owner, repo, loopSha)) {
               fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote', mode, round: loopRound })
+              fileLog({ level: 'warn', event: 'lock_busy', repo: `${owner}/${repo}`, pr: number, sha: loopSha, round: loopRound })
               console.log(chalk.yellow(`⚠  PR #${number} head ${loopSha.slice(0, 7)} is already locked — stopping loop`))
               break
             }
@@ -674,6 +676,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
               stopHeartbeat()
               if (await checkRemoteLock(octokit, owner, repo, loopSha)) {
                 fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote', round: loopRound })
+                fileLog({ level: 'warn', event: 'lock_busy', repo: `${owner}/${repo}`, pr: number, sha: loopSha, round: loopRound })
                 console.log(chalk.yellow(`⚠  PR #${number} head ${loopSha.slice(0, 7)} is already locked — stopping loop`))
                 break
               }
