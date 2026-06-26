@@ -13,16 +13,46 @@ export function redactCloneSecrets(value: string): string {
   return value.replace(/https:\/\/x-access-token:[^@\s]+@github\.com\//g, 'https://x-access-token:[REDACTED]@github.com/')
 }
 
-function runGit(args: string[], cwd?: string): void {
-  try {
-    execFileSync('git', args, { cwd, stdio: 'pipe' })
-  } catch (err) {
-    if (!(err instanceof Error)) throw err
-    const redacted = redactCloneSecrets(err.message)
-    const wrapped = new Error(redacted)
-    wrapped.stack = err.stack ? redactCloneSecrets(err.stack) : undefined
-    throw wrapped
+// Detect transient git clone errors that should be retried:
+// - curl 16: Error in the HTTP2 framing layer
+// - curl 18: Transferred a partial file / early EOF
+// - RPC failed, fetch-pack: unexpected disconnect
+function isTransientGitError(message: string): boolean {
+  const m = message.toLowerCase()
+  return /curl 16|http2 framing|curl 18|partial file|early eof|rpc failed|unexpected disconnect|fetch-pack: invalid|bytes of body.*expected/.test(m)
+}
+
+const MAX_GIT_RETRIES = 3
+const GIT_RETRY_DELAY_MS = 2000
+
+function runGit(args: string[], cwd?: string, retryable = false): void {
+  let lastErr: Error | undefined
+  for (let attempt = 1; attempt <= (retryable ? MAX_GIT_RETRIES : 1); attempt++) {
+    try {
+      execFileSync('git', args, { cwd, stdio: 'pipe' })
+      return
+    } catch (err) {
+      if (!(err instanceof Error)) throw err
+      const redacted = redactCloneSecrets(err.message)
+      
+      if (retryable && isTransientGitError(redacted) && attempt < MAX_GIT_RETRIES) {
+        // Transient error — wait and retry
+        const delay = GIT_RETRY_DELAY_MS * attempt // exponential backoff: 2s, 4s, 6s
+        // eslint-disable-next-line no-console
+        console.error(`git: transient error (attempt ${attempt}/${MAX_GIT_RETRIES}), retrying in ${delay / 1000}s...`)
+        // Small delay before retry — using sync sleep for simplicity in this utility
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay)
+        lastErr = new Error(redacted)
+        lastErr.stack = err.stack ? redactCloneSecrets(err.stack) : undefined
+        continue
+      }
+      
+      const wrapped = new Error(redacted)
+      wrapped.stack = err.stack ? redactCloneSecrets(err.stack) : undefined
+      throw wrapped
+    }
   }
+  if (lastErr) throw lastErr
 }
 
 // Clone the repo, fetch & checkout the PR head, and fetch the base ref into
@@ -40,7 +70,8 @@ export function clonePRForReview(params: {
 }): void {
   const { owner, repo, prNumber, baseRef, tmpDir, token, protocol, onBaseFetchFailed } = params
   const cloneUrl = buildCloneUrl(owner, repo, token, protocol)
-  runGit(['clone', '--depth=50', '--quiet', cloneUrl, tmpDir])
+  // Clone is retryable — transient network issues (curl 16/18, framing errors) are common
+  runGit(['clone', '--depth=50', '--quiet', cloneUrl, tmpDir], undefined, true)
   runGit(['fetch', 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir)
   runGit(['checkout', `pr-${prNumber}`], tmpDir)
   // Fetch base after PR checkout so we are never on the base branch during the fetch

@@ -16,7 +16,8 @@ export type ErrorCategory =
   | 'overloaded'  // 529 — upstream model API temporarily overloaded
   | 'budget'      // per-review budget cap reached (claude --max-budget-usd)
   | 'timeout'     // subprocess or network timeout
-  | 'network'     // connection refused, DNS failure
+  | 'network'     // connection refused, DNS failure, git framing errors
+  | 'git'         // git-specific errors (non-fast-forward, clone failures)
   | 'subprocess'  // CLI exited non-zero
   | 'unknown'
 
@@ -88,6 +89,9 @@ export function classifyError(message: string): ErrorCategory {
   if (/rate limit|secondary rate|\b429\b/.test(m)) return 'rate_limit'
   if (/\b529\b|overloaded/.test(m)) return 'overloaded'
   if (/maximum budget|budget (?:exhausted|exceeded)|error_max_budget|reached maximum budget/.test(m)) return 'budget'
+  // Git-specific errors (non-fast-forward, clone failures) — checked before auth
+  // since git errors may contain "token" in the URL but aren't auth issues.
+  if (/rejected.*fetch first|updates were rejected.*remote contains work|non-fast-forward|curl 16|curl 18|http2 framing|early eof|rpc failed|fetch-pack: invalid/.test(m)) return 'git'
   if (/bad credentials|401|not logged in|not authenticated|github_token|authentication required|token|auth failure/.test(m)) return 'auth'
   if (/admin:org|admin:repo|forbidden|403|insufficient scope|requires.*scope|write:org/.test(m)) return 'permission'
   // Network check must precede timeout: subprocess stderr containing 'fetch failed'
