@@ -1,6 +1,14 @@
 import { execFileSync } from 'child_process'
 import type { Config } from '../config/schema.js'
 
+const GIT_RESILIENCE_ARGS = [
+  '-c', 'http.postBuffer=524288000',
+  '-c', 'http.lowSpeedLimit=1000',
+  '-c', 'http.lowSpeedTime=60',
+  '-c', 'http.keepAlive=true',
+  '-c', 'http.connectTimeout=30',
+]
+
 // Bypass `gh repo clone` so gh's keyring auth (which may bridge to VS Code's
 // GitHub extension) is never invoked. HTTPS embeds the token in the URL.
 function buildCloneUrl(owner: string, repo: string, token: string, protocol: Config['clone_protocol']): string {
@@ -58,7 +66,7 @@ function runGit(args: string[], cwd?: string, retryable = false): void {
 // Clone the repo, fetch & checkout the PR head, and fetch the base ref into
 // refs/remotes/origin/<base>. onBaseFetchFailed lets callers log a warning;
 // other failures bubble up.
-export function clonePRForReview(params: {
+export async function clonePRForReview(params: {
   owner: string
   repo: string
   prNumber: number
@@ -67,20 +75,23 @@ export function clonePRForReview(params: {
   token: string
   protocol: Config['clone_protocol']
   onBaseFetchFailed?: () => void
-}): void {
+}): Promise<void> {
   const { owner, repo, prNumber, baseRef, tmpDir, token, protocol, onBaseFetchFailed } = params
   const cloneUrl = buildCloneUrl(owner, repo, token, protocol)
-  // Clone is retryable — transient network issues (curl 16/18, framing errors) are common
-  runGit(['clone', '--depth=50', '--quiet', cloneUrl, tmpDir], undefined, true)
-  runGit(['fetch', 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir)
+  // Clone is retryable — transient network issues (curl 16/18, framing errors) are common.
+  // GIT_RESILIENCE_ARGS inline (-c flags) apply HTTP buffer/timeout settings without
+  // requiring a local repo to already exist.
+  runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', '--quiet', cloneUrl, tmpDir], undefined, true)
+  runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir)
   runGit(['checkout', `pr-${prNumber}`], tmpDir)
+
   // Fetch base after PR checkout so we are never on the base branch during the fetch
   // (git refuses to update a checked-out ref). Explicit refs/remotes/origin/<base>
   // target so the remote-tracking ref is always created — `git fetch origin <branch>`
   // alone only writes FETCH_HEAD in shallow clones when the branch is absent from
   // the default refspec mapping.
   try {
-    runGit(['fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir)
+    runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir)
   } catch {
     onBaseFetchFailed?.()
   }

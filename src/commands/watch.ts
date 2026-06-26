@@ -423,7 +423,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       let boardAdded = false
 
       try {
-        clonePRForReview({
+        await clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef,
           tmpDir, token, protocol: config.clone_protocol,
           onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef }),
