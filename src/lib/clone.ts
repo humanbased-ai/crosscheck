@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process'
+import { mkdirSync, rmSync } from 'fs'
 import type { Config } from '../config/schema.js'
 import { log } from './logger.js'
 
@@ -6,6 +7,14 @@ import { log } from './logger.js'
 const MAX_RETRIES = 3
 const INITIAL_RETRY_DELAY_MS = 1000
 const MAX_RETRY_DELAY_MS = 8000
+
+const GIT_RESILIENCE_ARGS = [
+  '-c', 'http.postBuffer=524288000',
+  '-c', 'http.lowSpeedLimit=1000',
+  '-c', 'http.lowSpeedTime=60',
+  '-c', 'http.keepAlive=true',
+  '-c', 'http.connectTimeout=30',
+]
 
 // Error patterns that indicate transient network issues suitable for retry
 const TRANSIENT_ERROR_PATTERNS = [
@@ -33,7 +42,7 @@ export function redactCloneSecrets(value: string): string {
   return value.replace(/https:\/\/x-access-token:[^@\s]+@github\.com\//g, 'https://x-access-token:[REDACTED]@github.com/')
 }
 
-function runGit(args: string[], cwd?: string, options?: { quiet?: boolean }): void {
+function runGit(args: string[], cwd?: string): void {
   try {
     execFileSync('git', args, { cwd, stdio: 'pipe' })
   } catch (err) {
@@ -45,17 +54,9 @@ function runGit(args: string[], cwd?: string, options?: { quiet?: boolean }): vo
   }
 }
 
-// Configure git for better network resilience before clone/fetch operations
-function configureGitForResilience(cwd?: string): void {
-  // Increase HTTP post buffer for large pushes
-  runGit(['config', 'http.postBuffer', '524288000'], cwd, { quiet: true })
-  // Set low speed limit to detect stalled connections (1000 bytes/sec for 60 sec)
-  runGit(['config', 'http.lowSpeedLimit', '1000'], cwd, { quiet: true })
-  runGit(['config', 'http.lowSpeedTime', '60'], cwd, { quiet: true })
-  // Enable TCP keepalive
-  runGit(['config', 'http.keepAlive', 'true'], cwd, { quiet: true })
-  // Increase connect timeout
-  runGit(['config', 'http.connectTimeout', '30'], cwd, { quiet: true })
+function resetCloneDestination(tmpDir: string): void {
+  rmSync(tmpDir, { recursive: true, force: true })
+  mkdirSync(tmpDir, { recursive: true })
 }
 
 // Sleep for a given number of milliseconds
@@ -86,14 +87,10 @@ export async function clonePRForReview(params: {
   const { owner, repo, prNumber, baseRef, tmpDir, token, protocol, onBaseFetchFailed } = params
   const cloneUrl = buildCloneUrl(owner, repo, token, protocol)
 
-  // Configure git for resilience in the temp directory
-  configureGitForResilience(tmpDir)
-
   // Clone with retry logic for transient network failures
-  let lastError: Error | undefined
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      runGit(['clone', '--depth=50', '--quiet', cloneUrl, tmpDir])
+      runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', '--quiet', cloneUrl, tmpDir])
       break // Success
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -111,8 +108,8 @@ export async function clonePRForReview(params: {
           repo: `${owner}/${repo}`,
           pr: prNumber,
         })
+        resetCloneDestination(tmpDir)
         await sleep(delay)
-        lastError = err as Error
       } else {
         // Non-transient error or max retries reached
         const wrapped = err instanceof Error ? err : new Error(message)
@@ -125,7 +122,7 @@ export async function clonePRForReview(params: {
   // Fetch PR head with retry logic
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      runGit(['fetch', 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir)
+      runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir)
       break // Success
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -144,7 +141,6 @@ export async function clonePRForReview(params: {
           pr: prNumber,
         })
         await sleep(delay)
-        lastError = err as Error
       } else {
         const wrapped = err instanceof Error ? err : new Error(message)
         wrapped.stack = err instanceof Error ? err.stack : undefined
@@ -161,7 +157,7 @@ export async function clonePRForReview(params: {
   // alone only writes FETCH_HEAD in shallow clones when the branch is absent from
   // the default refspec mapping.
   try {
-    runGit(['fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir)
+    runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir)
   } catch {
     onBaseFetchFailed?.()
   }
