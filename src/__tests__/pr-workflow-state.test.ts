@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { commitToRecord, identifyNextWorkflowStep, type StepRecord } from '../lib/pr-workflow-state.js'
+import { commitToRecord, decideReviewOnly, identifyNextWorkflowStep, type StepRecord } from '../lib/pr-workflow-state.js'
 import type { RawPRCommit } from '../github/client.js'
 import type { WorkflowStep } from '../lib/workflow.js'
 
@@ -213,5 +213,62 @@ describe('identifyNextWorkflowStep', () => {
 
     expect(next.step?.type).toBe('review')
     expect(next.round).toBe(2)
+  })
+})
+
+// crosscheck watch --only-review uses decideReviewOnly (NOT identifyNextWorkflowStep)
+// so it can never advance to fix/recheck. These cases lock the behaviors that mode
+// depends on: review a fresh PR, skip an already-reviewed SHA, re-review a new SHA,
+// and — critically — treat a fix-pushed SHA from another session as new content to
+// review rather than mistaking it for a recheck (the fixedCurrentSha bypass).
+describe('decideReviewOnly (--only-review)', () => {
+  it('reviews a fresh PR at round 1', () => {
+    expect(decideReviewOnly([], 'head-sha')).toEqual({ alreadyReviewed: false, round: 1 })
+  })
+
+  it('skips when the current SHA was already reviewed', () => {
+    const decision = decideReviewOnly([
+      record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'reviewed-sha', round: 1 }),
+    ], 'reviewed-sha')
+
+    expect(decision.alreadyReviewed).toBe(true)
+  })
+
+  it('re-reviews a new SHA at the next round', () => {
+    const decision = decideReviewOnly([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'old-sha', round: 1 }),
+    ], 'new-sha')
+
+    expect(decision).toEqual({ alreadyReviewed: false, round: 2 })
+  })
+
+  it('reviews a fix-pushed SHA as new content, not a recheck (fixedCurrentSha bypass)', () => {
+    // A prior non-only-review session reviewed sha-A (BLOCK) and pushed a fix to sha-B
+    // but never rechecked. decideReviewOnly must REVIEW sha-B (it was never reviewed),
+    // not skip it and not treat it as a recheck.
+    const decision = decideReviewOnly([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'sha-A', round: 1 }),
+      record({ type: 'fix', pushedSha: 'sha-B', round: 1, commentId: 101 }),
+    ], 'sha-B')
+
+    expect(decision).toEqual({ alreadyReviewed: false, round: 2 })
+  })
+
+  it('skips the fix-pushed SHA once it has been reviewed', () => {
+    const decision = decideReviewOnly([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'sha-A', round: 1 }),
+      record({ type: 'fix', pushedSha: 'sha-B', round: 1, commentId: 101 }),
+      record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-B', round: 2, commentId: 102 }),
+    ], 'sha-B')
+
+    expect(decision.alreadyReviewed).toBe(true)
+  })
+
+  it('matches short and long SHA forms by prefix', () => {
+    const decision = decideReviewOnly([
+      record({ type: 'review', sha: 'abc1234', round: 1 }),
+    ], 'abc1234def5678')
+
+    expect(decision.alreadyReviewed).toBe(true)
   })
 })

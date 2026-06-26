@@ -31,7 +31,7 @@ Built by [Humanbased](https://github.com/humanbased-ai). Read the field report: 
 - **Independent eyes, not self-review** — route Claude-authored PRs to Codex and vice versa. Self-review is exactly where early-victory failures hide.
 - **Review → Fix → Recheck, not just comments** — findings return to the author agent for repair; a clean recheck follows before merge. PRs move forward, not sideways.
 - **No new vendor** — runs through the `claude` and `codex` CLIs you already pay for. No per-review bill, no extra trust surface.
-- **Configurable for any team size** — review-only mode, review + fix, or the full loop. Personal laptop via `watch`, always-on server via `serve`, one-shot via `review`.
+- **Configurable for any team size** — review-only mode (`watch --only-review`), review + fix, or the full loop. Continuous monitoring via `watch`, one-shot via `review`.
 
 ## Who uses crosscheck
 
@@ -49,7 +49,7 @@ Built by [Humanbased](https://github.com/humanbased-ai). Read the field report: 
 crosscheck run <pr-url>
 
 # Continuous review on every incoming agent PR
-crosscheck serve            # always-on team server
+crosscheck watch            # tunnel + webhook, reviews as PRs arrive
 
 # Review stale PRs from a queue
 crosscheck scan && crosscheck kickass
@@ -103,8 +103,8 @@ brew install gh && gh auth login                          # GitHub CLI
 crosscheck onboard
 
 # 3. Start watching
-crosscheck watch        # personal laptop
-crosscheck serve        # always-on team server
+crosscheck watch                  # continuous review as PRs arrive
+crosscheck watch --only-review    # reviews only — never auto-fix
 ```
 
 ---
@@ -113,8 +113,8 @@ crosscheck serve        # always-on team server
 
 ```bash
 crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
-crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
-crosscheck serve                    # team use — fixed port, register webhook once
+crosscheck watch                    # continuous use — tunnel + webhook + listening
+crosscheck watch --only-review      # continuous reviews only — never auto-fix
 crosscheck review <pr-urls...>      # review one or more PRs (comma lists, ranges, cross-repo)
 crosscheck run <pr-urls...>         # run the full workflow: review → (fix → recheck) × max_rounds
 crosscheck recheck|fix|resolve <pr-urls...>   # force one workflow step on one or more PRs
@@ -194,25 +194,13 @@ crosscheck onboard -y           # accept all defaults non-interactively
 
 ### `crosscheck watch`
 
-Personal mode. Starts an SSH tunnel (localhost.run), registers GitHub webhooks, and listens for PR events. Everything self-cleans on Ctrl+C.
+Starts an SSH tunnel (localhost.run), registers GitHub webhooks, and listens for PR events. Everything self-cleans on Ctrl+C.
 
 ```bash
 crosscheck watch
+crosscheck watch --only-review        # post reviews only — never fix, recheck, or resolve
 crosscheck watch --no-backtrace       # skip startup scan for unreviewed open PRs
 crosscheck watch --reconfigure        # re-run deployment setup before starting
-```
-
----
-
-### `crosscheck serve`
-
-Team mode. Binds to a fixed port — register the webhook once, cover the whole team. Designed for a mac-mini or home server.
-
-```bash
-crosscheck serve
-crosscheck serve --no-backtrace       # skip startup scan
-crosscheck serve --personal           # personal scope this session only
-crosscheck serve --reconfigure        # re-run deployment setup
 ```
 
 ---
