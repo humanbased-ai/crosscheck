@@ -29,4 +29,5 @@ export function hintForError(category: ErrorCategory, message: string): string {
     case 'unknown':
       return ''
   }
+  return ''
 }
