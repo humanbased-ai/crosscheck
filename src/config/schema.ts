@@ -16,10 +16,23 @@ export const VendorConfigSchema = z.object({
 // backwards compat but is no longer passed as --quality (removed from codex CLI).
 export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   quality: z.enum(['low', 'medium', 'high']).default('medium'),
+  // Optional per-tier model overrides. When unset, the Codex CLI picks the model.
+  // Subscription auth: leave unset (CLI default). API-key auth: set explicit model IDs.
+  // Example: { fast: 'codex-mini-latest', balanced: 'codex-latest', thorough: 'codex-latest' }
+  model_tiers: z.object({
+    fast: z.string().optional(),
+    balanced: z.string().optional(),
+    thorough: z.string().optional(),
+  }).optional(),
 })
 
 export const QualityConfigSchema = z.object({
   tier: z.enum(['fast', 'balanced', 'thorough']).default('balanced'),
+  // fixed: every agent call uses the same tier (legacy behaviour; applied when unset).
+  // smart: the effective tier is chosen per-call based on diff size, prior
+  //        BLOCK verdicts, and step type — reducing cost on small/low-risk PRs
+  //        while still promoting hard calls to stronger models.
+  mode: z.enum(['fixed', 'smart']).optional(),
   focus: z.array(z.string()).default([]),
   custom_prompt: z.string().optional(),
 })

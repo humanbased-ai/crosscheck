@@ -80,7 +80,6 @@ jobs:
     needs: compute
     if: needs.compute.outputs.new_tag != ''
     runs-on: ubuntu-latest
-    environment: production          # ← requires approval from beingzy before running
     permissions:
       contents: write        # push git tag and version-bump commit
       id-token: write        # npm provenance

@@ -1,0 +1,69 @@
+name: Promote staging → main
+
+on:
+  schedule:
+    - cron: '0 18 * * 5'   # Every Friday at 18:00 UTC
+  workflow_dispatch:
+
+jobs:
+  promote:
+    name: Merge staging into main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check if staging is ahead of main
+        id: check
+        run: |
+          git fetch origin main staging
+          AHEAD=$(git rev-list origin/main..origin/staging --count)
+          if [ "$AHEAD" = "0" ]; then
+            echo "ahead=0" >> $GITHUB_OUTPUT
+            echo "staging is already up to date with main — nothing to promote"
+          else
+            NON_SYNC=$(git log origin/main..origin/staging --format="%s" | grep -v "^chore: sync v" | wc -l | tr -d ' ')
+            if [ "$NON_SYNC" = "0" ]; then
+              echo "ahead=0" >> $GITHUB_OUTPUT
+              echo "only version-sync commits ahead — skipping promotion to avoid release loop"
+            else
+              echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
+              echo "staging is $AHEAD commits ahead of main"
+            fi
+          fi
+
+      - name: Merge staging into main
+        if: steps.check.outputs.ahead != '0'
+        run: |
+          git checkout -B main origin/main
+          git merge origin/staging --no-ff \
+            -m "chore: weekly staging → main promotion ($(date -u +%Y-%m-%d))"
+          git push origin main
+
+      - name: Check token availability
+        id: token_check
+        run: |
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "has_release_token=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_release_token=true" >> $GITHUB_OUTPUT
+          fi
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Dispatch release workflow
+        if: steps.check.outputs.ahead != '0' && steps.token_check.outputs.has_release_token == 'false'
+        run: gh workflow run release.yml --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}

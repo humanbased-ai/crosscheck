@@ -96,7 +96,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   let reviewSpinner: ReturnType<typeof ora> | undefined
 
   try {
-    clonePRForReview({
+    await clonePRForReview({
       owner, repo, prNumber: number, baseRef: pr.base.ref,
       tmpDir, token, protocol: config.clone_protocol,
       onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref }),

@@ -18,6 +18,14 @@ export function inferVerdictFromCodexOutput(text: string): string {
   return 'APPROVE'
 }
 
+// Detect transient Codex API errors that should be retried (socket disconnects, rate limits)
+function isRetryableCodexError(message: string): boolean {
+  return /socket.*closed|429|rate limit|connection.*reset|econnreset/i.test(message)
+}
+
+const MAX_CODEX_RETRIES = 2
+const CODEX_RETRY_DELAY_MS = 5000
+
 // Scans stderr bottom-up for the first fatal/error line, skipping Codex header boilerplate.
 function extractErrorSummary(stderr: string): string | undefined {
   const lines = stderr.split('\n').map(l => l.trim()).filter(Boolean)
@@ -72,55 +80,77 @@ export async function runCodexReview(
   writeFileSync(instructionsPath, instructionsNote)
 
   try {
-    const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
-    onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''}`)
+    // Retry loop for transient Codex API errors (socket disconnects, rate limits)
+    let lastErr: unknown = undefined
+    for (let attempt = 1; attempt <= MAX_CODEX_RETRIES; attempt++) {
+      try {
+        const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
+        onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''}`)
 
-    const { result, retried } = await withTimeoutRetry(
-      resolvedTimeout,
-      (t) => execa(
-        'codex',
-        ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
-        {
-          cwd: repoDir,
-          timeout: t,
-          env: {
-            ...process.env,
-            // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
-            PATH: `${repoDir}/node_modules/.bin:${process.env.PATH ?? ''}`,
+        const { result, retried } = await withTimeoutRetry(
+          resolvedTimeout,
+          (t) => execa(
+            'codex',
+            ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
+            {
+              cwd: repoDir,
+              timeout: t,
+              env: {
+                ...process.env,
+                // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
+                PATH: `${repoDir}/node_modules/.bin:${process.env.PATH ?? ''}`,
+              },
+            },
+          ),
+          {
+            onRetry: (effectiveMs, delayMs) =>
+              (onRetry ?? onLog)?.(`  ⏱ codex timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),
           },
-        },
-      ),
-      {
-        onRetry: (effectiveMs, delayMs) =>
-          (onRetry ?? onLog)?.(`  ⏱ codex timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),
-      },
-    )
+        )
 
-    const rawReview = result.stdout.trim() || result.stderr.trim()
-    const tokensMatch = (result.stderr ?? '').match(/\btokens?:\s*([\d,]+)/i)
-    const tokensUsed = tokensMatch ? parseInt(tokensMatch[1].replace(/,/g, ''), 10) : undefined
-    // Append inferred VERDICT when Codex didn't include one (its review command
-    // uses [P1]/[P2]/[P3] markers but never emits a VERDICT: line on its own).
-    const review = rawReview.includes('VERDICT:')
-      ? rawReview
-      : `${rawReview}\n\nVERDICT: ${inferVerdictFromCodexOutput(rawReview)}`
-    return { review, tokensUsed, model, retried }
-  } catch (err: unknown) {
-    const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
-    const rawStderr = execa.stderr ?? ''
-    const effectiveMs = execa.effectiveTimeoutMs ?? resolvedTimeout
-    const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
-    const summary = execa.timedOut
-      ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large (tier: ${quality.tier})`
-      : (extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error')
-    const thrown = Object.assign(new Error(`codex: ${summary}`), {
-      exitCode: execa.exitCode,
-      timedOut: execa.timedOut,
-      stderr: rawStderr,
-      effectiveTimeoutMs: effectiveMs,
-      retryDelayMs: execa.retryDelayMs,
-    })
-    throw thrown
+        const rawReview = result.stdout.trim() || result.stderr.trim()
+        const tokensMatch = (result.stderr ?? '').match(/\btokens?:\s*([\d,]+)/i)
+        const tokensUsed = tokensMatch ? parseInt(tokensMatch[1].replace(/,/g, ''), 10) : undefined
+        // Append inferred VERDICT when Codex didn't include one (its review command
+        // uses [P1]/[P2]/[P3] markers but never emits a VERDICT: line on its own).
+        const review = rawReview.includes('VERDICT:')
+          ? rawReview
+          : `${rawReview}\n\nVERDICT: ${inferVerdictFromCodexOutput(rawReview)}`
+        return { review, tokensUsed, model, retried }
+      } catch (err: unknown) {
+        const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
+        const rawStderr = execa.stderr ?? ''
+        const fullMessage = rawStderr || execa.message || ''
+        
+        // Check if this is a retryable error
+        if (isRetryableCodexError(fullMessage) && attempt < MAX_CODEX_RETRIES) {
+          const delay = CODEX_RETRY_DELAY_MS * attempt // 5s, 10s
+          onLog?.(`  codex: transient error (${fullMessage.slice(0, 80)}), retrying in ${delay / 1000}s (attempt ${attempt}/${MAX_CODEX_RETRIES})...`)
+          await new Promise<void>(resolve => setTimeout(resolve, delay))
+          lastErr = err
+          continue
+        }
+        
+        // Non-retryable error or final attempt — format and throw
+        const effectiveMs = execa.effectiveTimeoutMs ?? resolvedTimeout
+        const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
+        const summary = execa.timedOut
+          ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large (tier: ${quality.tier})`
+          : (extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error')
+        const thrown = Object.assign(new Error(`codex: ${summary}`), {
+          exitCode: execa.exitCode,
+          timedOut: execa.timedOut,
+          stderr: rawStderr,
+          effectiveTimeoutMs: effectiveMs,
+          retryDelayMs: execa.retryDelayMs,
+        })
+        throw thrown
+      }
+    }
+    
+    // Should not reach here, but handle the case where all retries were consumed
+    if (lastErr) throw lastErr
+    throw new Error('codex: unexpected retry loop exit')
   } finally {
     // Restore .codex/instructions to its pre-review state so the fix step's
     // git add -A doesn't commit crosscheck's instructions as a PR file change.

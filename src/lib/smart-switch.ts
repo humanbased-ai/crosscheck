@@ -45,6 +45,19 @@ export function isSubscriptionLimitError(err: unknown): boolean {
 }
 
 /**
+ * Returns true when the error means this vendor cannot review right now for a
+ * reason that a retry won't fix but the *other* vendor can work around — e.g.
+ * the CLI is too old for its default model ("requires a newer version"), the
+ * vendor isn't authenticated, or its credentials are rejected. These are
+ * treated like a usage limit: degrade to the healthy vendor instead of failing
+ * the whole review.
+ */
+export function isVendorUnavailableError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
+  return /requires a newer version|not logged in|auth(?:entication)? (?:failure|required|expired)|unauthorized|bad credentials/.test(msg)
+}
+
+/**
  * Inspects the error message prefix emitted by runClaudeReview / runCodexReview
  * to determine which vendor threw.
  */
