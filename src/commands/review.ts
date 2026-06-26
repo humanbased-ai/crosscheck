@@ -14,6 +14,7 @@ import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
+import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 
@@ -48,6 +49,12 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
   const spinner = ora(`Fetching PR #${number}...`).start()
   const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
+  const closedSkip = closedPRSkip(pr)
+  if (closedSkip) {
+    spinner.info(`PR #${number} is ${closedSkip.status} — nothing to do`)
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: closedSkip.reason })
+    return
+  }
   spinner.succeed(`PR #${number}: ${pr.title}`)
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: pr.head.sha })
 

@@ -777,6 +777,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       if (appliedCount === 0) {
         onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: fixTokensUsed })
+        // Log the zero-change outcome explicitly: without this, a fix that ran but
+        // applied nothing leaves no event at all, so the log/`diagnose` can't tell
+        // "fix ran, changed nothing" from "fix never ran". Use a distinct `fix_noop`
+        // event — NOT `fix_complete` — so status consumers (WORKFLOW_ACTIVITY_EVENTS,
+        // the legacy status fold) don't misread a no-op as real workflow progress and
+        // mark the PR NEEDS_RECHECK or hide it from `scan --tidy` with no fix applied.
+        fileLog({ level: 'info', event: 'fix_noop', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: 0, no_changes: true, tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
         results[step.name] = { applied_count: 0, ...(fixTokensUsed !== undefined && { tokens_used: fixTokensUsed }), vendor }
         continue
       }
