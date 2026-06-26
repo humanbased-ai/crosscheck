@@ -488,7 +488,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange, trigger } = ctx
   const triggerField = trigger !== undefined ? { trigger } : {}
   const steps = (ctx.steps ?? loadWorkflow(process.cwd())).map(step => {
-    if (!step.harness) return step
+    if (!step.harness || step.instructions) return step
     const resolved = loadHarnessSection(step.harness, process.cwd())
     return resolved ? { ...step, instructions: resolved } : step
   })
