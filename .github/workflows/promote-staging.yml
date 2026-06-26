@@ -29,11 +29,18 @@ jobs:
         run: |
           git fetch origin main staging
           AHEAD=$(git rev-list origin/main..origin/staging --count)
-          echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
           if [ "$AHEAD" = "0" ]; then
+            echo "ahead=0" >> $GITHUB_OUTPUT
             echo "staging is already up to date with main — nothing to promote"
           else
-            echo "staging is $AHEAD commits ahead of main"
+            NON_SYNC=$(git log origin/main..origin/staging --format="%s" | grep -v "^chore: sync v" | wc -l | tr -d ' ')
+            if [ "$NON_SYNC" = "0" ]; then
+              echo "ahead=0" >> $GITHUB_OUTPUT
+              echo "only version-sync commits ahead — skipping promotion to avoid release loop"
+            else
+              echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
+              echo "staging is $AHEAD commits ahead of main"
+            fi
           fi
 
       - name: Merge staging into main
@@ -45,7 +52,7 @@ jobs:
           git push origin main
 
       - name: Dispatch release workflow
-        if: steps.check.outputs.ahead != '0'
+        if: steps.check.outputs.ahead != '0' && secrets.RELEASE_TOKEN == ''
         run: gh workflow run release.yml --ref main
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
