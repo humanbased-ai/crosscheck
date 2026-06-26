@@ -19,7 +19,7 @@ import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
-import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
+import { loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
@@ -487,7 +487,11 @@ async function pushWithNonFastForwardHandling(params: {
 export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult> {
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange, trigger } = ctx
   const triggerField = trigger !== undefined ? { trigger } : {}
-  const steps = ctx.steps ?? loadWorkflow(process.cwd())
+  const steps = (ctx.steps ?? loadWorkflow(process.cwd())).map(step => {
+    if (!step.harness || step.instructions) return step
+    const resolved = loadHarnessSection(step.harness, process.cwd())
+    return resolved ? { ...step, instructions: resolved } : step
+  })
   const results: Record<string, StepResult> = {}
   // SHAs the workflow pushed AND set a `crosscheck/review` pending status on.
   // Each one must be released in the finally below — otherwise the pending
