@@ -51,8 +51,19 @@ jobs:
             -m "chore: weekly staging → main promotion ($(date -u +%Y-%m-%d))"
           git push origin main
 
+      - name: Check token availability
+        id: token_check
+        run: |
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "has_release_token=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_release_token=true" >> $GITHUB_OUTPUT
+          fi
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+
       - name: Dispatch release workflow
-        if: steps.check.outputs.ahead != '0' && secrets.RELEASE_TOKEN == ''
+        if: steps.check.outputs.ahead != '0' && steps.token_check.outputs.has_release_token == 'false'
         run: gh workflow run release.yml --ref main
         env:
           GH_TOKEN: ${{ github.token }}
