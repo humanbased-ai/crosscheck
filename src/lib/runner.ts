@@ -48,6 +48,7 @@ export function isRetryableFixError(err: unknown): boolean {
 // issues that don't self-heal and should surface immediately.
 function isTransientApiError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err)
+  if (/quota|credit|plan.?limit/i.test(msg)) return false
   return /\b429\b|rate.?limit|\b529\b|overloaded/i.test(msg)
 }
 
