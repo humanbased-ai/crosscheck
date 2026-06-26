@@ -669,7 +669,13 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      if (event.action === 'synchronize') {
+      // The two crosscheck-commit skips below exist only to stop the fix→review
+      // loop from re-entering on crosscheck's own fix commits. --only-review has no
+      // fix step and never pushes commits, so there is no loop to guard against;
+      // skipping these would also drop fix commits pushed by another session, which
+      // in review-only mode are just current PR content that should be reviewed.
+      // decideReviewOnly dedups per head SHA, so reviewing them can't repeat.
+      if (!onlyReview && event.action === 'synchronize') {
         const message = await getCommitMessage(owner, repoName, pr.head.sha, token).catch(() => null)
         if (message !== null && isCrosscheckCommitMessage(message)) {
           fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_commit', sha: pr.head.sha })
@@ -679,7 +685,7 @@ export async function runWatch(opts: WatchOpts = {}) {
 
       // Skip synchronize events triggered by our own address commits.
       // crosscheckShas is backed by disk so this also covers SHAs from prior sessions.
-      if (crosscheckShas.has(pr.head.sha)) {
+      if (!onlyReview && crosscheckShas.has(pr.head.sha)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_sha', sha: pr.head.sha })
         return
       }
