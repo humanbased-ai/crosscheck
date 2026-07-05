@@ -33,7 +33,7 @@ import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
-import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
+import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
@@ -171,6 +171,7 @@ export interface WatchOpts {
   personal?: boolean
   team?: boolean
   reconfigure?: boolean
+  onlyReview?: boolean
   backtrace?: boolean
 }
 
@@ -214,6 +215,9 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   const webhookSecret = getWebhookSecret()
   const webhookPath = config.server.webhook_path
+
+  // --only-review: post reviews but never advance to fix/recheck/conflict-resolve.
+  const onlyReview = opts.onlyReview === true
 
   // Board manages all terminal output after startup
   const board = new PRBoard()
@@ -349,7 +353,34 @@ export async function runWatch(opts: WatchOpts = {}) {
       let resolvedSteps: WorkflowStep[] | undefined
       let detectedReviewComment: { id?: number; body: string } | undefined
 
-      if (!isRecheckRun) {
+      if (onlyReview) {
+        // --only-review: restrict the workflow to its review step(s) — never fix,
+        // recheck, or conflict-resolve. Reuse the workflow loaded at startup so a
+        // per-event disk read can't throw and strand the locks. Dedup on the exact
+        // head sha (decideReviewOnly) so restarts and synchronize events don't
+        // re-post a review for content already reviewed.
+        const reviewSteps = workflow.filter(s => s.type === 'review')
+        if (reviewSteps.length === 0) {
+          await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+          releasePRLock(owner, repoName, prNumber, params.headSha)
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_review_step' })
+          return
+        }
+        isRecheckRun = false
+        round = 1
+        resolvedSteps = reviewSteps
+        try {
+          const history = await fetchStepHistory(owner, repoName, prNumber, token)
+          const decision = decideReviewOnly(history, params.headSha)
+          if (decision.alreadyReviewed) {
+            await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+            releasePRLock(owner, repoName, prNumber, params.headSha)
+            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'already_reviewed', sha: params.headSha })
+            return
+          }
+          round = decision.round
+        } catch { /* best-effort — fall back to a fresh round-1 review */ }
+      } else if (!isRecheckRun) {
         try {
           const allSteps = loadWorkflow(process.cwd())
           const history = await fetchStepHistory(owner, repoName, prNumber, token)
@@ -638,7 +669,13 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      if (event.action === 'synchronize') {
+      // The two crosscheck-commit skips below exist only to stop the fix→review
+      // loop from re-entering on crosscheck's own fix commits. --only-review has no
+      // fix step and never pushes commits, so there is no loop to guard against;
+      // skipping these would also drop fix commits pushed by another session, which
+      // in review-only mode are just current PR content that should be reviewed.
+      // decideReviewOnly dedups per head SHA, so reviewing them can't repeat.
+      if (!onlyReview && event.action === 'synchronize') {
         const message = await getCommitMessage(owner, repoName, pr.head.sha, token).catch(() => null)
         if (message !== null && isCrosscheckCommitMessage(message)) {
           fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_commit', sha: pr.head.sha })
@@ -648,7 +685,7 @@ export async function runWatch(opts: WatchOpts = {}) {
 
       // Skip synchronize events triggered by our own address commits.
       // crosscheckShas is backed by disk so this also covers SHAs from prior sessions.
-      if (crosscheckShas.has(pr.head.sha)) {
+      if (!onlyReview && crosscheckShas.has(pr.head.sha)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_sha', sha: pr.head.sha })
         return
       }
@@ -666,6 +703,13 @@ export async function runWatch(opts: WatchOpts = {}) {
       const owner = event.repository.owner.login
       const repoName = event.repository.name
       const prNumber = event.issue.number
+
+      // The issue_comment bridge exists solely to advance the workflow to fix.
+      // Under --only-review there is no fix step, so disable it entirely.
+      if (onlyReview) {
+        fileLog({ level: 'info', event: 'comment_trigger_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'only_review' })
+        return
+      }
 
       // Human feedback in regular PR comments is always valued and never reaches
       // this handler (webhook.ts only forwards comments that contain the hidden
@@ -1007,6 +1051,10 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   // Board starts after the banner — all output below is live-updated
   board.start()
+
+  if (onlyReview) {
+    cLog(`${chalk.cyan('●')} only-review mode — posting reviews only; fix/recheck/resolve disabled`)
+  }
 
   // ── Idle issue timer ─────────────────────────────────────────────────────
   // When watch has been idle (no PR activity) for the configured duration,

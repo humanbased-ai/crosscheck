@@ -415,9 +415,9 @@ export async function runDiagnose(opts: { json?: boolean; since?: string; pr?: s
 
   if (!existsSync(LOG_DIR)) {
     if (opts.json) {
-      console.log(JSON.stringify({ error: 'No log directory found. Run crosscheck watch or serve first.' }))
+      console.log(JSON.stringify({ error: 'No log directory found. Run crosscheck watch first.' }))
     } else {
-      console.error(chalk.yellow('No logs found. Run `crosscheck watch` or `crosscheck serve` first.'))
+      console.error(chalk.yellow('No logs found. Run `crosscheck watch` first.'))
     }
     return
   }

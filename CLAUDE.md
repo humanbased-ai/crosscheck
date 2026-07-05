@@ -96,7 +96,6 @@ src/
     init.ts               # crosscheck init
     review.ts             # crosscheck review <pr-url>
     watch.ts              # crosscheck watch
-    serve.ts              # crosscheck serve
     status.ts             # crosscheck status
   config/
     schema.ts             # Zod schema — single source of truth for config shape
@@ -233,7 +232,7 @@ Never remove a config field or change its type — that is a breaking change.
 | Variable | Required | Used by |
 |---|---|---|
 | `GITHUB_TOKEN` | All commands that call GitHub API | `client.ts`, `watch.ts` |
-| `CROSSCHECK_WEBHOOK_SECRET` | `serve`, `watch` | `webhook.ts` |
+| `CROSSCHECK_WEBHOOK_SECRET` | `watch` | `webhook.ts` |
 | `GITHUB_WEBHOOK_SECRET` | Alias for above | `loader.ts` |
 
 Never read env vars outside `config/loader.ts`.

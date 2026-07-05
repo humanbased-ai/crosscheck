@@ -36,7 +36,7 @@ export async function runStatus(configPath?: string) {
     ? 'set (env)'
     : existsSync(webhookSecretPath)
       ? `auto-managed at ${webhookSecretPath}`
-      : `auto-managed on first serve/watch at ${webhookSecretPath}`
+      : `auto-managed on first watch at ${webhookSecretPath}`
   row('WEBHOOK_SECRET', webhookSecretDetail, true)
 
   // Config
