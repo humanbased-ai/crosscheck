@@ -3,7 +3,7 @@
 # All fields are optional — crosscheck uses sensible defaults.
 
 # ─── Deployment ──────────────────────────────────────────────────────────────
-# Set automatically on first run of `crosscheck watch` or `crosscheck serve`.
+# Set automatically on first run of `crosscheck watch`.
 # personal — monitor your own repos and orgs; review only PRs you author
 # team     — monitor org repos only; review all PRs from any author
 # Absent = first-run prompt will ask you to choose.
@@ -67,7 +67,7 @@ budget:
   codex_monthly_usd: 20     # null = unlimited (use if on subscription)
   per_review_usd: 2.00      # hard stop per single review
 
-# ── Orgs (watch/serve mode) ───────────────────────────────────────────────────
+# ── Orgs (watch mode) ─────────────────────────────────────────────────────────
 # Monitor entire orgs — all repos get covered with one webhook per org.
 # Takes priority over `repos` when both are set.
 orgs:
@@ -156,11 +156,14 @@ routing:
 #   backend: smee
 #   smee_channel: https://smee.io/your-channel-id
 
-# ─── Server (serve mode only) ────────────────────────────────────────────────
+# ─── Server ──────────────────────────────────────────────────────────────────
+# crosscheck watch binds a local HTTP server on `port` (auto-increments on
+# collision) and listens for webhook delivery at `webhook_path`. pid_file is
+# unused (legacy daemon management).
 server:
   port: 7891
   webhook_path: /webhook
-  # pid_file: ~/.crosscheck/crosscheck.pid  # for daemon management
+  # pid_file: ~/.crosscheck/crosscheck.pid  # legacy — unused
 
 # ─── Post-Review Auto-Fix ────────────────────────────────────────────────────
 # Controls HOW fixes are delivered after the agent applies them.

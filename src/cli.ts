@@ -5,7 +5,6 @@ import { fileURLToPath } from 'url'
 import { basename, dirname, join } from 'path'
 import { runInit } from './commands/init.js'
 import { runOnboard } from './commands/onboard.js'
-import { runServe } from './commands/serve.js'
 import { runWatch } from './commands/watch.js'
 import { runReviewSpec } from './commands/review.js'
 import { runStatus } from './commands/status.js'
@@ -66,7 +65,7 @@ function addStepRunOptions(cmd: Command): Command {
     .option('--concurrent [n]', 'multi-PR: cap parallel agents; omit n for one agent per PR (default)')
     .option('--sequential', 'multi-PR: run PRs one at a time instead of in parallel')
     .option('--stagger <ms>', 'multi-PR: ms delay between concurrent worker starts; default 2000')
-    .addOption(new Option('--trigger <source>').hideHelp())  // internal: set by kickass/watch/serve
+    .addOption(new Option('--trigger <source>').hideHelp())  // internal: set by kickass/watch
 }
 
 function buildRunSpecOpts(opts: StepRunFlags): RunSpecOpts {
@@ -111,26 +110,16 @@ program
   .action((opts: { config?: string; yes?: boolean; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runOnboard(opts))
 
 program
-  .command('serve')
-  .description('[BETA] Always-on webhook server (mac-mini / home server mode)')
-  .option('-c, --config <path>', 'config file path')
-  .option('--personal', 'personal mode this session only (does not save to config)')
-  .option('--team', 'team mode this session only (does not save to config)')
-  .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .option('--backtrace', 'enable startup scan for unreviewed open PRs this session (overrides backtrace.enabled: false)')
-  .option('--no-backtrace', 'skip startup scan for unreviewed open PRs this session (overrides backtrace.enabled: true)')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runServe(opts))
-
-program
   .command('watch')
   .description('Local dev mode — listen for PRs via gh webhook forward')
   .option('-c, --config <path>', 'config file path')
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
+  .option('--only-review', 'review-only mode: post reviews but never fix, recheck, or resolve')
   .option('--backtrace', 'enable startup scan for unreviewed open PRs this session (overrides backtrace.enabled: false)')
   .option('--no-backtrace', 'skip startup scan for unreviewed open PRs this session (overrides backtrace.enabled: true)')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runWatch(opts))
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; onlyReview?: boolean; backtrace?: boolean }) => void runWatch(opts))
 
 program
   .command('review <pr-urls...>')

@@ -21,7 +21,7 @@
 - **可定制的审查工作流** — 灵活配置完整流水线：仅审查、审查 + 自动修复，或审查 + 修复 + 复查。每个步骤均可定制审查指令，无需手动编辑 Prompt。
 - **跨供应商模式与单供应商模式** — 跨供应商模式将每个 PR 路由给对手 AI 进行独立审查；单供应商模式则使用你拥有的任意一个 AI。一行配置即可切换。
 - **订阅驱动，无需按 token 计费** — 通过 `claude` 和 `codex` 命令行工具运行，使用你已有的 Claude Pro/Max 和 ChatGPT Plus/Pro 订阅。无需 API Key，无额外审查费用。
-- **`watch` 个人使用，`serve` 服务团队** — `crosscheck watch` 在本地笔记本运行并自动建立隧道，适合个人开发者。`crosscheck serve` 绑定到共享机器的固定端口，让整个团队无需任何人保持笔记本在线即可获得覆盖。
+- **`watch` 持续监听** — `crosscheck watch` 自动建立隧道并注册 webhook，PR 到达即审查。加 `--only-review` 则只发审查、不自动修复。
 
 ---
 
@@ -38,11 +38,11 @@ brew install gh && gh auth login                          # GitHub CLI
 crosscheck onboard
 
 # 3. 启动监听
-crosscheck watch        # 个人笔记本
-crosscheck serve        # 团队常驻服务器
+crosscheck watch                # 持续审查到达的 PR
+crosscheck watch --only-review  # 只发审查，不自动修复
 ```
 
-`crosscheck onboard` 将引导你完成仓库选择、供应商模式、流水线步骤和隧道选择。完成后，运行 `watch` 或 `serve` 即可。
+`crosscheck onboard` 将引导你完成仓库选择、供应商模式、流水线步骤和隧道选择。完成后，运行 `watch` 即可。
 
 ---
 
@@ -85,8 +85,8 @@ crosscheck onboard                  # 引导式配置——选择仓库、模式
 crosscheck review <pr-urls...>      # 审查一个或多个 PR（逗号列表、区间、跨仓库）
 crosscheck run <pr-urls...>         # 运行完整流水线：review → (fix → recheck) × max_rounds
 crosscheck recheck|fix|resolve <pr-urls...>   # 对一个或多个 PR 强制执行某个工作流步骤
-crosscheck watch                    # 个人使用——隧道 + 自动 Webhook + 本地监听
-crosscheck serve                    # 团队使用——固定端口，一次性注册 Webhook
+crosscheck watch                    # 持续监听——隧道 + 自动 Webhook + 本地监听
+crosscheck watch --only-review      # 持续监听，只发审查、不自动修复
 crosscheck status                   # 查看认证状态、配置摘要、CLI 版本
 ```
 
@@ -139,9 +139,9 @@ post_review:
 
 ## 部署方式
 
-**个人使用（`crosscheck watch`）** — 运行在你的笔记本上。通过 `localhost.run` 建立 SSH 隧道，无需端口转发，无需云账号。隧道断开时健康检查会自动重连。
+**`crosscheck watch`** — 通过 `localhost.run` 建立 SSH 隧道，无需端口转发，无需云账号，自动注册 Webhook 并在退出时清理。隧道断开时健康检查会自动重连。可运行在笔记本，也可运行在常驻机器上持续监听。
 
-**团队使用（`crosscheck serve`）** — 绑定到具有公网 IP 的机器上的固定端口，手动注册一次 Webhook，整个团队即可获得覆盖，无需任何人保持笔记本在线。
+**`crosscheck watch --only-review`** — 仅审查模式：只发审查评论，绝不执行 fix / recheck / conflict-resolve，也不向 PR 推送任何提交。适合想要审查意见、但自己动手修复的场景。
 
 ---
 
