@@ -262,9 +262,21 @@ When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned 
 
 **Token scope for org webhooks:** `GITHUB_TOKEN` needs `write:org` scope for org-level coverage. For repo-level, `repo` scope is sufficient.
 
-### Serve mode [BETA] — for an always-on machine (mac-mini, home server)
+### Serve mode [DEPRECATED] — for an always-on machine (mac-mini, home server)
 
-> **Beta:** `serve` is functional but not yet battle-tested in production. Report issues at [github.com/humanbased-ai/crosscheck/issues](https://github.com/humanbased-ai/crosscheck/issues).
+> **Deprecated:** `serve` is being sunset. `crosscheck watch` now covers the always-on
+> server use case — run it with the smee tunnel backend (a hosted relay that survives
+> restarts and queues events while you're offline). Migrate with:
+>
+> ```yaml
+> # crosscheck.config.yml
+> tunnel:
+>   backend: smee
+>   smee_channel: https://smee.io/your-channel   # get one at https://smee.io/new
+> ```
+>
+> then run `crosscheck watch`. `serve` still works for now and prints this reminder at
+> startup, but a future release will remove it.
 
 Listens on a fixed port. You register the webhook(s) manually once and they stay registered.
 

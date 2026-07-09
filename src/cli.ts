@@ -123,7 +123,7 @@ program
 
 program
   .command('serve')
-  .description('[BETA] Always-on webhook server (mac-mini / home server mode)')
+  .description('[DEPRECATED] Always-on webhook server — use `crosscheck watch` (tunnel.backend: smee) instead')
   .option('-c, --config <path>', 'config file path')
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')

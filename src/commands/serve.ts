@@ -31,6 +31,7 @@ import { PersistentShaSet } from '../lib/sha-cache.js'
 import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
 import { CROSSCHECK_ISSUES_URL } from '../lib/product.js'
+import { serveDeprecationNotice } from '../lib/serve-deprecation.js'
 import {
   getSmartSwitch,
   isSubscriptionLimitError,
@@ -345,6 +346,7 @@ export async function runServe(opts: ServeOpts = {}) {
   }
 
   fileLog({ level: 'info', event: 'session_start', command: 'serve' })
+  fileLog({ level: 'warn', event: 'serve_deprecated', command: 'serve', migrate_to: 'watch' })
 
   const board = new PRBoard()
   workflow = loadWorkflow(process.cwd())
@@ -430,7 +432,10 @@ export async function runServe(opts: ServeOpts = {}) {
     const webhookUrl = `http://${hostname()}:${effectivePort}${config.server.webhook_path}`
     console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
     console.log(chalk.bold('crosscheck serving\n'))
-    console.log(chalk.yellow(`  ⚠  serve is in beta — report issues at ${CROSSCHECK_ISSUES_URL}\n`))
+    const [deprLine, migrateLine] = serveDeprecationNotice()
+    console.log(chalk.yellow(`  ⚠  ${deprLine}`))
+    console.log(chalk.yellow(`     ${migrateLine}`))
+    console.log(chalk.dim(`     (still in beta — report issues at ${CROSSCHECK_ISSUES_URL})\n`))
     if (effectiveDeployment) {
       const label = sessionOnly
         ? chalk.dim(`${effectiveDeployment} (session only — not saved)`)
