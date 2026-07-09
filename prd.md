@@ -2869,7 +2869,7 @@ Phase 3: `--build` — full autonomous contribution. Requires careful scoping of
 
 ### 🔜 Next Up
 
-- [ ] **`--port <n>` flag for `watch` and `serve`** — override the webhook server port for one session without editing `crosscheck.config.yml`. Requested to run a second instance or dodge a port already claimed by another process.
+- [x] **`--port <n>` flag for `watch` and `serve`** — shipped in `c0ed2dd`. Override the webhook server port for one session without editing `crosscheck.config.yml`. Requested to run a second instance or dodge a port already claimed by another process.
   - **User:** Anyone running `crosscheck watch` / `crosscheck serve` who needs a specific port for this session — a second instance on a different port, a machine where `7891` is taken, or a fixed port required by an external tunnel/reverse-proxy config.
   - **Scope:** Only `watch` and `serve` bind a local port. `init`, `review`, `run`, and `status` do not listen, so the flag is not added there.
   - **Acceptance Criteria:**
@@ -2886,6 +2886,22 @@ Phase 3: `--build` — full autonomous contribution. Requires careful scoping of
     - `serve.ts`: when `opts.port` is set, skip `findAvailablePort` and use the forced port directly so the auto-shift can't override it.
     - Add `port?: number` to `WatchOpts` (watch.ts) and `ServeOpts` (serve.ts).
   - **Tests Required:** `parsePort` accepts `1`–`65535` and rejects `0`, `65536`, `-1`, `"abc"`, empty; `watch`/`serve` bind the forced port when free; `serve --port` on a busy port exits 1 (no auto-shift); omitting the flag preserves current behavior (watch = config port, serve = auto-shift).
+
+- [ ] **Sunset `crosscheck serve`** — `watch` (especially with `tunnel.backend: smee`) now covers the always-on server use case, so `serve` (still BETA) is redundant. Remove it gradually so no existing operator's setup breaks mid-flight.
+  - **User:** Existing `serve` operators running an always-on home server / mac-mini, plus everyone maintaining the two near-duplicate command implementations (`serve.ts` ≈ `watch.ts` review pipeline).
+  - **The one real capability gap (decide first):** `serve`'s only behavior `watch` lacks is **raw-port, no-tunnel** operation — it binds `config.server.port` and expects the operator to expose it themselves (reverse proxy / port-forward) and to have registered webhooks manually. `watch` always routes through a relay (localhost.run or smee) and auto-registers/cleans up webhooks. Closing the gap is one of:
+    - **(a) Declare smee the always-on answer** *(recommended)* — smee.io is a hosted relay that survives restarts and queues events while offline. Most home-server operators can switch to `crosscheck watch` with `tunnel.backend: smee`. No new code; pairs with the existing backlog item "smee.io as default tunnel."
+    - **(b) Add `tunnel.backend: none` (direct) to `watch`** — for BYO-endpoint operators who refuse any relay. Fully covers `serve` but adds a watch code path + config value. Only build if telemetry (Phase 1) shows real raw-port usage.
+  - **Phased plan:**
+    - **Phase 1 — soft-deprecate (next release, minor):** mark the command `[DEPRECATED]` in its `cli.ts` description; print a one-time startup warning pointing to `watch` + migration steps; emit a `serve_deprecated` log event to measure real usage. No behavior change. Add a deprecation banner + migration steps to the `serve` section of `get-started.md`.
+    - **Phase 2 — announce the removal window:** after ≥1 release carrying the warning (and telemetry showing usage is effectively zero, or a fixed calendar date), record the target removal version in the changelog and docs.
+    - **Phase 3 — remove (major; minor acceptable while pre-1.0):** delete `src/commands/serve.ts`, drop the `serve` command + `runServe` import from `cli.ts`, delete `ServeOpts`, remove the `serve` docs. Optionally keep a one-release stub command that only prints migration guidance and exits 1, then delete that too. `findAvailablePort` (`src/lib/port.ts`) is serve-only — remove it in the same change (the new `--port` on `watch` does not use it; keep `parsePort`).
+  - **Acceptance Criteria (Phase 1 only — Phases 2–3 are separate future items):**
+    - `crosscheck serve` still works identically, but prints a clearly-worded deprecation warning at startup with the exact migration command.
+    - Command description in `--help` is prefixed `[DEPRECATED]`.
+    - A `serve_deprecated` event is logged once per invocation.
+    - Docs steer new users to `watch`; the `serve` section is marked deprecated with a migration recipe.
+  - **Tests Required:** startup path emits the deprecation warning + `serve_deprecated` log event; `serve` review behavior otherwise unchanged (existing serve coverage still passes).
 
 ---
 
