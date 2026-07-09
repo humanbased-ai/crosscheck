@@ -171,12 +171,18 @@ export interface WatchOpts {
   personal?: boolean
   team?: boolean
   reconfigure?: boolean
+  port?: number
   backtrace?: boolean
 }
 
 export async function runWatch(opts: WatchOpts = {}) {
   const configPath = opts.config
   let config = loadConfig(configPath)
+  // --port forces the webhook server port for this session only. Overriding
+  // config.server.port here propagates to server.listen and both tunnels.
+  if (opts.port !== undefined) {
+    config = { ...config, server: { ...config.server, port: opts.port } }
+  }
   initLogger(config.logs)
 
   process.on('uncaughtException', (err) => {
@@ -807,6 +813,10 @@ export async function runWatch(opts: WatchOpts = {}) {
     // force=true only for --reconfigure; first-run preserves any manually-configured orgs/authors
     patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, !!opts.reconfigure)
     config = loadConfig(configPath)
+    // Re-apply the session port override — loadConfig re-read the file, dropping it.
+    if (opts.port !== undefined) {
+      config = { ...config, server: { ...config.server, port: opts.port } }
+    }
     console.log(`\n  ${chalk.green('✓')} deployment set to ${chalk.cyan(effectiveDeployment)} ${chalk.dim(`(saved to ${cfgPath})`)}`)
   }
 

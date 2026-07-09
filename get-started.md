@@ -218,7 +218,12 @@ You can override the saved choice for a single session without touching the conf
 ```bash
 crosscheck watch --personal   # personal mode this session only
 crosscheck watch --team       # team mode this session only
+crosscheck watch --port 8080  # force a specific webhook port this session (overrides config; not saved)
 ```
+
+`--port <n>` forces the local webhook server onto that exact port for this session
+without editing `server.port` in config — useful for running a second instance or
+avoiding a port already in use. If the port is taken, `watch` exits with an error.
 
 To re-run the prompt and permanently change your choice:
 

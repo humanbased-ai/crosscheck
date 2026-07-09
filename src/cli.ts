@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { Command, Option } from 'commander'
+import { Command, Option, InvalidArgumentError } from 'commander'
+import { parsePort } from './lib/port.js'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { basename, dirname, join } from 'path'
@@ -23,6 +24,16 @@ const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 
 
 const invokedAs = basename(process.argv[1] ?? 'crosscheck').replace(/\.js$/, '')
 const programName = invokedAs === 'ck' ? 'ck' : 'crosscheck'
+
+// Commander arg parser for --port: validate at parse time so bad values exit 1
+// through Commander's InvalidArgumentError path before any command runs.
+const portParser = (raw: string): number => {
+  try {
+    return parsePort(raw)
+  } catch (err) {
+    throw new InvalidArgumentError(err instanceof Error ? err.message : String(err))
+  }
+}
 
 const program = new Command()
 
@@ -117,9 +128,10 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
+  .option('--port <number>', 'force the webhook server port for this session (overrides config; does not save)', portParser)
   .option('--backtrace', 'enable startup scan for unreviewed open PRs this session (overrides backtrace.enabled: false)')
   .option('--no-backtrace', 'skip startup scan for unreviewed open PRs this session (overrides backtrace.enabled: true)')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runServe(opts))
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; port?: number; backtrace?: boolean }) => void runServe(opts))
 
 program
   .command('watch')
@@ -128,9 +140,10 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
+  .option('--port <number>', 'force the webhook server port for this session (overrides config; does not save)', portParser)
   .option('--backtrace', 'enable startup scan for unreviewed open PRs this session (overrides backtrace.enabled: false)')
   .option('--no-backtrace', 'skip startup scan for unreviewed open PRs this session (overrides backtrace.enabled: true)')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runWatch(opts))
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; port?: number; backtrace?: boolean }) => void runWatch(opts))
 
 program
   .command('review <pr-urls...>')

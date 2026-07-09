@@ -2867,6 +2867,28 @@ Phase 3: `--build` — full autonomous contribution. Requires careful scoping of
 
 ---
 
+### 🔜 Next Up
+
+- [ ] **`--port <n>` flag for `watch` and `serve`** — override the webhook server port for one session without editing `crosscheck.config.yml`. Requested to run a second instance or dodge a port already claimed by another process.
+  - **User:** Anyone running `crosscheck watch` / `crosscheck serve` who needs a specific port for this session — a second instance on a different port, a machine where `7891` is taken, or a fixed port required by an external tunnel/reverse-proxy config.
+  - **Scope:** Only `watch` and `serve` bind a local port. `init`, `review`, `run`, and `status` do not listen, so the flag is not added there.
+  - **Acceptance Criteria:**
+    - `crosscheck watch --port 8080` and `crosscheck serve --port 8080` bind the HTTP webhook server to `8080` for this session only. Config file is never written.
+    - The flag value overrides `config.server.port`; the value flows through every downstream use (server `listen`, smee `--port`, localhost.run `-R 80:localhost:<port>`, and the printed endpoint/banner).
+    - `watch`: forces exactly the given port. If it is in use, the existing `EADDRINUSE` guidance is printed and the process exits 1 (unchanged behavior, just on the forced port).
+    - `serve`: `--port` is a **hard** port — it bypasses the `findAvailablePort` auto-shift. If the forced port is in use, exit 1 with a clear message rather than silently moving to the next free port. (Without the flag, auto-shift behavior is unchanged.)
+    - Invalid values (non-integer, <1, >65535) exit 1 with a clear error before any server is created.
+    - Flag is additive and optional — no change to any existing exit code or config field. Minor version bump.
+  - **Technical Notes:**
+    - `cli.ts`: add `.option('--port <number>', 'override webhook server port for this session')` to both the `watch` and `serve` command definitions, and widen the two `.action` opts types.
+    - Parse + validate once at the command boundary (or via a small `parsePort` helper) — Commander passes the raw string.
+    - Simplest threading: right after `loadConfig`, if `opts.port` is set, do `config = { ...config, server: { ...config.server, port } }`. Every existing `config.server.port` reference then picks it up automatically.
+    - `serve.ts`: when `opts.port` is set, skip `findAvailablePort` and use the forced port directly so the auto-shift can't override it.
+    - Add `port?: number` to `WatchOpts` (watch.ts) and `ServeOpts` (serve.ts).
+  - **Tests Required:** `parsePort` accepts `1`–`65535` and rejects `0`, `65536`, `-1`, `"abc"`, empty; `watch`/`serve` bind the forced port when free; `serve --port` on a busy port exits 1 (no auto-shift); omitting the flag preserves current behavior (watch = config port, serve = auto-shift).
+
+---
+
 ### 🔭 Backlog
 
 - [ ] **smee.io as default tunnel** — once smee proves stable in production, flip `tunnel.backend` default from `localhost.run` to `smee`. Migration: `crosscheck init` auto-generates a smee channel and writes it to config. Old configs keep working (localhost.run continues to work). Track: has `smee-client` install friction reduced? Are missed-event reports gone?

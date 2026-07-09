@@ -310,12 +310,18 @@ export interface ServeOpts {
   personal?: boolean
   team?: boolean
   reconfigure?: boolean
+  port?: number
   backtrace?: boolean
 }
 
 export async function runServe(opts: ServeOpts = {}) {
   const configPath = opts.config
   let config = loadConfig(configPath)
+  // --port forces the webhook server port for this session only (no config write).
+  // Unlike the default auto-shift, a forced port is used verbatim below.
+  if (opts.port !== undefined) {
+    config = { ...config, server: { ...config.server, port: opts.port } }
+  }
   initLogger(config.logs)
 
   process.on('uncaughtException', (err) => {
@@ -359,6 +365,10 @@ export async function runServe(opts: ServeOpts = {}) {
     const detected = await detectScopesForDeployment(effectiveDeployment, token)
     patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, !!opts.reconfigure)
     config = loadConfig(configPath)
+    // Re-apply the session port override — loadConfig re-read the file, dropping it.
+    if (opts.port !== undefined) {
+      config = { ...config, server: { ...config.server, port: opts.port } }
+    }
     console.log(`\n  ${chalk.green('✓')} deployment set to ${chalk.cyan(effectiveDeployment)} ${chalk.dim(`(saved to ${cfgPath})`)}`)
   }
 
@@ -386,17 +396,34 @@ export async function runServe(opts: ServeOpts = {}) {
     fileLog,
   )
 
+  // A forced --port is used verbatim (fail if busy). Without it, serve auto-shifts
+  // to the next free port so an incidental clash doesn't stop the daemon.
   let effectivePort: number
-  try {
-    effectivePort = await findAvailablePort(config.server.port)
-  } catch (err) {
-    console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}`))
-    process.exit(1)
+  if (opts.port !== undefined) {
+    effectivePort = config.server.port
+  } else {
+    try {
+      effectivePort = await findAvailablePort(config.server.port)
+    } catch (err) {
+      console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}`))
+      process.exit(1)
+    }
+    if (effectivePort !== config.server.port) {
+      console.log(chalk.yellow(`  ⚠  Port ${config.server.port} in use — using port ${effectivePort} instead`))
+      config = { ...config, server: { ...config.server, port: effectivePort } }
+    }
   }
 
-  if (effectivePort !== config.server.port) {
-    console.log(chalk.yellow(`  ⚠  Port ${config.server.port} in use — using port ${effectivePort} instead`))
-    config = { ...config, server: { ...config.server, port: effectivePort } }
+  // With a forced --port there is no auto-shift, so a clash is fatal. Convert the
+  // async EADDRINUSE emit into a clean exit 1 instead of an uncaught exception.
+  if (opts.port !== undefined) {
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      const msg = err.code === 'EADDRINUSE'
+        ? `Port ${effectivePort} is already in use. Free it or pass a different --port.`
+        : err.message
+      console.error(chalk.red(`\n✗ ${msg}`))
+      process.exit(1)
+    })
   }
 
   server.listen(effectivePort, () => {
