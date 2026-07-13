@@ -2251,26 +2251,35 @@ This lets teams express policies like:
 | File | Owns |
 |---|---|
 | `crosscheck.config.yml` | Infrastructure: mode, repos, orgs, vendors, budget, server |
-| `.crosscheck/workflow.yml` | Pipeline shape: step order, types, conditions, max_rounds |
+| `{repo}/.crosscheck/workflow.yml` | Repo-committed pipeline (highest precedence; only when run inside the repo) |
+| `~/.crosscheck/workflows/<owner>__<repo>.yml` | Per-repo override written by `crosscheck alter` (above the global default) |
+| `~/.crosscheck/workflow.yml` | Global default pipeline written by `crosscheck onboard` (all monitored repos) |
 | `~/.crosscheck/instructions.md` | Global prose behavior for all review steps |
-| Step-level `instructions:` | Per-step behavior overrides within `workflow.yml` |
+| Step-level `instructions:` | Per-step behavior overrides within any `workflow.yml` |
 
 **Default workflow — constant, not a file:**
 
 ```typescript
 // src/lib/workflow.ts
 export const DEFAULT_WORKFLOW: WorkflowStep[] = [
-  { name: 'review', type: 'review', reviewer: 'auto' }
+  { name: 'review',  type: 'review',  reviewer: 'auto',   when: undefined },
+  { name: 'fix',     type: 'fix',     reviewer: 'origin', when: "review.verdict != 'APPROVE'" },
+  { name: 'recheck', type: 'recheck', reviewer: 'auto',   when: "fix.applied_count > 0" },
 ]
 
-export function loadWorkflow(repoDir: string, configDir: string): WorkflowStep[] {
-  const file = findWorkflowFile(repoDir, configDir)
+export function loadWorkflow(operatorDir?: string, repo?: { owner: string; name: string }): WorkflowStep[] {
+  // Resolution chain (first hit wins):
+  //   {operatorDir}/.crosscheck/workflow.yml          — repo-committed, only when run inside the repo
+  //   ~/.crosscheck/workflows/<owner>__<repo>.yml     — per-repo override (crosscheck alter)
+  //   ~/.crosscheck/workflow.yml                      — global default (crosscheck onboard)
+  //   DEFAULT_WORKFLOW                                — built-in fallback
+  const file = findWorkflowFile(operatorDir, repo)
   if (!file) return DEFAULT_WORKFLOW
   return parseWorkflowFile(file)  // Zod-validated, throws on schema error
 }
 ```
 
-`watch.ts`/`serve.ts` always call `loadWorkflow` + `runWorkflow`. No conditional for "no file". The constant *is* the backwards compatibility — existing installs without a `workflow.yml` get the default single-step behavior through the same code path as custom workflows.
+`watch.ts`/`serve.ts` always call `loadWorkflow` + `runWorkflow`. No conditional for "no file". The constant *is* the backwards compatibility — installs without any `workflow.yml` get the default **review → fix → recheck** loop through the same code path as custom workflows. `crosscheck onboard` customizes the global default for every monitored repo; `crosscheck alter <repo>` overrides one repo (see the per-repo layer above). Review-only is simply the `[review]` shape of this same pipeline — `crosscheck alter <repo> --steps review` (or `--review-only`) — not a separate mode.
 
 **`crosscheck init` generates a workflow template:**
 
@@ -2868,6 +2877,49 @@ Phase 3: `--build` — full autonomous contribution. Requires careful scoping of
 ---
 
 ### 🔜 Next Up
+
+- [ ] **Default pipeline is `review → fix → recheck` for every monitored repo** — the built-in default and the `crosscheck onboard` default both become the full loop, so a fresh install closes the review → fix → recheck cycle without extra configuration. `onboard` stays the place to customize this global default (all three presets are still offered); the chosen pipeline is written to `~/.crosscheck/workflow.yml` and applies to every monitored repo unless a repo has its own override (see the `alter-workflow` item below).
+  - **User:** Anyone installing crosscheck for the first time, or running `crosscheck onboard`, who expects fixes to be applied and re-reviewed by default — not just a review comment left behind.
+  - **Acceptance Criteria:**
+    - `DEFAULT_WORKFLOW` (`src/lib/workflow.ts`) has three steps: `review` → `fix` (`when: "review.verdict != 'APPROVE'"`) → `recheck` (`when: "fix.applied_count > 0"`), each carrying its existing default instructions. This constant is the last-resort fallback used only when no `workflow.yml` exists anywhere.
+    - `crosscheck onboard`'s pipeline picker (Step 7) defaults to `review → fix → re-check` (index 2) on a fresh install, instead of `review → fix`.
+    - `detectCurrentPreset()` returns `review-fix-recheck` when no global workflow file exists (and on a malformed file), so onboard pre-selects the full loop for new users while still preserving an existing user's chosen preset on re-run.
+    - Onboard still offers all three presets; selecting `review only` or `review → fix` continues to write the corresponding shorter pipeline. The change is the *default selection* only, not the set of available choices.
+    - The max-rounds prompt (Step 7.5) is shown for the full-loop default, exactly as it is today for an explicit `review-fix-recheck` choice.
+    - No config-schema change. Additive, default-only behavior — minor version bump.
+  - **Technical Notes:**
+    - `src/lib/workflow.ts`: append a `recheck` step to `DEFAULT_WORKFLOW` mirroring the onboard `recheckStep` shape (`reviewer: 'auto'`, `when: "fix.applied_count > 0"`, `max_rounds: 1`, `DEFAULT_RECHECK_INSTRUCTIONS`).
+    - `src/commands/onboard.ts`: `promptWorkflowPipeline` fallback `defaultIndex` → 2; `detectCurrentPreset` no-file / malformed return → `'review-fix-recheck'`.
+    - Re-run safety: an existing user whose `~/.crosscheck/workflow.yml` encodes review-only or review → fix is unaffected — `detectCurrentPreset` reads their file and pre-selects it; the new default applies only when no file exists.
+  - **Tests Required:** `DEFAULT_WORKFLOW` has review/fix/recheck in order with the correct `when` guards; `detectCurrentPreset` returns `review-fix-recheck` with no file and with a malformed file; existing review-only / review-fix workflow files are still detected as their own preset; `onboard --yes` on an existing config preserves that user's preset.
+
+- [ ] **`crosscheck alter-workflow` (alias `alter`) — per-repo pipeline override** — set a different pipeline for one monitored repo without touching the global default. Writes a per-repo override file that takes precedence over `~/.crosscheck/workflow.yml` but sits below a repo-committed `.crosscheck/workflow.yml`. This is the single supported way to express "review-only for this one repo" — review-only is a pipeline shape (`--steps review`), not a standalone mode or flag anywhere else in the CLI.
+  - **User:** An operator monitoring several repos who wants, e.g., the full loop everywhere but review-only on one sensitive repo, or review → fix on a fast-moving repo — without hand-editing YAML.
+  - **CLI:**
+    - `crosscheck alter <repo> --steps <list>` where `<list>` is a comma-separated, ordered subset of `review,fix,recheck`. Accepted shapes: `review`, `review,fix`, `review,fix,recheck`.
+    - `crosscheck alter <repo> --review-only` — shorthand for `--steps review`. This alias exists **only** on `alter-workflow`; no other command gains a `--review-only` flag.
+    - `<repo>` accepts `org/repo`, `github.com/org/repo`, and `https://github.com/org/repo(.git)`.
+    - `alter-workflow` is the canonical command name; `alter` is a registered alias (`.alias('alter')`).
+    - `--reset` removes the per-repo override so the repo falls back to the global default; `--show` prints the effective steps for the repo without writing. Both optional and additive.
+  - **Storage & precedence:**
+    - Writes `~/.crosscheck/workflows/<owner>__<repo>.yml` (flat file, `__` separator — no nested dirs) using the same generated-header + inline-instructions template `onboard` uses, so the file stays human-editable and consistent with the global one.
+    - `loadWorkflow` resolution chain becomes: `{operatorDir}/.crosscheck/workflow.yml` → `~/.crosscheck/workflows/<owner>__<repo>.yml` → `~/.crosscheck/workflow.yml` → `DEFAULT_WORKFLOW`. The per-repo `alter` layer sits directly above the global onboard file. (The operator-dir file only participates when crosscheck is run from inside that repo; for a `watch`/`serve` daemon monitoring many repos, the per-repo `alter` file is the mechanism that actually customizes one repo.)
+  - **Acceptance Criteria:**
+    - Steps validation: the list must be non-empty, contain only `review|fix|recheck`, and be a contiguous prefix of `review,fix,recheck` in that order (`fix` requires `review`; `recheck` requires `fix`). An invalid list exits 1 with a clear message before writing.
+    - `--steps` and `--review-only` are mutually exclusive; providing both exits 1. Providing neither (and no `--reset`/`--show`) exits 1 with usage. `--review-only` ≡ `--steps review`.
+    - Repo-arg parsing tolerates the `github.com/` prefix, the `https://` scheme, a trailing `.git`, and a trailing slash; anything that does not resolve to exactly `<owner>/<repo>` exits 1.
+    - The written file round-trips through `WorkflowSchema`, and `loadWorkflow(operatorDir, { owner, name })` returns exactly the requested step types (with `when` guards on fix/recheck and default instructions).
+    - `crosscheck alter <repo> --reset` deletes `~/.crosscheck/workflows/<owner>__<repo>.yml` if present (no error if absent) and prints confirmation.
+    - `loadWorkflow(operatorDir)` with no repo argument behaves exactly as today — the per-repo layer is opt-in per callsite.
+    - The runtime commands that process a specific PR pass the PR's `{ owner, name }` to `loadWorkflow`: `run.ts`, `watch.ts`, `serve.ts`, `kickass.ts`. Commands without a specific repo in scope keep passing only the operator dir.
+    - New command; additive flags — minor version bump. Exit codes follow the standard table (1 = user error, 2 = unexpected).
+  - **Technical Notes:**
+    - Lift `buildWorkflowYaml` out of `onboard.ts` into `src/lib/workflow.ts` so `onboard` and `alter` share one generator; add a `perRepoWorkflowPath(owner, name)` helper there (`join(homedir(), '.crosscheck', 'workflows', `${owner}__${name}.yml`)`).
+    - `src/lib/workflow.ts`: `loadWorkflow(operatorDir?, repo?: { owner: string; name: string })` — insert the per-repo candidate above the global one.
+    - New `src/commands/alter.ts`: `runAlter(repoArg, opts)`. Reuse the repo-URL parser already used by `review`/`run` to normalize to `{ owner, name }`; map `--review-only` → `['review']`; validate; write via the shared generator or delete on `--reset`.
+    - `src/cli.ts`: register `alter-workflow` with `.alias('alter')`, `<repo>` arg, `--steps <list>`, `--review-only`, `--reset`, `--show`.
+    - Thread `{ owner, name }` into the `loadWorkflow(process.cwd())` callsites in `run.ts`, `watch.ts`, `serve.ts`, `kickass.ts` (each already holds the PR coordinates at that point).
+  - **Tests Required:** repo-arg parser accepts `org/repo`, `github.com/org/repo`, `https://github.com/org/repo.git`; rejects `repo`, empty, `a/b/c`. Steps validator accepts the three canonical shapes and rejects `fix`, `recheck`, `review,recheck`, `review,foo`, empty. `--review-only` writes a one-step file; `--steps review,fix,recheck` writes three steps with correct guards. `--reset` removes the file (and is a no-op when absent). `loadWorkflow` precedence: per-repo file beats global; project-local beats per-repo. The mutually-exclusive flag guard exits 1.
 
 - [x] **`--port <n>` flag for `watch` and `serve`** — shipped in `c0ed2dd`. Override the webhook server port for one session without editing `crosscheck.config.yml`. Requested to run a second instance or dodge a port already claimed by another process.
   - **User:** Anyone running `crosscheck watch` / `crosscheck serve` who needs a specific port for this session — a second instance on a different port, a machine where `7891` is taken, or a fixed port required by an external tunnel/reverse-proxy config.

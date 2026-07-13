@@ -111,4 +111,4 @@ crosscheck scan --force --tidy
 - Do not imply automatic merge.
 - Do not imply guaranteed correctness.
 - Say "merge-ready" as a human decision state, not a machine guarantee.
-- Show review-only mode as the conservative first step when discussing team adoption.
+- Show review-only (`crosscheck alter <repo> --review-only`) as the conservative first step when discussing team adoption.

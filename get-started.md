@@ -19,6 +19,7 @@
   - [review](#crosscheck-review-pr-urls)
   - [run](#crosscheck-run-pr-urls)
   - [recheck / fix / resolve](#crosscheck-recheck--fix--resolve-pr-urls)
+  - [alter-workflow](#crosscheck-alter-workflow-repo)
   - [Multi-PR syntax](#multi-pr-syntax)
   - [watch](#crosscheck-watch)
   - [serve](#crosscheck-serve-beta)
@@ -411,15 +412,15 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 **Step 6 — Review quality.** Choose the speed/thoroughness tier for review prompts and reviewer timeouts.
 
-**Step 7 — Workflow pipeline.** Choose what happens after a review:
+**Step 7 — Workflow pipeline.** Choose the default pipeline for **every** monitored repo:
 
 ```
   [1] review only              — AI posts a comment; you handle fixes
-  [2] review → fix             — AI reviews, then auto-applies fixes  (recommended)
-  [3] review → fix → re-check  — full loop: review, fix, re-review to confirm
+  [2] review → fix             — AI reviews, then auto-applies fixes
+  [3] review → fix → re-check  — full loop: review, fix, re-review to confirm  (default)
 ```
 
-The `review → fix → re-check` option writes a `~/.crosscheck/workflow.yml` with all three pipeline steps configured.
+The pipeline you pick here is written to `~/.crosscheck/workflow.yml` and applies to every repo crosscheck monitors. The default is the full `review → fix → re-check` loop. To use a different pipeline for one repo only, leave this global default and run [`crosscheck alter <repo>`](#crosscheck-alter-workflow-repo) afterward — for example `crosscheck alter owner/repo --review-only` for a single review-only repo.
 
 **Step 8 — Fix -> recheck rounds.** When the full loop is selected, choose how many autonomous fix→recheck cycles Crosscheck can run before stopping. Each cycle is one fix commit followed by one recheck: `review → fix¹ → recheck¹ → fix² → recheck² → …`. Crosscheck drives these cycles automatically — no human push needed between rounds. A round stops early when the recheck returns `APPROVE`. The cap prevents runaway loops when issues resist automated fixing.
 
@@ -568,7 +569,7 @@ crosscheck run https://github.com/owner/repo/pull/245,https://github.com/other/r
 crosscheck run https://github.com/owner/repo/pull/245-256 --concurrent 3
 ```
 
-The workflow executed is loaded from `.crosscheck/workflow.yml` in the operator repo root if present, then `~/.crosscheck/workflow.yml`, and otherwise falls back to the built-in default pipeline: review, then fix when the verdict is not `APPROVE`. Use `crosscheck run` to test your full pipeline end-to-end against a real PR.
+The workflow executed is resolved in this order (first hit wins): `.crosscheck/workflow.yml` in the operator repo root (when run inside the repo) → `~/.crosscheck/workflows/<owner>__<repo>.yml` (a per-repo override written by [`crosscheck alter`](#crosscheck-alter-workflow-repo)) → `~/.crosscheck/workflow.yml` (the global default written by `crosscheck onboard`) → the built-in default pipeline (**review → fix → recheck**). Use `crosscheck run` to test your full pipeline end-to-end against a real PR.
 
 | Flag | Description |
 |---|---|
@@ -604,6 +605,42 @@ crosscheck resolve https://github.com/owner/repo/pull/245-256 --vendor claude
 ```
 
 When the named step is not present in the active `workflow.yml`, `recheck` and `conflict-resolve` are synthesized with built-in defaults so the command still runs. `resolve` only supports `claude` (Codex conflict resolution is not yet supported); pass `--vendor claude` if the PR's assigned reviewer is Codex.
+
+---
+
+### `crosscheck alter-workflow <repo>`
+
+Override the pipeline for a **single repo**, leaving the global default (set in `crosscheck onboard`) in place for every other monitored repo. `alter` is a shorthand alias for `alter-workflow`.
+
+```bash
+# review-only for one sensitive repo
+crosscheck alter owner/repo --review-only
+
+# review + fix (no auto re-check) for a fast-moving repo
+crosscheck alter owner/repo --steps review,fix
+
+# the full loop, explicitly
+crosscheck alter github.com/owner/repo --steps review,fix,recheck
+
+# show the effective steps for a repo without writing
+crosscheck alter owner/repo --show
+
+# drop the override — the repo falls back to the global default
+crosscheck alter owner/repo --reset
+```
+
+The `<repo>` argument accepts `owner/repo`, `github.com/owner/repo`, or a full `https://github.com/owner/repo` URL. The override is written to `~/.crosscheck/workflows/<owner>__<repo>.yml` — a plain workflow file you can also hand-edit.
+
+**Steps.** `--steps` takes a comma-separated, ordered subset of `review,fix,recheck`. Because each step feeds the next, the only valid shapes are `review`, `review,fix`, and `review,fix,recheck` (`fix` needs a `review`; `recheck` needs a `fix`). `--review-only` is shorthand for `--steps review`; the two flags are mutually exclusive. Review-only is just this `[review]` shape — there is no separate "review-only mode" flag anywhere else in the CLI.
+
+| Flag | Description |
+|---|---|
+| `--steps <list>` | Set the repo's pipeline: `review`, `review,fix`, or `review,fix,recheck` |
+| `--review-only` | Shorthand for `--steps review` |
+| `--show` | Print the effective steps for the repo without writing |
+| `--reset` | Remove the per-repo override; the repo reverts to the global default |
+
+**Precedence.** A per-repo `alter` override sits above the global `~/.crosscheck/workflow.yml` but below a `.crosscheck/workflow.yml` committed inside the repo itself. See [Resolution order](#per-project-overrides-checked-before-the-global-files).
 
 ---
 
@@ -993,7 +1030,8 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 | File | Written by | Read by | Purpose |
 |---|---|---|---|
 | `config.yml` | `onboard`, `init`, `watch`/`serve` (first run) | all commands | Main config — deployment, repos, mode, vendors, quality, tunnel, routing, budget, branding |
-| `workflow.yml` | `onboard` (first run only) | `watch`, `serve`, `run` | Global pipeline steps with per-step inline instructions. Written once on first onboard; never overwritten on re-runs — edit freely |
+| `workflow.yml` | `onboard` (first run only) | `watch`, `serve`, `run` | Global default pipeline (applies to every monitored repo) with per-step inline instructions. Defaults to the full review → fix → recheck loop. Written once on first onboard; never overwritten on re-runs — edit freely |
+| `workflows/<owner>__<repo>.yml` | `alter-workflow` | `watch`, `serve`, `run` | Per-repo pipeline override. Takes priority over the global `workflow.yml` for that one repo; delete (or `alter --reset`) to revert to the global default |
 | `webhook-secret` | auto-generated on first use | `watch`, `serve` | HMAC secret for GitHub webhook signature verification — reused across restarts |
 | `logs/YYYY-MM-DD.ndjson` | `watch`, `serve` | `diagnose`, `optimize`, `impact`, `issue` | Structured review event log, one file per day |
 
@@ -1001,9 +1039,11 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 
 | File | Read by | Purpose |
 |---|---|---|
-| `.crosscheck/workflow.yml` *(in repo)* | `watch`, `serve`, `run` | Per-project pipeline — takes priority over `~/.crosscheck/workflow.yml` |
+| `.crosscheck/workflow.yml` *(in repo)* | `watch`, `serve`, `run` | Per-project pipeline — highest priority, wins over both the per-repo override and the global default |
 | `.crosscheck/AGENT.md` *(in repo)* | `optimize` | Per-project harness — takes priority over bundled `AGENT.md` |
 | `AGENT.md` *(bundled with crosscheck)* | `optimize` | Default harness — shipped with the package, always available as fallback |
+
+**Workflow resolution order** (first hit wins): `{repo}/.crosscheck/workflow.yml` → `~/.crosscheck/workflows/<owner>__<repo>.yml` (`crosscheck alter`) → `~/.crosscheck/workflow.yml` (`crosscheck onboard`) → built-in default (**review → fix → recheck**).
 
 ### What `crosscheck onboard` owns vs. preserves
 
@@ -1013,7 +1053,7 @@ On re-runs, `onboard` updates only the fields it collected answers for. Everythi
 
 **Initialised on first run, never overwritten:** `routing.allowed_authors`, `routing.author_routes`, `routing.fallback_reviewer`
 
-**Never touched by onboard:** `quality.focus`, `quality.custom_prompt`, `budget.*`, `branding.*`, `server.*`, `logs.*`, `backtrace.*`, `workflow.yml` (after first write), harness files
+**Never touched by onboard:** `quality.focus`, `quality.custom_prompt`, `budget.*`, `branding.*`, `server.*`, `logs.*`, `backtrace.*`, `workflow.yml` (after first write), `workflows/*.yml` (per-repo overrides — owned by `crosscheck alter`), harness files
 
 ---
 
@@ -1410,9 +1450,14 @@ steps:
 
 To reset the review step instructions to defaults, delete `~/.crosscheck/workflow.yml` and re-run `crosscheck onboard` — it will regenerate the file with the built-in defaults.
 
-### Can I have per-project workflow?
+### Can I have a per-repo workflow?
 
-Yes. Create `.crosscheck/workflow.yml` in your repo root. crosscheck loads it automatically and uses it instead of the built-in default pipeline. This is the recommended way to customize reviewer behavior — it keeps all per-project settings in one file under version control.
+Two ways, depending on whether the setting should be committed:
+
+- **Committed with the repo:** create `.crosscheck/workflow.yml` in the repo root. crosscheck loads it automatically and it wins over everything else. Best when the whole team should share the pipeline and reviewer instructions under version control.
+- **Local to your operator machine:** run [`crosscheck alter <repo>`](#crosscheck-alter-workflow-repo) to change just the *pipeline shape* for one repo — e.g. `crosscheck alter owner/repo --review-only` or `--steps review,fix`. This writes `~/.crosscheck/workflows/<owner>__<repo>.yml` and takes priority over the global default without touching the repo. `crosscheck alter owner/repo --reset` removes it.
+
+To change the default pipeline for **all** monitored repos at once, re-run `crosscheck onboard` (Step 7) or edit `~/.crosscheck/workflow.yml`.
 
 ### What is `AGENT.md`?
 

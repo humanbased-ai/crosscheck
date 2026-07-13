@@ -31,7 +31,7 @@ Built by [Humanbased](https://github.com/humanbased-ai). Read the field report: 
 - **Independent eyes, not self-review** — route Claude-authored PRs to Codex and vice versa. Self-review is exactly where early-victory failures hide.
 - **Review → Fix → Recheck, not just comments** — findings return to the author agent for repair; a clean recheck follows before merge. PRs move forward, not sideways.
 - **No new vendor** — runs through the `claude` and `codex` CLIs you already pay for. No per-review bill, no extra trust surface.
-- **Configurable for any team size** — review-only mode, review + fix, or the full loop. Personal laptop via `watch`, always-on server via `serve`, one-shot via `review`.
+- **Full loop by default, configurable per repo** — every monitored repo runs the full review → fix → recheck pipeline out of the box. Scope it down for one repo with `crosscheck alter <repo> --steps review,fix` (or `--review-only`); change the default for all repos in `crosscheck onboard`. Personal laptop via `watch`, always-on via `watch` + smee, one-shot via `review`.
 
 ## Who uses crosscheck
 
@@ -39,7 +39,7 @@ Built by [Humanbased](https://github.com/humanbased-ai). Read the field report: 
 |---|---|---|
 | **Solo agentic builder** | Same agent that wrote the code may self-approve incomplete work | Independent reviewer from a different vendor, on your machine |
 | **Technical founder** | AI PRs look done before delivering stable value | Closes the loop: review finding → agent fix → clean recheck |
-| **Engineering lead** | Agent use is hard to supervise or standardize | Configurable workflow, review-only mode, and a visible PR audit trail |
+| **Engineering lead** | Agent use is hard to supervise or standardize | A default full-loop workflow, per-repo overrides (`crosscheck alter`), and a visible PR audit trail |
 | **OSS maintainer** | Review bandwidth is scarce; comments must be actionable | One-shot `crosscheck review` posts concrete findings directly on the PR |
 
 ### Common workflows
@@ -112,9 +112,10 @@ crosscheck serve        # always-on team server
 ## Commands
 
 ```bash
-crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
+crosscheck onboard                  # guided setup — pick repos, mode, and the default pipeline
 crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
 crosscheck serve                    # team use — fixed port, register webhook once
+crosscheck alter <repo>             # per-repo pipeline override: --steps review,fix | --review-only | --reset
 crosscheck review <pr-urls...>      # review one or more PRs (comma lists, ranges, cross-repo)
 crosscheck run <pr-urls...>         # run the full workflow: review → (fix → recheck) × max_rounds
 crosscheck recheck|fix|resolve <pr-urls...>   # force one workflow step on one or more PRs
