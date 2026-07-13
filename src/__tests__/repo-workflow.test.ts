@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -57,6 +57,14 @@ describe('repo workflow helpers', () => {
     expect(readRepoWorkflowStepTypes('humanbased-ai', 'xny-monorepo', dir)).toBeUndefined()
     // Second remove is a no-op, not an error.
     expect(removeRepoWorkflowOverride('humanbased-ai', 'xny-monorepo', dir)).toBe(false)
+  })
+
+  it('writes atomically — leaves no .tmp file, and overwrites cleanly', () => {
+    writeRepoWorkflowStepTypes('humanbased-ai', 'xny-monorepo', ['review', 'fix'], dir)
+    expect(readdirSync(dir).filter(f => f.endsWith('.tmp'))).toEqual([])
+    writeRepoWorkflowStepTypes('humanbased-ai', 'xny-monorepo', ['review'], dir)
+    expect(readRepoWorkflowStepTypes('humanbased-ai', 'xny-monorepo', dir)).toEqual(['review'])
+    expect(readdirSync(dir).filter(f => f.endsWith('.tmp'))).toEqual([])
   })
 
   it('reads and writes case-insensitively on owner/name', () => {

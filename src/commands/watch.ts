@@ -386,7 +386,11 @@ export async function runWatch(opts: WatchOpts = {}) {
         } catch { /* best-effort — fall back to a fresh round-1 review */ }
       } else if (!isRecheckRun) {
         try {
-          const allSteps = resolveRepoWorkflowSteps(owner, repoName, loadWorkflow(process.cwd()))
+          // Reuse the per-event override snapshot (read once at repoStepOverride)
+          // instead of re-reading the file; the global workflow is still loaded
+          // fresh so live edits to workflow.yml apply across events.
+          const globalWorkflow = loadWorkflow(process.cwd())
+          const allSteps = repoStepOverride ? filterStepsByTypes(globalWorkflow, repoStepOverride) : globalWorkflow
           const history = await fetchStepHistory(owner, repoName, prNumber, token)
           const nextResult = identifyNextWorkflowStep(history, allSteps, params.headSha)
           if (nextResult.step === null) {
@@ -507,7 +511,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
         const workflowStepsForRun = resolvedSteps
-          ?? (repoStepOverride ? resolveRepoWorkflowSteps(owner, repoName, loadWorkflow(process.cwd())) : undefined)
+          ?? (repoStepOverride ? filterStepsByTypes(loadWorkflow(process.cwd()), repoStepOverride) : undefined)
 
         const { verdict, fixAppliedCount } = await runWorkflow({
           owner, repoName, prNumber, pr,
@@ -590,7 +594,8 @@ export async function runWatch(opts: WatchOpts = {}) {
         // concurrently while the recheck was running.
         if (repoAllowsRecheck && verdict && verdict !== 'APPROVE' && fixCommitSha) {
           if (deliveryMode === 'commit') {
-            const allSteps = resolveRepoWorkflowSteps(owner, repoName, loadWorkflow(process.cwd()))
+            const globalWorkflow = loadWorkflow(process.cwd())
+            const allSteps = repoStepOverride ? filterStepsByTypes(globalWorkflow, repoStepOverride) : globalWorkflow
             const fixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
             const maxRounds = fixRecheckSteps.length > 0
               ? Math.min(...fixRecheckSteps.map(s => s.max_rounds ?? 1))
@@ -680,8 +685,8 @@ export async function runWatch(opts: WatchOpts = {}) {
       const eventReviewOnly = isReviewOnlyWorkflow(eventSteps)
 
       // The two crosscheck-commit skips below exist only to stop the fix→review
-      // loop from re-entering on crosscheck's own fix commits. --only-review has no
-      // fix step and never pushes commits, so there is no loop to guard against;
+      // loop from re-entering on crosscheck's own fix commits. A review-only repo has
+      // no fix step and never pushes commits, so there is no loop to guard against;
       // skipping these would also drop fix commits pushed by another session, which
       // in review-only mode are just current PR content that should be reviewed.
       // decideReviewOnly dedups per head SHA, so reviewing them can't repeat.

@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { homedir } from 'os'
 import yaml from 'js-yaml'
 import { RepoWorkflowStepsSchema, type RepoWorkflowStep } from '../config/schema.js'
+import { log } from './logger.js'
 import type { WorkflowStep } from './workflow.js'
 
 export interface RepoRef {
@@ -91,10 +92,14 @@ export function readRepoWorkflowStepTypes(
   try {
     const raw = yaml.load(readFileSync(path, 'utf8')) as { steps?: unknown }
     const parsed = RepoWorkflowStepsSchema.safeParse(raw?.steps)
-    return parsed.success ? parsed.data : undefined
-  } catch {
-    return undefined
-  }
+    if (parsed.success) return parsed.data
+  } catch { /* fall through to the warning below */ }
+  // The file exists but did not parse into a valid override. Returning undefined
+  // reverts the repo to the global workflow — a fail-open toward MORE action on a
+  // repo the operator may have deliberately locked down (e.g. review-only) — so
+  // surface it in the log rather than swallowing it silently.
+  log({ level: 'warn', event: 'repo_workflow_override_unreadable', repo: `${owner}/${name}`, path })
+  return undefined
 }
 
 export function writeRepoWorkflowStepTypes(
@@ -105,7 +110,11 @@ export function writeRepoWorkflowStepTypes(
 ): string {
   const path = perRepoWorkflowPath(owner, name, workflowsDir)
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, buildRepoWorkflowFile(owner, name, steps))
+  // Write atomically (temp + rename) so a per-event read never sees a half-written
+  // file and fails open to the global workflow.
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSync(tmp, buildRepoWorkflowFile(owner, name, steps))
+  renameSync(tmp, path)
   return path
 }
 

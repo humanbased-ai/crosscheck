@@ -42,14 +42,30 @@ export function resolveSteps(opts: AlterOpts): RepoWorkflowStep[] {
   throw new Error('Choose a workflow depth with --steps review,fix,recheck or --review-only (or use --show / --reset)')
 }
 
-export function runAlter(repoInput: string, opts: AlterOpts = {}): void {
-  try {
-    const repo = parseRepoRef(repoInput)
-    if (!repo) {
-      throw new Error('Invalid repo. Use owner/repo, github.com/owner/repo, or https://github.com/owner/repo')
-    }
-    const { owner, name } = repo
+function fail(err: unknown, code: 1 | 2): never {
+  console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+  process.exit(code)
+}
 
+export function runAlter(repoInput: string, opts: AlterOpts = {}): void {
+  // ── Validate intent — user errors exit 1 ──────────────────────────────────
+  const repo = parseRepoRef(repoInput)
+  if (!repo) {
+    fail(new Error('Invalid repo. Use owner/repo, github.com/owner/repo, or https://github.com/owner/repo'), 1)
+  }
+  const { owner, name } = repo
+
+  let steps: RepoWorkflowStep[] | undefined
+  if (!opts.reset && !opts.show) {
+    try {
+      steps = resolveSteps(opts)
+    } catch (err: unknown) {
+      fail(err, 1)
+    }
+  }
+
+  // ── Filesystem effects — unexpected failures (EACCES, ENOSPC, …) exit 2 ────
+  try {
     if (opts.reset) {
       const removed = removeRepoWorkflowOverride(owner, name, opts.workflowsDir)
       if (removed) {
@@ -61,9 +77,9 @@ export function runAlter(repoInput: string, opts: AlterOpts = {}): void {
     }
 
     if (opts.show) {
-      const steps = readRepoWorkflowStepTypes(owner, name, opts.workflowsDir)
-      if (steps) {
-        console.log(`${owner}/${name}  ${chalk.cyan(formatRepoWorkflowSteps(steps))}`)
+      const current = readRepoWorkflowStepTypes(owner, name, opts.workflowsDir)
+      if (current) {
+        console.log(`${owner}/${name}  ${chalk.cyan(formatRepoWorkflowSteps(current))}`)
         console.log(chalk.dim(`  ${perRepoWorkflowPath(owner, name, opts.workflowsDir)}`))
       } else {
         console.log(`${owner}/${name}  ${chalk.dim('uses the global workflow (no override)')}`)
@@ -71,14 +87,11 @@ export function runAlter(repoInput: string, opts: AlterOpts = {}): void {
       return
     }
 
-    const steps = resolveSteps(opts)
-    const path = writeRepoWorkflowStepTypes(owner, name, steps, opts.workflowsDir)
-
-    console.log(chalk.green(`✓ ${owner}/${name} workflow set to ${formatRepoWorkflowSteps(steps)}`))
+    const path = writeRepoWorkflowStepTypes(owner, name, steps!, opts.workflowsDir)
+    console.log(chalk.green(`✓ ${owner}/${name} workflow set to ${formatRepoWorkflowSteps(steps!)}`))
     console.log(chalk.dim(`  ${path}`))
     console.log(chalk.dim('  Applies on the next PR event — no need to restart crosscheck watch.'))
   } catch (err: unknown) {
-    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
-    process.exit(1)
+    fail(err, 2)
   }
 }
