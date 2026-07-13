@@ -111,4 +111,23 @@ describe('scanOpenPRStatuses', () => {
 
     expect(maxActive).toBeLessThanOrEqual(8)
   })
+
+  it('removes disallowed next actions for repo workflow overrides', async () => {
+    mockListOpenPRs.mockResolvedValue([openPR(1)])
+    mockListIssueComments.mockResolvedValue([{
+      body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+      createdAt: '2026-05-27T01:00:00.000Z',
+      updatedAt: '2026-05-27T01:00:00.000Z',
+    }])
+
+    const result = await scanOpenPRStatuses(
+      ConfigSchema.parse({ repos: [{ owner: 'acme', name: 'web', steps: ['review'] }] }),
+      'token',
+      { now: new Date('2026-05-29T00:00:00.000Z'), staleAfterMs: 24 * 60 * 60 * 1000 },
+    )
+
+    expect(result.prs[0].reviewState).toBe('NEEDS_FIX')
+    expect(result.prs[0].nextAction).toBeNull()
+    expect(result.summary.actionable).toBe(0)
+  })
 })

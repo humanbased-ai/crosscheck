@@ -140,7 +140,7 @@ function isUserError(err: unknown, message: string): boolean {
 function buildScanScopeHash(config: Config): string {
   const scope = {
     orgs: [...config.orgs].sort(),
-    repos: config.repos.map(repo => `${repo.owner}/${repo.name}`).sort(),
+    repos: config.repos.map(repo => `${repo.owner}/${repo.name}:${repo.steps?.join(',') ?? 'default'}`).sort(),
     users: [...config.users].sort(),
     allowedAuthors: [...config.routing.allowed_authors].sort(),
   }

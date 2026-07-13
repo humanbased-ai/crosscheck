@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url'
 import { basename, dirname, join } from 'path'
 import { runInit } from './commands/init.js'
 import { runOnboard } from './commands/onboard.js'
+import { runAlter } from './commands/alter.js'
 import { runWatch } from './commands/watch.js'
 import { runReviewSpec } from './commands/review.js'
 import { runStatus } from './commands/status.js'
@@ -108,6 +109,14 @@ program
   .option('--team', 'pre-select team deployment mode, skip persona prompt')
   .option('--reconfigure', 're-run setup (accepted for compatibility; onboard always reconfigures)')
   .action((opts: { config?: string; yes?: boolean; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runOnboard(opts))
+
+program
+  .command('alter <repo>')
+  .description('Set a per-repo workflow override in config')
+  .option('-c, --config <path>', 'config file path to update')
+  .option('--steps <list>', 'repo workflow depth: review, review,fix, or review,fix,recheck')
+  .option('--review-only', 'alias for --steps review')
+  .action((repo: string, opts: { config?: string; steps?: string; reviewOnly?: boolean }) => runAlter(repo, opts))
 
 program
   .command('watch')

@@ -31,7 +31,7 @@ Built by [Humanbased](https://github.com/humanbased-ai). Read the field report: 
 - **Independent eyes, not self-review** — route Claude-authored PRs to Codex and vice versa. Self-review is exactly where early-victory failures hide.
 - **Review → Fix → Recheck, not just comments** — findings return to the author agent for repair; a clean recheck follows before merge. PRs move forward, not sideways.
 - **No new vendor** — runs through the `claude` and `codex` CLIs you already pay for. No per-review bill, no extra trust surface.
-- **Configurable for any team size** — review-only mode (`watch --only-review`), review + fix, or the full loop. Continuous monitoring via `watch`, one-shot via `review`.
+- **Configurable for any team size** — review-only, review + fix, or the full loop. Use one workflow locally, or one always-on team watcher with per-repo overrides via `crosscheck alter`.
 
 ## Who uses crosscheck
 
@@ -42,23 +42,40 @@ Built by [Humanbased](https://github.com/humanbased-ai). Read the field report: 
 | **Engineering lead** | Agent use is hard to supervise or standardize | Configurable workflow, review-only mode, and a visible PR audit trail |
 | **OSS maintainer** | Review bandwidth is scarce; comments must be actionable | One-shot `crosscheck review` posts concrete findings directly on the PR |
 
-### Common workflows
+### Usage scenarios
+
+**Local use**
+
+Use Crosscheck from your own machine when you want an independent review before merge, or a temporary watcher while you work.
 
 ```bash
 # Catch regressions before merging a solo PR
 crosscheck run <pr-url>
 
-# Continuous review on every incoming agent PR
-crosscheck watch            # tunnel + webhook, reviews as PRs arrive
-
-# Review stale PRs from a queue
-crosscheck scan && crosscheck kickass
-
 # One-shot review of a specific PR
 crosscheck review <pr-url>
 
+# Continuous review while your terminal is open
+crosscheck onboard --personal
+crosscheck watch
+
 # Loop until the agent produces an approved patch
 crosscheck run <pr-url> --crazy
+```
+
+**Always-on team server**
+
+Run one long-lived `watch` process for the whole team or org on a shared machine. Configure the default workflow once, then narrow individual repos only when needed.
+
+```bash
+# One-time setup on the server
+crosscheck onboard --team
+
+# Example: one repo gets review-only, the rest keep the global workflow
+crosscheck alter humanbased-ai/xny-monorepo --review-only
+
+# Start the team watcher
+crosscheck watch
 ```
 
 ---
@@ -90,7 +107,7 @@ crosscheck review https://github.com/humanbased-ai/crosscheck-proof-fixture/pull
 
 This fixture PR intentionally contains a realistic agentic-code regression, so you can see whether Crosscheck produces a useful review before pointing it at your own repo. Use `--reviewer claude` if Claude Code is the authenticated reviewer. After the fixture review works, swap in one low-risk PR from your repo, then run `crosscheck onboard` to configure repos, workflow mode, and continuous monitoring.
 
-### Continuous mode
+### Continuous local mode
 
 ```bash
 # 1. Install crosscheck and the agent CLIs
@@ -107,12 +124,27 @@ crosscheck watch                  # continuous review as PRs arrive
 crosscheck watch --only-review    # reviews only — never auto-fix
 ```
 
+### Always-on team mode
+
+```bash
+# 1. Run guided setup on the shared machine
+crosscheck onboard --team
+
+# 2. Optional: tune individual repos without changing the global workflow
+crosscheck alter humanbased-ai/xny-monorepo --review-only
+crosscheck alter humanbased-ai/api --steps review,fix,recheck
+
+# 3. Start the long-lived watcher
+crosscheck watch
+```
+
 ---
 
 ## Commands
 
 ```bash
 crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
+crosscheck alter <repo>             # set a per-repo workflow override
 crosscheck watch                    # continuous use — tunnel + webhook + listening
 crosscheck watch --only-review      # continuous reviews only — never auto-fix
 crosscheck review <pr-urls...>      # review one or more PRs (comma lists, ranges, cross-repo)
@@ -192,6 +224,20 @@ crosscheck onboard -y           # accept all defaults non-interactively
 
 ---
 
+### `crosscheck alter <repo>`
+
+Sets the workflow depth for one repo inside `~/.crosscheck/config.yml`. This is the preferred way to run one watcher for many repos while making one repo review-only.
+
+```bash
+crosscheck alter humanbased-ai/xny-monorepo --review-only
+crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
+crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
+```
+
+Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. Restart a running `crosscheck watch` process after altering config.
+
+---
+
 ### `crosscheck watch`
 
 Starts an SSH tunnel (localhost.run), registers GitHub webhooks, and listens for PR events. Everything self-cleans on Ctrl+C.
@@ -223,7 +269,7 @@ crosscheck review .../pull/245-256              # review an inclusive range
 
 ### `crosscheck run <pr-urls...>`
 
-Runs the full configured workflow against one or more PRs: review → (fix → recheck) × `max_rounds`. Loops autonomously through fix→recheck cycles up to the `max_rounds` value configured in `workflow.yml` (default: 1). Use `--crazy` or `--half-crazy` to loop until approved or unblocked, ignoring `max_rounds`. The PR argument accepts the [multi-PR spec syntax](#multi-pr-syntax); multiple PRs run concurrently (one agent per PR by default).
+Runs the configured workflow against one or more PRs: review → (fix → recheck) × `max_rounds`. Without `--steps`, this honors any repo workflow set by `crosscheck alter`. Loops autonomously through fix→recheck cycles up to the `max_rounds` value configured in `workflow.yml` (default: 1). Use `--crazy` or `--half-crazy` to loop until approved or unblocked, ignoring `max_rounds`. The PR argument accepts the [multi-PR spec syntax](#multi-pr-syntax); multiple PRs run concurrently (one agent per PR by default).
 
 ```bash
 crosscheck run <pr-url>
@@ -411,6 +457,26 @@ steps:
     type: recheck
     reviewer: auto
     when: fix.applied_count > 0
+```
+
+### Per-repo workflow overrides
+
+The global `workflow.yml` is the default for every repo. Add `repos[].steps` when one repo should run a narrower workflow in the same watcher.
+
+```yaml
+repos:
+  - owner: humanbased-ai
+    name: xny-monorepo
+    steps: [review]              # review-only
+  - owner: humanbased-ai
+    name: api
+    steps: [review, fix, recheck]
+```
+
+Prefer the command form so the rest of config is preserved:
+
+```bash
+crosscheck alter humanbased-ai/xny-monorepo --review-only
 ```
 
 ### Config snapshot

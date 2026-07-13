@@ -16,6 +16,7 @@ import { checkClaudeAuth } from '../reviewers/claude.js'
 import { execSync } from 'child_process'
 import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/repo-picker.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS } from '../lib/workflow.js'
+import { findRepoConfig, formatRepoWorkflowSteps } from '../lib/repo-workflow.js'
 
 export interface OnboardOpts {
   config?: string
@@ -508,9 +509,20 @@ export function applyOnboardConfig(
   raw.clone_protocol = cloneProtocol
 
   // Repos
+  const existingRepoSteps = new Map<string, unknown>()
+  if (Array.isArray(raw.repos)) {
+    for (const entry of raw.repos) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+      const repo = entry as Record<string, unknown>
+      if (typeof repo.owner === 'string' && typeof repo.name === 'string' && Array.isArray(repo.steps)) {
+        existingRepoSteps.set(`${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}`, repo.steps)
+      }
+    }
+  }
   raw.repos = selectedRepos.map(r => {
     const [owner, name] = r.split('/')
-    return { owner, name }
+    const steps = existingRepoSteps.get(`${owner.toLowerCase()}/${name.toLowerCase()}`)
+    return steps ? { owner, name, steps } : { owner, name }
   })
 
   // Users: personal mode captures the login; team mode never uses users
@@ -944,6 +956,14 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   const cloneProtocol = await promptCloneProtocol(existingConfig?.clone_protocol, opts)
 
   // ── Step 10: Confirm and write ─────────────────────────────────────────────
+  const selectedRepoWorkflowOverrides = existingConfig
+    ? selectedRepos.flatMap(repoKey => {
+        const [owner, name] = repoKey.split('/')
+        const repoConfig = findRepoConfig(existingConfig, owner, name)
+        return repoConfig?.steps ? [`${repoKey}: ${formatRepoWorkflowSteps(repoConfig.steps)}`] : []
+      })
+    : []
+
   console.log(chalk.bold('Step 10 — review and write config'))
   console.log()
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
@@ -971,6 +991,9 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
   if (selectedRepos.length > 0) {
     console.log(`  repos        ${selectedRepos.slice(0, 5).map(r => chalk.cyan(r)).join(', ')}${selectedRepos.length > 5 ? chalk.dim(` +${selectedRepos.length - 5} more`) : ''}`)
+  }
+  if (selectedRepoWorkflowOverrides.length > 0) {
+    console.log(`  repo rules   ${selectedRepoWorkflowOverrides.slice(0, 3).map(r => chalk.cyan(r)).join(', ')}${selectedRepoWorkflowOverrides.length > 3 ? chalk.dim(` +${selectedRepoWorkflowOverrides.length - 3} more`) : ''}`)
   }
   if (selectedOrgs.length === 0 && selectedRepos.length === 0) {
     console.log(`  ${chalk.yellow('No repos or orgs selected. Config will have empty scope.')}`)
@@ -1016,5 +1039,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log()
 
   // ── Next step hint ─────────────────────────────────────────────────────────
-  console.log(chalk.dim('  Run crosscheck watch to start monitoring.\n'))
+  console.log(chalk.dim('  Run crosscheck watch to start monitoring.'))
+  const alterExample = selectedRepos[0] ?? 'owner/repo'
+  console.log(chalk.dim(`  Tune one repo later: crosscheck alter ${alterExample} --review-only\n`))
 }

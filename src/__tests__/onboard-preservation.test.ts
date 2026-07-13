@@ -249,6 +249,23 @@ describe('applyOnboardConfig — re-run preservation', () => {
     expect((cfg.server as Record<string, unknown>).port).toBe(9000)
     expect((cfg.logs as Record<string, unknown>).retention_days).toBe(14)
   })
+
+  it('preserves repo workflow overrides when rewriting selected repos', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'team',
+      repos: [
+        { owner: 'alice', name: 'myapp', steps: ['review'] },
+        { owner: 'alice', name: 'legacy', steps: ['review', 'fix'] },
+      ],
+    }))
+
+    applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
+
+    const cfg = readConfig()
+    expect(cfg.repos).toEqual([
+      { owner: 'alice', name: 'myapp', steps: ['review'] },
+    ])
+  })
 })
 
 describe('applyOnboardConfig — users / routing edge cases', () => {

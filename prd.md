@@ -18,7 +18,7 @@ Published as `@motivation-labs/crosscheck` on npm.
 - **Use existing subscriptions** — run `claude` and `codex` CLIs locally, no per-token billing
 - **Zero infrastructure** — one command on any machine with both CLIs installed
 - **Config-as-code** — one flat YAML file, readable and writable by coding agents
-- **Two deployment modes** — `watch` for laptops, `serve` for always-on machines
+- **Two deployment modes** — `watch` for local laptop use, `watch --team` for always-on team servers
 - **Org-level coverage** — one webhook covers all repos in an org
 - **Self-improving** — `diagnose` + `optimize` create a feedback loop from observed failures to better review instructions; crosscheck gets more useful the longer it runs
 - **Self-annotating** — each crosscheck action embeds machine-readable attribution metadata that makes future attribution more accurate, without relying on external conventions
@@ -111,6 +111,29 @@ The security concern is narrower: the **hidden automation annotation** (`<!-- cr
 - Hidden `<!-- crosscheck: ... type=review -->` annotation from anyone else → annotation injection; blocked; logged as `annotation_injection_blocked`
 
 **Warning**: when `routing.allowed_authors` is unset on a public or broadly accessible repository, any commenter can attempt annotation injection. Surface this at `watch` startup so operators understand the risk.
+
+### P6 — One watcher may run different repo workflows
+
+Teams often want one long-lived Crosscheck process for an org, while individual repos need different automation depth. For example, `humanbased-ai/xny-monorepo` may be review-only, while neighboring repos still run review → fix → recheck.
+
+Per-repo workflow differences belong in `crosscheck.config.yml`, not in separate watcher processes. The global `workflow.yml` remains the reusable step template; `repos[].steps` narrows that template for a specific repo. CLI one-shot flags such as `crosscheck run --steps ...` are session overrides and take precedence over the repo default.
+
+The operator-facing command is:
+
+```bash
+crosscheck alter humanbased-ai/xny-monorepo --review-only
+crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
+crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
+```
+
+Acceptance criteria:
+- `RepoConfigSchema` accepts optional `steps: [review]`, `[review, fix]`, or `[review, fix, recheck]`.
+- `watch` resolves workflow steps per PR repo. Repos with `steps: [review]` do not run fix, recheck, conflict-resolve, or the review→fix `issue_comment` bridge.
+- Repos without an override keep the complete configured workflow.
+- `crosscheck alter <repo> --steps ...` updates or appends the repo entry while preserving all unrelated config fields.
+- `--review-only` is an alias for `--steps review`.
+- `onboard` preserves existing per-repo `steps` when repo selections are rewritten and points users to `alter` for per-repo tuning.
+- README and get-started docs explain local use and always-on team server use after the feature ships.
 
 ---
 

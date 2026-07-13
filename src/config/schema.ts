@@ -42,9 +42,26 @@ export const BudgetConfigSchema = z.object({
   per_review_usd: z.number().default(2.0),
 })
 
+export const RepoWorkflowStepSchema = z.enum(['review', 'fix', 'recheck'])
+export type RepoWorkflowStep = z.infer<typeof RepoWorkflowStepSchema>
+
+export const RepoWorkflowStepsSchema = z.array(RepoWorkflowStepSchema).min(1).superRefine((steps, ctx) => {
+  const value = steps.join(',')
+  const valid = value === 'review' || value === 'review,fix' || value === 'review,fix,recheck'
+  if (!valid) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'repo workflow steps must be review, review+fix, or review+fix+recheck',
+    })
+  }
+})
+
 export const RepoConfigSchema = z.object({
   owner: z.string(),
   name: z.string(),
+  // Optional per-repo workflow depth. When absent, the repo uses the global
+  // workflow.yml exactly as configured.
+  steps: RepoWorkflowStepsSchema.optional(),
 })
 
 export const RoutingConfigSchema = z.object({

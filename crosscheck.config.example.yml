@@ -89,9 +89,13 @@ orgs:
 # repos:
 #   - owner: acme
 #     name: specific-repo
+#     # Optional: narrow the workflow for this repo only.
+#     # Allowed: [review], [review, fix], [review, fix, recheck]
+#     steps: [review]
 repos:
   - owner: codatta
     name: my-repo
+    # steps: [review]  # review-only for this repo; omit for the global workflow
 
 # ─── Routing ─────────────────────────────────────────────────────────────────
 routing:
