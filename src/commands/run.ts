@@ -15,7 +15,7 @@ import { initLogger, log as fileLog, logError, classifyError } from '../lib/logg
 import { hintForError } from '../lib/remediation.js'
 import { runWorkflow } from '../lib/runner.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
-import { formatRepoWorkflowSteps, getRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
+import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
@@ -305,7 +305,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   // Resolve steps — a per-repo override file narrows workflow.yml by default. An
   // explicit --steps flag is a one-shot override and wins over the repo default.
   const baseSteps = loadWorkflow(process.cwd())
-  const repoStepOverride = !opts.steps ? getRepoWorkflowStepTypes(owner, repo) : undefined
+  const repoStepOverride = !opts.steps ? readRepoWorkflowStepTypes(owner, repo) : undefined
   const allSteps = repoStepOverride ? resolveRepoWorkflowSteps(owner, repo, baseSteps) : baseSteps
   if (repoStepOverride) {
     console.log(chalk.dim(`  repo workflow: ${formatRepoWorkflowSteps(repoStepOverride)}`))

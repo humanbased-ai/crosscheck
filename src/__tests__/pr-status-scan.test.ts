@@ -24,7 +24,7 @@ vi.mock('../lib/repo-workflow.js', async () => {
   const actual = await vi.importActual<typeof import('../lib/repo-workflow.js')>('../lib/repo-workflow.js')
   return {
     ...actual,
-    getRepoWorkflowStepTypes: vi.fn((owner: string, name: string) =>
+    readRepoWorkflowStepTypes: vi.fn((owner: string, name: string) =>
       owner === 'acme' && name === 'web-reviewonly' ? ['review'] : undefined),
   }
 })

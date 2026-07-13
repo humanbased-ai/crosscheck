@@ -6,7 +6,7 @@ import { formatDuration, parseDuration } from '../lib/durations.js'
 import { initLogger, logError } from '../lib/logger.js'
 import { UserInputError } from '../lib/pr-picker.js'
 import { scanOpenPRStatuses, type ScanPRStatus as PRStatus, type ScanResult } from '../lib/pr-status.js'
-import { getRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
+import { readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
 import { readScanCache, writeScanCache, type ScanCachePayload } from '../lib/scan-cache.js'
 
 export interface ScanOpts {
@@ -141,7 +141,7 @@ function isUserError(err: unknown, message: string): boolean {
 function buildScanScopeHash(config: Config): string {
   const scope = {
     orgs: [...config.orgs].sort(),
-    repos: config.repos.map(repo => `${repo.owner}/${repo.name}:${getRepoWorkflowStepTypes(repo.owner, repo.name)?.join(',') ?? 'default'}`).sort(),
+    repos: config.repos.map(repo => `${repo.owner}/${repo.name}:${readRepoWorkflowStepTypes(repo.owner, repo.name)?.join(',') ?? 'default'}`).sort(),
     users: [...config.users].sort(),
     allowedAuthors: [...config.routing.allowed_authors].sort(),
   }

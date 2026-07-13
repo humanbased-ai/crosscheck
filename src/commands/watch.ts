@@ -33,7 +33,7 @@ import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
-import { formatRepoWorkflowSteps, getRepoWorkflowStepTypes, isReviewOnlyWorkflow, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
+import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
@@ -349,9 +349,9 @@ export async function runWatch(opts: WatchOpts = {}) {
         : isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
       let resolvedSteps: WorkflowStep[] | undefined
       let detectedReviewComment: { id?: number; body: string } | undefined
-      const repoStepOverride = getRepoWorkflowStepTypes(owner, repoName)
+      const repoStepOverride = readRepoWorkflowStepTypes(owner, repoName)
       const repoAllowsRecheck = repoStepOverride === undefined || repoStepOverride.includes('recheck')
-      const initialRepoSteps = resolveRepoWorkflowSteps(owner, repoName, workflow)
+      const initialRepoSteps = repoStepOverride ? filterStepsByTypes(workflow, repoStepOverride) : workflow
       const reviewOnlyForRepo = isReviewOnlyWorkflow(initialRepoSteps)
       if (!repoAllowsRecheck && isRecheckRun) {
         isRecheckRun = false
@@ -1012,7 +1012,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     console.log(`  repos       ${chalk.cyan(labels.join(', '))}`)
   }
   const repoWorkflowOverrides = config.repos
-    .map(repo => ({ repo, steps: getRepoWorkflowStepTypes(repo.owner, repo.name) }))
+    .map(repo => ({ repo, steps: readRepoWorkflowStepTypes(repo.owner, repo.name) }))
     .filter(r => r.steps !== undefined)
   if (repoWorkflowOverrides.length > 0) {
     const labels = repoWorkflowOverrides

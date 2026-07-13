@@ -122,12 +122,23 @@ export function removeRepoWorkflowOverride(
   return true
 }
 
-export function getRepoWorkflowStepTypes(
-  owner: string,
-  name: string,
-  workflowsDir: string = defaultRepoWorkflowsDir(),
-): RepoWorkflowStep[] | undefined {
-  return readRepoWorkflowStepTypes(owner, name, workflowsDir)
+// Narrows a full workflow to the given override step types. Pure (no file I/O) so
+// callers that already read the override can reuse it without re-reading the file.
+// The override is a depth ladder over review → fix → recheck. `conflict-resolve` is
+// orthogonal to that ladder — it resolves merge conflicts rather than deepening the
+// review — so it is not one of the values a repo override can list. Keep it whenever
+// the override permits code modification (i.e. includes `fix`); a review-only override
+// drops it along with fix/recheck, preserving the "never touch the code" guarantee and
+// keeping isReviewOnlyWorkflow() true.
+export function filterStepsByTypes(
+  allSteps: WorkflowStep[],
+  stepTypes: readonly RepoWorkflowStep[],
+): WorkflowStep[] {
+  const keepConflictResolve = stepTypes.includes('fix')
+  return allSteps.filter(step =>
+    (step.type === 'conflict-resolve' && keepConflictResolve)
+    || stepTypes.includes(step.type as RepoWorkflowStep),
+  )
 }
 
 export function resolveRepoWorkflowSteps(
@@ -136,19 +147,8 @@ export function resolveRepoWorkflowSteps(
   allSteps: WorkflowStep[],
   workflowsDir: string = defaultRepoWorkflowsDir(),
 ): WorkflowStep[] {
-  const stepTypes = getRepoWorkflowStepTypes(owner, name, workflowsDir)
-  if (!stepTypes) return allSteps
-  // The override is a depth ladder over review → fix → recheck. `conflict-resolve`
-  // is orthogonal to that ladder — it resolves merge conflicts rather than deepening
-  // the review — so it is not one of the values a repo override can list. Keep it
-  // whenever the override permits code modification (i.e. includes `fix`); a
-  // review-only override drops it along with fix/recheck, preserving the
-  // "never touch the code" guarantee and keeping isReviewOnlyWorkflow() true.
-  const keepConflictResolve = stepTypes.includes('fix')
-  return allSteps.filter(step =>
-    (step.type === 'conflict-resolve' && keepConflictResolve)
-    || stepTypes.includes(step.type as RepoWorkflowStep),
-  )
+  const stepTypes = readRepoWorkflowStepTypes(owner, name, workflowsDir)
+  return stepTypes ? filterStepsByTypes(allSteps, stepTypes) : allSteps
 }
 
 export function isReviewOnlyWorkflow(steps: readonly WorkflowStep[]): boolean {

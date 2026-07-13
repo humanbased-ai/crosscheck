@@ -155,7 +155,18 @@ addStepRunOptions(
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
   .option('--review-only', 'alias for --steps review (this run only)')
   .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection (single PR only)')
-  .action((prUrls: string[], opts: StepRunFlags) => void runRunSpec(prUrls.join(','), buildRunSpecOpts(opts)))
+  .action((prUrls: string[], opts: StepRunFlags) => {
+    // --review-only is an alias for --steps review; reject a conflicting --steps
+    // rather than silently ignoring it (mirrors `crosscheck alter`).
+    if (opts.reviewOnly && opts.steps) {
+      const normalized = opts.steps.split(',').map(s => s.trim().toLowerCase()).filter(Boolean).join(',')
+      if (normalized !== 'review') {
+        console.error('error: --review-only cannot be combined with --steps unless --steps is review')
+        process.exit(1)
+      }
+    }
+    void runRunSpec(prUrls.join(','), buildRunSpecOpts(opts))
+  })
 
 addStepRunOptions(
   program

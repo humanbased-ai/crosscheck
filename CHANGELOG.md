@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed (BREAKING)
+
+- **Removed `crosscheck watch --only-review`.** ⚠️ Review-only is now a **per-repo** setting, not a session-global flag. To make a repo post reviews only (never fix, recheck, or resolve), run `crosscheck alter <owner>/<repo> --review-only`. Existing `crosscheck watch --only-review` invocations — systemd units, scripts, CI — will now **exit 1 with "unknown option"**; update them to the per-repo override. This removes a CLI flag present in released `0.18.0` and **requires a version bump before release**.
+- **Per-repo workflow depth moved from config to files.** It is no longer a `repos[].steps` field in `crosscheck.config.yml`; each override lives in `~/.crosscheck/workflows/<owner>__<repo>.yml` (written by `crosscheck alter`) and *narrows* the global `~/.crosscheck/workflow.yml`. Overrides are read per PR event — live-reloaded, no `watch` restart.
+- **Default pipeline is now `review → fix → recheck`.** The built-in default and the `crosscheck onboard` default are the full loop; scope down per repo with `crosscheck alter`.
+
+### Added
+
+- **`crosscheck alter <repo>`** (alias `alter-workflow`) — set a per-repo workflow override: `--steps review,fix,recheck`, `--review-only`, `--show`, `--reset`.
+- **`crosscheck run --review-only`** — one-shot alias for `--steps review`.
+
+---
+
 ## [0.10.0] — 2026-05-30
 
 ### Changed

@@ -19,7 +19,7 @@ import { getPRMergeSummary } from '../github/merge.js'
 import { isAuthorAllowed } from './filter.js'
 import { getLogDir, logError } from './logger.js'
 import { parseAnnotationFieldsFenced } from './annotation.js'
-import { getRepoWorkflowStepTypes } from './repo-workflow.js'
+import { readRepoWorkflowStepTypes } from './repo-workflow.js'
 import { dedupScopes, type Scope } from './scopes.js'
 
 export type Freshness = 'stale' | 'not_stale'
@@ -244,7 +244,7 @@ export function summarizeStatuses(prs: ScanPRStatus[]): ScanSummary {
 
 function applyRepoWorkflowOverrideToStatus(status: ScanPRStatus): ScanPRStatus {
   if (status.nextAction === null || status.nextAction === 'merge') return status
-  const repoSteps = getRepoWorkflowStepTypes(status.owner, status.repo)
+  const repoSteps = readRepoWorkflowStepTypes(status.owner, status.repo)
   if (!repoSteps || repoSteps.includes(status.nextAction)) return status
   return {
     ...status,
