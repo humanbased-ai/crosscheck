@@ -302,11 +302,11 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     console.log(chalk.dim(`  fixer: ${normalizedFixer} (forced for fix steps)`))
   }
 
-  // Resolve steps — per-repo config narrows workflow.yml by default. An explicit
-  // --steps flag is a one-shot override and wins over the repo default.
+  // Resolve steps — a per-repo override file narrows workflow.yml by default. An
+  // explicit --steps flag is a one-shot override and wins over the repo default.
   const baseSteps = loadWorkflow(process.cwd())
-  const repoStepOverride = !opts.steps ? getRepoWorkflowStepTypes(config, owner, repo) : undefined
-  const allSteps = repoStepOverride ? resolveRepoWorkflowSteps(config, owner, repo, baseSteps) : baseSteps
+  const repoStepOverride = !opts.steps ? getRepoWorkflowStepTypes(owner, repo) : undefined
+  const allSteps = repoStepOverride ? resolveRepoWorkflowSteps(owner, repo, baseSteps) : baseSteps
   if (repoStepOverride) {
     console.log(chalk.dim(`  repo workflow: ${formatRepoWorkflowSteps(repoStepOverride)}`))
   }

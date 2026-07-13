@@ -38,6 +38,7 @@ interface StepRunFlags {
   fixer?: string
   vendor?: string
   steps?: string
+  reviewOnly?: boolean
   dryRun?: boolean
   expectedHeadSha?: string
   crazy?: boolean
@@ -81,7 +82,7 @@ function buildRunSpecOpts(opts: StepRunFlags): RunSpecOpts {
     reviewer: opts.reviewer,
     fixer: opts.fixer,
     vendor: opts.vendor,
-    steps: opts.steps,
+    steps: opts.reviewOnly ? 'review' : opts.steps,
     dryRun: opts.dryRun,
     expectedHeadSha: opts.expectedHeadSha,
     roundMode,
@@ -112,11 +113,13 @@ program
 
 program
   .command('alter <repo>')
-  .description('Set a per-repo workflow override in config')
-  .option('-c, --config <path>', 'config file path to update')
+  .alias('alter-workflow')
+  .description('Set a per-repo workflow override (writes ~/.crosscheck/workflows/<owner>__<repo>.yml)')
   .option('--steps <list>', 'repo workflow depth: review, review,fix, or review,fix,recheck')
   .option('--review-only', 'alias for --steps review')
-  .action((repo: string, opts: { config?: string; steps?: string; reviewOnly?: boolean }) => runAlter(repo, opts))
+  .option('--reset', 'remove the per-repo override; revert to the global workflow')
+  .option('--show', 'print the repo\'s effective workflow steps without writing')
+  .action((repo: string, opts: { steps?: string; reviewOnly?: boolean; reset?: boolean; show?: boolean }) => runAlter(repo, opts))
 
 program
   .command('watch')
@@ -125,10 +128,9 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .option('--only-review', 'review-only mode: post reviews but never fix, recheck, or resolve')
   .option('--backtrace', 'enable startup scan for unreviewed open PRs this session (overrides backtrace.enabled: false)')
   .option('--no-backtrace', 'skip startup scan for unreviewed open PRs this session (overrides backtrace.enabled: true)')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; onlyReview?: boolean; backtrace?: boolean }) => void runWatch(opts))
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runWatch(opts))
 
 program
   .command('review <pr-urls...>')
@@ -151,6 +153,7 @@ addStepRunOptions(
     .description('Execute the full configured workflow against one or more PRs (review → fix → recheck). Accepts comma-separated URLs, bare numbers, and ranges (e.g. .../pull/245,255 or .../pull/245-256)'),
 )
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
+  .option('--review-only', 'alias for --steps review (this run only)')
   .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection (single PR only)')
   .action((prUrls: string[], opts: StepRunFlags) => void runRunSpec(prUrls.join(','), buildRunSpecOpts(opts)))
 

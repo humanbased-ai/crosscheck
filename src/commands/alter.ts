@@ -1,72 +1,45 @@
 import chalk from 'chalk'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { dirname, join } from 'path'
-import { homedir } from 'os'
-import yaml from 'js-yaml'
-import { resolveConfigPath } from '../config/loader.js'
-import { ConfigSchema, type RepoWorkflowStep } from '../config/schema.js'
-import { formatRepoWorkflowSteps, parseRepoRef, parseRepoWorkflowSteps } from '../lib/repo-workflow.js'
+import type { RepoWorkflowStep } from '../config/schema.js'
+import {
+  formatRepoWorkflowSteps,
+  parseRepoRef,
+  parseRepoWorkflowSteps,
+  perRepoWorkflowPath,
+  readRepoWorkflowStepTypes,
+  removeRepoWorkflowOverride,
+  writeRepoWorkflowStepTypes,
+} from '../lib/repo-workflow.js'
 
 export interface AlterOpts {
-  config?: string
   steps?: string
   reviewOnly?: boolean
+  reset?: boolean
+  show?: boolean
+  // Test-only override for the per-repo workflows directory.
+  workflowsDir?: string
 }
 
-function resolveAlterConfigPath(explicitPath?: string): string {
-  return resolveConfigPath(explicitPath) ?? join(homedir(), '.crosscheck', 'config.yml')
-}
-
-function readConfigObject(configPath: string): Record<string, unknown> {
-  if (!existsSync(configPath)) return {}
-  const parsed = yaml.load(readFileSync(configPath, 'utf8')) ?? {}
-  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`Invalid config at ${configPath}: expected a YAML object`)
-  }
-  return parsed as Record<string, unknown>
-}
-
-function resolveSteps(opts: AlterOpts): RepoWorkflowStep[] {
+export function resolveSteps(opts: AlterOpts): RepoWorkflowStep[] {
   if (opts.reviewOnly && opts.steps) {
-    const explicit = parseRepoWorkflowSteps(opts.steps)
-    if (explicit.length === 1 && explicit[0] === 'review') return explicit
-    throw new Error('--review-only cannot be combined with --steps unless --steps is review')
+    // --review-only is an alias for --steps review. The only explicit value that
+    // does not conflict is `review` itself; anything else — a deeper depth OR an
+    // unparseable value — surfaces this specific conflict message rather than the
+    // generic parse error, so the real problem (the incompatible flags) is clear.
+    let isJustReview = false
+    try {
+      const explicit = parseRepoWorkflowSteps(opts.steps)
+      isJustReview = explicit.length === 1 && explicit[0] === 'review'
+    } catch {
+      isJustReview = false
+    }
+    if (!isJustReview) {
+      throw new Error('--review-only cannot be combined with --steps unless --steps is review')
+    }
+    return ['review']
   }
   if (opts.reviewOnly) return ['review']
   if (opts.steps) return parseRepoWorkflowSteps(opts.steps)
-  throw new Error('Choose a workflow depth with --steps review,fix,recheck or --review-only')
-}
-
-export function applyRepoWorkflowOverride(
-  raw: Record<string, unknown>,
-  owner: string,
-  name: string,
-  steps: RepoWorkflowStep[],
-): void {
-  const repos = Array.isArray(raw.repos) ? raw.repos : []
-  const nextRepos = repos.map(entry => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry
-    const repo = entry as Record<string, unknown>
-    if (
-      typeof repo.owner === 'string'
-      && typeof repo.name === 'string'
-      && repo.owner.toLowerCase() === owner.toLowerCase()
-      && repo.name.toLowerCase() === name.toLowerCase()
-    ) {
-      return { ...repo, steps }
-    }
-    return entry
-  })
-
-  const found = nextRepos.some(entry =>
-    Boolean(entry)
-    && typeof entry === 'object'
-    && !Array.isArray(entry)
-    && (entry as Record<string, unknown>).owner?.toString().toLowerCase() === owner.toLowerCase()
-    && (entry as Record<string, unknown>).name?.toString().toLowerCase() === name.toLowerCase()
-  )
-
-  raw.repos = found ? nextRepos : [...nextRepos, { owner, name, steps }]
+  throw new Error('Choose a workflow depth with --steps review,fix,recheck or --review-only (or use --show / --reset)')
 }
 
 export function runAlter(repoInput: string, opts: AlterOpts = {}): void {
@@ -75,22 +48,35 @@ export function runAlter(repoInput: string, opts: AlterOpts = {}): void {
     if (!repo) {
       throw new Error('Invalid repo. Use owner/repo, github.com/owner/repo, or https://github.com/owner/repo')
     }
+    const { owner, name } = repo
+
+    if (opts.reset) {
+      const removed = removeRepoWorkflowOverride(owner, name, opts.workflowsDir)
+      if (removed) {
+        console.log(chalk.green(`✓ ${owner}/${name} override removed — reverts to the global workflow`))
+      } else {
+        console.log(chalk.dim(`  ${owner}/${name} had no override — already on the global workflow`))
+      }
+      return
+    }
+
+    if (opts.show) {
+      const steps = readRepoWorkflowStepTypes(owner, name, opts.workflowsDir)
+      if (steps) {
+        console.log(`${owner}/${name}  ${chalk.cyan(formatRepoWorkflowSteps(steps))}`)
+        console.log(chalk.dim(`  ${perRepoWorkflowPath(owner, name, opts.workflowsDir)}`))
+      } else {
+        console.log(`${owner}/${name}  ${chalk.dim('uses the global workflow (no override)')}`)
+      }
+      return
+    }
 
     const steps = resolveSteps(opts)
-    const configPath = resolveAlterConfigPath(opts.config)
-    const raw = readConfigObject(configPath)
-    applyRepoWorkflowOverride(raw, repo.owner, repo.name, steps)
+    const path = writeRepoWorkflowStepTypes(owner, name, steps, opts.workflowsDir)
 
-    // Validate the full config after mutation so a typo never writes an invalid
-    // repo override on top of an otherwise usable file.
-    ConfigSchema.parse(raw)
-
-    mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
-
-    console.log(chalk.green(`✓ ${repo.owner}/${repo.name} workflow set to ${formatRepoWorkflowSteps(steps)}`))
-    console.log(chalk.dim(`  config: ${configPath}`))
-    console.log(chalk.dim('  Restart crosscheck watch for a running watcher to pick up this change.'))
+    console.log(chalk.green(`✓ ${owner}/${name} workflow set to ${formatRepoWorkflowSteps(steps)}`))
+    console.log(chalk.dim(`  ${path}`))
+    console.log(chalk.dim('  Applies on the next PR event — no need to restart crosscheck watch.'))
   } catch (err: unknown) {
     console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
     process.exit(1)

@@ -1,7 +1,7 @@
 import chalk from 'chalk'
 import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
-import { getGithubToken, loadConfig } from '../config/loader.js'
+import { getGithubToken } from '../config/loader.js'
 import { loadWorkflow } from '../lib/workflow.js'
 import { resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep, type StepRecord } from '../lib/pr-workflow-state.js'
@@ -71,8 +71,7 @@ export async function runDetectStep(
   const { data: prData } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
   spinner.succeed(`PR #${number}  ·  ${prData.title}`)
 
-  const config = loadConfig(opts.config)
-  const steps = resolveRepoWorkflowSteps(config, owner, repo, loadWorkflow(process.cwd()))
+  const steps = resolveRepoWorkflowSteps(owner, repo, loadWorkflow(process.cwd()))
 
   const historySpinner = ora('Reading workflow history...').start()
   const history = await fetchStepHistory(owner, repo, number, token)

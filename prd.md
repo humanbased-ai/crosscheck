@@ -114,25 +114,30 @@ The security concern is narrower: the **hidden automation annotation** (`<!-- cr
 
 ### P6 — One watcher may run different repo workflows
 
-Teams often want one long-lived Crosscheck process for an org, while individual repos need different automation depth. For example, `humanbased-ai/xny-monorepo` may be review-only, while neighboring repos still run review → fix → recheck.
+Teams often want one long-lived Crosscheck process for an org, while individual repos need different automation depth. For example, `humanbased-ai/xny-monorepo` may be review-only, while neighboring repos still run the default review → fix → recheck loop.
 
-Per-repo workflow differences belong in `crosscheck.config.yml`, not in separate watcher processes. The global `workflow.yml` remains the reusable step template; `repos[].steps` narrows that template for a specific repo. CLI one-shot flags such as `crosscheck run --steps ...` are session overrides and take precedence over the repo default.
+Per-repo workflow differences live in **standalone files**, not in `crosscheck.config.yml` (pipeline shape stays out of the infra config) and not in separate watcher processes. A per-repo override is `~/.crosscheck/workflows/<owner>__<repo>.yml`, which *narrows* the global `~/.crosscheck/workflow.yml` by step type — preserving each step's configured instructions and reviewer. It is read per PR event, so edits (or `crosscheck alter`) apply with no `watch` restart. CLI one-shot flags such as `crosscheck run --steps ...` (and `run --review-only`) are session overrides and take precedence over the repo default.
+
+Resolution order (first hit wins): `{repo}/.crosscheck/workflow.yml` → `~/.crosscheck/workflows/<owner>__<repo>.yml` → `~/.crosscheck/workflow.yml` → built-in `DEFAULT_WORKFLOW` (review → fix → recheck).
 
 The operator-facing command is:
 
 ```bash
-crosscheck alter humanbased-ai/xny-monorepo --review-only
+crosscheck alter humanbased-ai/xny-monorepo --review-only      # alias for --steps review
 crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
 crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
+crosscheck alter humanbased-ai/xny-monorepo --show             # print effective steps
+crosscheck alter humanbased-ai/xny-monorepo --reset            # remove the override
 ```
 
 Acceptance criteria:
-- `RepoConfigSchema` accepts optional `steps: [review]`, `[review, fix]`, or `[review, fix, recheck]`.
-- `watch` resolves workflow steps per PR repo. Repos with `steps: [review]` do not run fix, recheck, conflict-resolve, or the review→fix `issue_comment` bridge.
-- Repos without an override keep the complete configured workflow.
-- `crosscheck alter <repo> --steps ...` updates or appends the repo entry while preserving all unrelated config fields.
-- `--review-only` is an alias for `--steps review`.
-- `onboard` preserves existing per-repo `steps` when repo selections are rewritten and points users to `alter` for per-repo tuning.
+- The per-repo file is `{ steps: [review] | [review, fix] | [review, fix, recheck] }`, validated by `RepoWorkflowStepsSchema`. Pipeline shape is **not** stored in `config.yml` (`RepoConfigSchema` has no `steps` field).
+- `watch` resolves workflow steps per PR repo by narrowing the global workflow. Repos narrowed to `[review]` do not run fix, recheck, conflict-resolve, or the review→fix `issue_comment` bridge.
+- `conflict-resolve` is orthogonal to the review→fix→recheck depth ladder, so an override cannot list it. It passes through whenever the override permits code modification (`review,fix` or `review,fix,recheck`) and is dropped only for review-only (`review`).
+- Repos without an override file keep the complete configured workflow.
+- `crosscheck alter <repo>` (alias `alter-workflow`) writes/removes the per-repo file; `--show` prints effective steps; `--reset` removes the override; `--review-only` is an alias for `--steps review`.
+- The built-in default and the `onboard` default are the full `review → fix → recheck` loop. Review-only is a pipeline shape (`--steps review`), reachable per-repo via `alter --review-only` or per-run via `run --review-only`; there is no global `watch --only-review` flag.
+- `onboard` never touches per-repo override files.
 - README and get-started docs explain local use and always-on team server use after the feature ships.
 
 ---

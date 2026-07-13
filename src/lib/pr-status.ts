@@ -242,9 +242,9 @@ export function summarizeStatuses(prs: ScanPRStatus[]): ScanSummary {
   }
 }
 
-function applyRepoWorkflowOverrideToStatus(config: Config, status: ScanPRStatus): ScanPRStatus {
+function applyRepoWorkflowOverrideToStatus(status: ScanPRStatus): ScanPRStatus {
   if (status.nextAction === null || status.nextAction === 'merge') return status
-  const repoSteps = getRepoWorkflowStepTypes(config, status.owner, status.repo)
+  const repoSteps = getRepoWorkflowStepTypes(status.owner, status.repo)
   if (!repoSteps || repoSteps.includes(status.nextAction)) return status
   return {
     ...status,
@@ -324,7 +324,7 @@ export async function scanOpenPRStatuses(
           logEvents: filterLogEventsForPR(logEvents, owner, repo, pr.number),
           merge,
         }, { nowMs: now.getTime(), staleAfterMs: options.staleAfterMs })
-        return applyRepoWorkflowOverrideToStatus(config, status)
+        return applyRepoWorkflowOverrideToStatus(status)
       } catch (err: unknown) {
         logError({ event: 'scan_pr_skipped', owner, repo, pr: pr.number }, err)
         return null

@@ -18,6 +18,17 @@ vi.mock('../github/merge.js', () => ({
   getPRMergeSummary: vi.fn(),
 }))
 
+// Per-repo overrides are files under ~/.crosscheck/workflows/. Stub the lookup so
+// the scan sees a review-only override for acme/web-reviewonly without touching disk.
+vi.mock('../lib/repo-workflow.js', async () => {
+  const actual = await vi.importActual<typeof import('../lib/repo-workflow.js')>('../lib/repo-workflow.js')
+  return {
+    ...actual,
+    getRepoWorkflowStepTypes: vi.fn((owner: string, name: string) =>
+      owner === 'acme' && name === 'web-reviewonly' ? ['review'] : undefined),
+  }
+})
+
 vi.mock('../lib/logger.js', async () => {
   const actual = await vi.importActual<typeof import('../lib/logger.js')>('../lib/logger.js')
   return {
@@ -121,7 +132,7 @@ describe('scanOpenPRStatuses', () => {
     }])
 
     const result = await scanOpenPRStatuses(
-      ConfigSchema.parse({ repos: [{ owner: 'acme', name: 'web', steps: ['review'] }] }),
+      ConfigSchema.parse({ repos: [{ owner: 'acme', name: 'web-reviewonly' }] }),
       'token',
       { now: new Date('2026-05-29T00:00:00.000Z'), staleAfterMs: 24 * 60 * 60 * 1000 },
     )

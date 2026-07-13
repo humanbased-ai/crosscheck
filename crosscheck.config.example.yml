@@ -89,13 +89,13 @@ orgs:
 # repos:
 #   - owner: acme
 #     name: specific-repo
-#     # Optional: narrow the workflow for this repo only.
-#     # Allowed: [review], [review, fix], [review, fix, recheck]
-#     steps: [review]
+#
+# To narrow the workflow for one repo (e.g. make it review-only), do NOT edit this
+# file — run `crosscheck alter <owner>/<repo> --review-only`. That writes a standalone
+# override at ~/.crosscheck/workflows/<owner>__<repo>.yml, live-reloaded per PR.
 repos:
   - owner: codatta
     name: my-repo
-    # steps: [review]  # review-only for this repo; omit for the global workflow
 
 # ─── Routing ─────────────────────────────────────────────────────────────────
 routing:

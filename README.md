@@ -39,7 +39,7 @@ Built by [Humanbased](https://github.com/humanbased-ai). Read the field report: 
 |---|---|---|
 | **Solo agentic builder** | Same agent that wrote the code may self-approve incomplete work | Independent reviewer from a different vendor, on your machine |
 | **Technical founder** | AI PRs look done before delivering stable value | Closes the loop: review finding → agent fix → clean recheck |
-| **Engineering lead** | Agent use is hard to supervise or standardize | Configurable workflow, review-only mode, and a visible PR audit trail |
+| **Engineering lead** | Agent use is hard to supervise or standardize | A default full-loop workflow, per-repo overrides (`crosscheck alter`), and a visible PR audit trail |
 | **OSS maintainer** | Review bandwidth is scarce; comments must be actionable | One-shot `crosscheck review` posts concrete findings directly on the PR |
 
 ### Usage scenarios
@@ -120,9 +120,11 @@ brew install gh && gh auth login                          # GitHub CLI
 crosscheck onboard
 
 # 3. Start watching
-crosscheck watch                  # continuous review as PRs arrive
-crosscheck watch --only-review    # reviews only — never auto-fix
+crosscheck watch                  # continuous review → fix → recheck as PRs arrive
 ```
+
+> Want reviews only (no auto-fix) for a repo? Make it review-only with
+> `crosscheck alter owner/repo --review-only` — see [per-repo overrides](#crosscheck-alter-repo).
 
 ### Always-on team mode
 
@@ -143,12 +145,11 @@ crosscheck watch
 ## Commands
 
 ```bash
-crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
-crosscheck alter <repo>             # set a per-repo workflow override
+crosscheck onboard                  # guided setup — pick repos, mode, and default pipeline
+crosscheck alter <repo>             # per-repo override: --steps review,fix | --review-only | --reset | --show
 crosscheck watch                    # continuous use — tunnel + webhook + listening
-crosscheck watch --only-review      # continuous reviews only — never auto-fix
 crosscheck review <pr-urls...>      # review one or more PRs (comma lists, ranges, cross-repo)
-crosscheck run <pr-urls...>         # run the full workflow: review → (fix → recheck) × max_rounds
+crosscheck run <pr-urls...>         # run the full workflow: review → (fix → recheck) × max_rounds (--review-only for review only)
 crosscheck recheck|fix|resolve <pr-urls...>   # force one workflow step on one or more PRs
 crosscheck scan                     # show open PR workflow state across monitored repos
 crosscheck detect-step <pr-url>     # explain the next workflow step for one PR
@@ -226,15 +227,17 @@ crosscheck onboard -y           # accept all defaults non-interactively
 
 ### `crosscheck alter <repo>`
 
-Sets the workflow depth for one repo inside `~/.crosscheck/config.yml`. This is the preferred way to run one watcher for many repos while making one repo review-only.
+Sets the workflow depth for one repo, leaving the global default in place for every other monitored repo. Writes a standalone file at `~/.crosscheck/workflows/<owner>__<repo>.yml` (`alter-workflow` is an alias). This is how you run one watcher for many repos while making one repo review-only. Changes apply on the next PR event — no need to restart `crosscheck watch`.
 
 ```bash
-crosscheck alter humanbased-ai/xny-monorepo --review-only
+crosscheck alter humanbased-ai/xny-monorepo --review-only            # alias for --steps review
 crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
 crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
+crosscheck alter humanbased-ai/xny-monorepo --show                   # print effective steps
+crosscheck alter humanbased-ai/xny-monorepo --reset                  # revert to the global default
 ```
 
-Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. Restart a running `crosscheck watch` process after altering config.
+Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. The override narrows the global `~/.crosscheck/workflow.yml` — it wins over the global default but a repo-committed `.crosscheck/workflow.yml` still wins over it.
 
 ---
 
@@ -244,10 +247,11 @@ Starts an SSH tunnel (localhost.run), registers GitHub webhooks, and listens for
 
 ```bash
 crosscheck watch
-crosscheck watch --only-review        # post reviews only — never fix, recheck, or resolve
 crosscheck watch --no-backtrace       # skip startup scan for unreviewed open PRs
 crosscheck watch --reconfigure        # re-run deployment setup before starting
 ```
+
+> For reviews only, make the repo review-only with `crosscheck alter <repo> --review-only` rather than a global flag.
 
 ---
 
@@ -461,23 +465,23 @@ steps:
 
 ### Per-repo workflow overrides
 
-The global `workflow.yml` is the default for every repo. Add `repos[].steps` when one repo should run a narrower workflow in the same watcher.
-
-```yaml
-repos:
-  - owner: humanbased-ai
-    name: xny-monorepo
-    steps: [review]              # review-only
-  - owner: humanbased-ai
-    name: api
-    steps: [review, fix, recheck]
-```
-
-Prefer the command form so the rest of config is preserved:
+The global `workflow.yml` is the default for every repo (out of the box, the full `review → fix → recheck` loop). To run one repo at a narrower depth in the same watcher, use `crosscheck alter` — it writes a standalone override file at `~/.crosscheck/workflows/<owner>__<repo>.yml`:
 
 ```bash
-crosscheck alter humanbased-ai/xny-monorepo --review-only
+crosscheck alter humanbased-ai/xny-monorepo --review-only      # review only
+crosscheck alter humanbased-ai/api --steps review,fix,recheck  # full loop, explicit
+crosscheck alter humanbased-ai/xny-monorepo --reset            # back to the global default
 ```
+
+Each override file lists the review → fix → recheck depth only:
+
+```yaml
+# ~/.crosscheck/workflows/humanbased-ai__xny-monorepo.yml
+steps:
+  - review
+```
+
+The override *narrows* the global workflow — it keeps each step's configured instructions and reviewer. `conflict-resolve` is orthogonal to the depth ladder: it stays enabled for any override that permits code modification (`review,fix` or `review,fix,recheck`) and is dropped only for review-only (`review`). Repos without an override file keep the complete global workflow. Resolution order: `{repo}/.crosscheck/workflow.yml` → `~/.crosscheck/workflows/<owner>__<repo>.yml` → `~/.crosscheck/workflow.yml` → built-in default.
 
 ### Config snapshot
 

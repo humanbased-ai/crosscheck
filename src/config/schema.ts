@@ -59,9 +59,9 @@ export const RepoWorkflowStepsSchema = z.array(RepoWorkflowStepSchema).min(1).su
 export const RepoConfigSchema = z.object({
   owner: z.string(),
   name: z.string(),
-  // Optional per-repo workflow depth. When absent, the repo uses the global
-  // workflow.yml exactly as configured.
-  steps: RepoWorkflowStepsSchema.optional(),
+  // Per-repo workflow depth is NOT stored here. It lives in a standalone file at
+  // ~/.crosscheck/workflows/<owner>__<repo>.yml (written by `crosscheck alter`),
+  // so pipeline shape stays out of the infra config and is live-reloaded per PR.
 })
 
 export const RoutingConfigSchema = z.object({

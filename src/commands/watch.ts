@@ -172,7 +172,6 @@ export interface WatchOpts {
   personal?: boolean
   team?: boolean
   reconfigure?: boolean
-  onlyReview?: boolean
   backtrace?: boolean
 }
 
@@ -216,9 +215,6 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   const webhookSecret = getWebhookSecret()
   const webhookPath = config.server.webhook_path
-
-  // --only-review: post reviews but never advance to fix/recheck/conflict-resolve.
-  const onlyReview = opts.onlyReview === true
 
   // Board manages all terminal output after startup
   const board = new PRBoard()
@@ -353,20 +349,20 @@ export async function runWatch(opts: WatchOpts = {}) {
         : isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
       let resolvedSteps: WorkflowStep[] | undefined
       let detectedReviewComment: { id?: number; body: string } | undefined
-      const repoStepOverride = getRepoWorkflowStepTypes(config, owner, repoName)
+      const repoStepOverride = getRepoWorkflowStepTypes(owner, repoName)
       const repoAllowsRecheck = repoStepOverride === undefined || repoStepOverride.includes('recheck')
-      const initialRepoSteps = resolveRepoWorkflowSteps(config, owner, repoName, workflow)
-      const reviewOnlyForRepo = onlyReview || isReviewOnlyWorkflow(initialRepoSteps)
+      const initialRepoSteps = resolveRepoWorkflowSteps(owner, repoName, workflow)
+      const reviewOnlyForRepo = isReviewOnlyWorkflow(initialRepoSteps)
       if (!repoAllowsRecheck && isRecheckRun) {
         isRecheckRun = false
         round = 1
       }
 
       if (reviewOnlyForRepo) {
-        // Review-only mode can be global (--only-review) or repo-specific
-        // (repos[].steps: [review]). Restrict the workflow to review step(s) and
-        // dedup on the exact head sha so restarts/synchronize events don't post
-        // duplicate reviews for content already covered.
+        // Review-only comes from a per-repo override (crosscheck alter --review-only).
+        // Restrict the workflow to review step(s) and dedup on the exact head sha so
+        // restarts/synchronize events don't post duplicate reviews for content
+        // already covered.
         const reviewSteps = initialRepoSteps.filter(s => s.type === 'review')
         if (reviewSteps.length === 0) {
           await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
@@ -390,7 +386,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         } catch { /* best-effort — fall back to a fresh round-1 review */ }
       } else if (!isRecheckRun) {
         try {
-          const allSteps = resolveRepoWorkflowSteps(config, owner, repoName, loadWorkflow(process.cwd()))
+          const allSteps = resolveRepoWorkflowSteps(owner, repoName, loadWorkflow(process.cwd()))
           const history = await fetchStepHistory(owner, repoName, prNumber, token)
           const nextResult = identifyNextWorkflowStep(history, allSteps, params.headSha)
           if (nextResult.step === null) {
@@ -511,7 +507,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
         const workflowStepsForRun = resolvedSteps
-          ?? (repoStepOverride ? resolveRepoWorkflowSteps(config, owner, repoName, loadWorkflow(process.cwd())) : undefined)
+          ?? (repoStepOverride ? resolveRepoWorkflowSteps(owner, repoName, loadWorkflow(process.cwd())) : undefined)
 
         const { verdict, fixAppliedCount } = await runWorkflow({
           owner, repoName, prNumber, pr,
@@ -594,7 +590,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         // concurrently while the recheck was running.
         if (repoAllowsRecheck && verdict && verdict !== 'APPROVE' && fixCommitSha) {
           if (deliveryMode === 'commit') {
-            const allSteps = resolveRepoWorkflowSteps(config, owner, repoName, loadWorkflow(process.cwd()))
+            const allSteps = resolveRepoWorkflowSteps(owner, repoName, loadWorkflow(process.cwd()))
             const fixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
             const maxRounds = fixRecheckSteps.length > 0
               ? Math.min(...fixRecheckSteps.map(s => s.max_rounds ?? 1))
@@ -680,8 +676,8 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      const eventSteps = resolveRepoWorkflowSteps(config, owner, repoName, workflow)
-      const eventReviewOnly = onlyReview || isReviewOnlyWorkflow(eventSteps)
+      const eventSteps = resolveRepoWorkflowSteps(owner, repoName, workflow)
+      const eventReviewOnly = isReviewOnlyWorkflow(eventSteps)
 
       // The two crosscheck-commit skips below exist only to stop the fix→review
       // loop from re-entering on crosscheck's own fix commits. --only-review has no
@@ -720,9 +716,9 @@ export async function runWatch(opts: WatchOpts = {}) {
 
       // The issue_comment bridge exists solely to advance the workflow to fix.
       // When the active repo workflow has no fix step, disable it entirely.
-      const commentSteps = resolveRepoWorkflowSteps(config, owner, repoName, workflow)
-      if (onlyReview || isReviewOnlyWorkflow(commentSteps) || !workflowHasStep(commentSteps, 'fix')) {
-        fileLog({ level: 'info', event: 'comment_trigger_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: onlyReview || isReviewOnlyWorkflow(commentSteps) ? 'only_review' : 'no_fix_step' })
+      const commentSteps = resolveRepoWorkflowSteps(owner, repoName, workflow)
+      if (isReviewOnlyWorkflow(commentSteps) || !workflowHasStep(commentSteps, 'fix')) {
+        fileLog({ level: 'info', event: 'comment_trigger_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: isReviewOnlyWorkflow(commentSteps) ? 'only_review' : 'no_fix_step' })
         return
       }
 
@@ -1015,11 +1011,13 @@ export async function runWatch(opts: WatchOpts = {}) {
     const labels = scopes.map(s => 'org' in s ? s.org : `${s.owner}/${s.repo}`)
     console.log(`  repos       ${chalk.cyan(labels.join(', '))}`)
   }
-  const repoWorkflowOverrides = config.repos.filter(repo => repo.steps !== undefined)
+  const repoWorkflowOverrides = config.repos
+    .map(repo => ({ repo, steps: getRepoWorkflowStepTypes(repo.owner, repo.name) }))
+    .filter(r => r.steps !== undefined)
   if (repoWorkflowOverrides.length > 0) {
     const labels = repoWorkflowOverrides
       .slice(0, 4)
-      .map(repo => `${repo.owner}/${repo.name}: ${formatRepoWorkflowSteps(repo.steps!)}`)
+      .map(r => `${r.repo.owner}/${r.repo.name}: ${formatRepoWorkflowSteps(r.steps!)}`)
     console.log(`  workflows   ${labels.map(label => chalk.cyan(label)).join(', ')}${repoWorkflowOverrides.length > 4 ? chalk.dim(` +${repoWorkflowOverrides.length - 4} more`) : ''}`)
   }
   const cfgPath = resolveConfigPath(configPath)
@@ -1073,10 +1071,6 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   // Board starts after the banner — all output below is live-updated
   board.start()
-
-  if (onlyReview) {
-    cLog(`${chalk.cyan('●')} only-review mode — posting reviews only; fix/recheck/resolve disabled`)
-  }
 
   // ── Idle issue timer ─────────────────────────────────────────────────────
   // When watch has been idle (no PR activity) for the configured duration,

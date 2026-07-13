@@ -61,8 +61,10 @@ export const DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS = [
   'Do not change any code outside of conflict regions.',
 ].join('\n')
 
-// Default pipeline: review → fix issues (fix skipped when verdict is APPROVE).
-// Execution always goes through this constant — there is no legacy direct-call path.
+// Default pipeline: review → fix (skipped when APPROVE) → recheck (skipped when
+// no fix landed). This is the full loop every monitored repo gets out of the box;
+// `crosscheck alter <repo>` narrows it per repo. Execution always goes through this
+// constant — there is no legacy direct-call path.
 export const DEFAULT_WORKFLOW: WorkflowStep[] = [
   {
     name: 'review',
@@ -78,6 +80,14 @@ export const DEFAULT_WORKFLOW: WorkflowStep[] = [
     when: "review.verdict != 'APPROVE'",
     max_rounds: 1,
     instructions: DEFAULT_FIX_INSTRUCTIONS,
+  },
+  {
+    name: 'recheck',
+    type: 'recheck',
+    reviewer: 'auto',
+    when: "fix.applied_count > 0",
+    max_rounds: 1,
+    instructions: DEFAULT_RECHECK_INSTRUCTIONS,
   },
 ]
 

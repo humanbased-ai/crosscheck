@@ -16,7 +16,7 @@ import { checkClaudeAuth } from '../reviewers/claude.js'
 import { execSync } from 'child_process'
 import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/repo-picker.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS } from '../lib/workflow.js'
-import { findRepoConfig, formatRepoWorkflowSteps } from '../lib/repo-workflow.js'
+import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
 
 export interface OnboardOpts {
   config?: string
@@ -266,9 +266,10 @@ export function detectCurrentPreset(workflowDir: string = join(homedir(), '.cros
       if (types.includes('recheck')) return 'review-fix-recheck'
       if (types.includes('fix')) return 'review-fix'
       return 'review-only'
-    } catch { /* malformed — default to review-only */ }
+    } catch { /* malformed — fall through to the default below */ }
   }
-  return 'review-only'
+  // No global workflow file yet (fresh install) — default to the full loop.
+  return 'review-fix-recheck'
 }
 
 export function detectConflictResolveEnabled(workflowDir: string = join(homedir(), '.crosscheck')): boolean {
@@ -345,7 +346,7 @@ async function promptWorkflowPipeline(opts: OnboardOpts): Promise<WorkflowPreset
 
   const idx = await promptSinglePicker(items, {
     title: 'What should happen after a review?',
-    defaultIndex: defaultIdx >= 0 ? defaultIdx : 1,
+    defaultIndex: defaultIdx >= 0 ? defaultIdx : 2,
   })
   console.log()
 
@@ -508,21 +509,11 @@ export function applyOnboardConfig(
   raw.mode = vendorConfig.mode
   raw.clone_protocol = cloneProtocol
 
-  // Repos
-  const existingRepoSteps = new Map<string, unknown>()
-  if (Array.isArray(raw.repos)) {
-    for (const entry of raw.repos) {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
-      const repo = entry as Record<string, unknown>
-      if (typeof repo.owner === 'string' && typeof repo.name === 'string' && Array.isArray(repo.steps)) {
-        existingRepoSteps.set(`${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}`, repo.steps)
-      }
-    }
-  }
+  // Repos. Per-repo workflow depth is NOT stored here — it lives in standalone
+  // files under ~/.crosscheck/workflows/ (written by `crosscheck alter`).
   raw.repos = selectedRepos.map(r => {
     const [owner, name] = r.split('/')
-    const steps = existingRepoSteps.get(`${owner.toLowerCase()}/${name.toLowerCase()}`)
-    return steps ? { owner, name, steps } : { owner, name }
+    return { owner, name }
   })
 
   // Users: personal mode captures the login; team mode never uses users
@@ -956,13 +947,11 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   const cloneProtocol = await promptCloneProtocol(existingConfig?.clone_protocol, opts)
 
   // ── Step 10: Confirm and write ─────────────────────────────────────────────
-  const selectedRepoWorkflowOverrides = existingConfig
-    ? selectedRepos.flatMap(repoKey => {
-        const [owner, name] = repoKey.split('/')
-        const repoConfig = findRepoConfig(existingConfig, owner, name)
-        return repoConfig?.steps ? [`${repoKey}: ${formatRepoWorkflowSteps(repoConfig.steps)}`] : []
-      })
-    : []
+  const selectedRepoWorkflowOverrides = selectedRepos.flatMap(repoKey => {
+    const [owner, name] = repoKey.split('/')
+    const steps = readRepoWorkflowStepTypes(owner, name)
+    return steps ? [`${repoKey}: ${formatRepoWorkflowSteps(steps)}`] : []
+  })
 
   console.log(chalk.bold('Step 10 — review and write config'))
   console.log()
