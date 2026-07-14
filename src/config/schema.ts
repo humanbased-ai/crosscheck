@@ -42,9 +42,26 @@ export const BudgetConfigSchema = z.object({
   per_review_usd: z.number().default(2.0),
 })
 
+export const RepoWorkflowStepSchema = z.enum(['review', 'fix', 'recheck'])
+export type RepoWorkflowStep = z.infer<typeof RepoWorkflowStepSchema>
+
+export const RepoWorkflowStepsSchema = z.array(RepoWorkflowStepSchema).min(1).superRefine((steps, ctx) => {
+  const value = steps.join(',')
+  const valid = value === 'review' || value === 'review,fix' || value === 'review,fix,recheck'
+  if (!valid) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'repo workflow steps must be review, review+fix, or review+fix+recheck',
+    })
+  }
+})
+
 export const RepoConfigSchema = z.object({
   owner: z.string(),
   name: z.string(),
+  // Per-repo workflow depth is NOT stored here. It lives in a standalone file at
+  // ~/.crosscheck/workflows/<owner>__<repo>.yml (written by `crosscheck alter`),
+  // so pipeline shape stays out of the infra config and is live-reloaded per PR.
 })
 
 export const RoutingConfigSchema = z.object({

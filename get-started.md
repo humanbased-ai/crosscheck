@@ -256,13 +256,13 @@ When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned 
 
 **Token scope for org webhooks:** `GITHUB_TOKEN` needs `write:org` scope for org-level coverage. For repo-level, `repo` scope is sufficient.
 
-**Review-only mode:** pass `--only-review` to post reviews and nothing else — crosscheck never runs the fix, recheck, or conflict-resolve steps, and never pushes commits to your PRs:
+**Review-only for a repo:** make a repo post reviews and nothing else with `crosscheck alter <repo> --review-only` — crosscheck never runs the fix, recheck, or conflict-resolve steps for it, and never pushes commits to its PRs:
 
 ```bash
-crosscheck watch --only-review
+crosscheck alter humanbased-ai/xny-monorepo --review-only
 ```
 
-Each PR (and each new pushed SHA) gets a fresh review comment; content that has already been reviewed at the current SHA is skipped. Use this when you want crosscheck's verdicts but want to apply fixes yourself.
+Each PR (and each new pushed SHA) on a review-only repo gets a fresh review comment; content that has already been reviewed at the current SHA is skipped. Use this when you want crosscheck's verdicts on a repo but want to apply fixes yourself. Review-only is a per-repo setting now — there is no global `--only-review` flag.
 
 ---
 
@@ -427,6 +427,31 @@ crosscheck onboard
 | `--personal` | Use personal deployment mode for this session only |
 | `--team` | Use team deployment mode for this session only |
 | `--reconfigure` | Re-run setup even if `deployment` is already set in config |
+
+Onboard never touches per-repo workflow overrides written by `crosscheck alter` — those live in their own files under `~/.crosscheck/workflows/`.
+
+---
+
+### `crosscheck alter`
+
+Sets the workflow depth for one repo without changing the global default. Writes a standalone file at `~/.crosscheck/workflows/<owner>__<repo>.yml` that narrows the global `~/.crosscheck/workflow.yml` for that repo only. Use it when one watcher should run different depths for different repos. `alter-workflow` is an alias.
+
+```bash
+crosscheck alter humanbased-ai/xny-monorepo --review-only            # alias for --steps review
+crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
+crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
+crosscheck alter humanbased-ai/xny-monorepo --show                   # print effective steps, no write
+crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove the override
+```
+
+| Flag | Description |
+|---|---|
+| `--steps <list>` | `review`, `review,fix`, or `review,fix,recheck` |
+| `--review-only` | Alias for `--steps review` |
+| `--show` | Print the repo's effective steps without writing |
+| `--reset` | Remove the override; revert to the global default |
+
+Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. Changes apply on the next PR event — no need to restart a running `crosscheck watch`.
 
 ---
 
@@ -643,7 +668,6 @@ Uses `localhost.run` (SSH) to open a public tunnel — SSH is pre-installed on m
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Use a specific config file |
-| `--only-review` | Review-only mode: post reviews but never fix, recheck, or resolve |
 | `--personal` / `--team` | Override the saved deployment mode for this session only |
 | `--reconfigure` | Re-run deployment setup and save the new choice |
 | `--backtrace` / `--no-backtrace` | Force on/off the startup scan for unreviewed open PRs |
@@ -916,6 +940,8 @@ On re-runs, `onboard` updates only the fields it collected answers for. Everythi
 
 **Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
 
+**Never touched by onboard:** per-repo overrides in `~/.crosscheck/workflows/` (owned by `crosscheck alter`), and `~/.crosscheck/workflow.yml` after its first write
+
 **Initialised on first run, never overwritten:** `routing.allowed_authors`, `routing.author_routes`, `routing.fallback_reviewer`
 
 **Never touched by onboard:** `quality.focus`, `quality.custom_prompt`, `budget.*`, `branding.*`, `server.*`, `logs.*`, `backtrace.*`, `workflow.yml` (after first write), harness files
@@ -1001,9 +1027,14 @@ users:
 
 # ── Repos — for monitoring specific repos only ────────────────────────────────
 # Omit when using `orgs`/`users`. Auto-detected from git remote if all are empty.
+# To run one repo at a narrower workflow depth, do NOT add fields here — run
+# `crosscheck alter <owner>/<repo> --review-only` (or --steps review,fix). That
+# writes ~/.crosscheck/workflows/<owner>__<repo>.yml, live-reloaded per PR.
 repos:
   - owner: acme
     name: specific-repo
+  - owner: humanbased-ai
+    name: xny-monorepo
 
 # ── Routing ───────────────────────────────────────────────────────────────────
 routing:
@@ -1308,6 +1339,8 @@ To reset the review step instructions to defaults, delete `~/.crosscheck/workflo
 ### Can I have per-project workflow?
 
 Yes. Create `.crosscheck/workflow.yml` in your repo root. crosscheck loads it automatically and uses it instead of the built-in default pipeline. This is the recommended way to customize reviewer behavior — it keeps all per-project settings in one file under version control.
+
+For one always-on watcher that monitors many repos, use `crosscheck alter owner/repo --review-only` (or `--steps review,fix`) instead. That writes `~/.crosscheck/workflows/<owner>__<repo>.yml`, which narrows the global workflow for that one repo — live-reloaded, no restart — while the rest keep the global workflow.
 
 ### What is `AGENT.md`?
 

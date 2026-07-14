@@ -364,9 +364,9 @@ export interface ReviewOnlyDecision {
   round: number
 }
 
-// Decision logic for `crosscheck watch --only-review`, which posts reviews but
-// never fixes/rechecks. Unlike identifyNextWorkflowStep, this only asks "has this
-// exact SHA already been reviewed?" — it deliberately ignores fix/recheck state,
+// Decision logic for a per-repo review-only workflow (crosscheck alter --review-only),
+// which posts reviews but never fixes/rechecks. Unlike identifyNextWorkflowStep, this
+// only asks "has this exact SHA already been reviewed?" — it deliberately ignores fix/recheck state,
 // so a fix-pushed SHA from another session is treated as new content to review
 // (not a recheck) and a SHA already reviewed is skipped. Short/long SHA forms are
 // matched by prefix, the same tolerance the issue_comment bridge uses.

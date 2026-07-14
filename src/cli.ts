@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url'
 import { basename, dirname, join } from 'path'
 import { runInit } from './commands/init.js'
 import { runOnboard } from './commands/onboard.js'
+import { runAlter } from './commands/alter.js'
 import { runWatch } from './commands/watch.js'
 import { runReviewSpec } from './commands/review.js'
 import { runStatus } from './commands/status.js'
@@ -37,6 +38,7 @@ interface StepRunFlags {
   fixer?: string
   vendor?: string
   steps?: string
+  reviewOnly?: boolean
   dryRun?: boolean
   expectedHeadSha?: string
   crazy?: boolean
@@ -80,7 +82,7 @@ function buildRunSpecOpts(opts: StepRunFlags): RunSpecOpts {
     reviewer: opts.reviewer,
     fixer: opts.fixer,
     vendor: opts.vendor,
-    steps: opts.steps,
+    steps: opts.reviewOnly ? 'review' : opts.steps,
     dryRun: opts.dryRun,
     expectedHeadSha: opts.expectedHeadSha,
     roundMode,
@@ -110,16 +112,25 @@ program
   .action((opts: { config?: string; yes?: boolean; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runOnboard(opts))
 
 program
+  .command('alter <repo>')
+  .alias('alter-workflow')
+  .description('Set a per-repo workflow override (writes ~/.crosscheck/workflows/<owner>__<repo>.yml)')
+  .option('--steps <list>', 'repo workflow depth: review, review,fix, or review,fix,recheck')
+  .option('--review-only', 'alias for --steps review')
+  .option('--reset', 'remove the per-repo override; revert to the global workflow')
+  .option('--show', 'print the repo\'s effective workflow steps without writing')
+  .action((repo: string, opts: { steps?: string; reviewOnly?: boolean; reset?: boolean; show?: boolean }) => runAlter(repo, opts))
+
+program
   .command('watch')
   .description('Local dev mode — listen for PRs via gh webhook forward')
   .option('-c, --config <path>', 'config file path')
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .option('--only-review', 'review-only mode: post reviews but never fix, recheck, or resolve')
   .option('--backtrace', 'enable startup scan for unreviewed open PRs this session (overrides backtrace.enabled: false)')
   .option('--no-backtrace', 'skip startup scan for unreviewed open PRs this session (overrides backtrace.enabled: true)')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; onlyReview?: boolean; backtrace?: boolean }) => void runWatch(opts))
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runWatch(opts))
 
 program
   .command('review <pr-urls...>')
@@ -142,8 +153,20 @@ addStepRunOptions(
     .description('Execute the full configured workflow against one or more PRs (review → fix → recheck). Accepts comma-separated URLs, bare numbers, and ranges (e.g. .../pull/245,255 or .../pull/245-256)'),
 )
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
+  .option('--review-only', 'alias for --steps review (this run only)')
   .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection (single PR only)')
-  .action((prUrls: string[], opts: StepRunFlags) => void runRunSpec(prUrls.join(','), buildRunSpecOpts(opts)))
+  .action((prUrls: string[], opts: StepRunFlags) => {
+    // --review-only is an alias for --steps review; reject a conflicting --steps
+    // rather than silently ignoring it (mirrors `crosscheck alter`).
+    if (opts.reviewOnly && opts.steps) {
+      const normalized = opts.steps.split(',').map(s => s.trim().toLowerCase()).filter(Boolean).join(',')
+      if (normalized !== 'review') {
+        console.error('error: --review-only cannot be combined with --steps unless --steps is review')
+        process.exit(1)
+      }
+    }
+    void runRunSpec(prUrls.join(','), buildRunSpecOpts(opts))
+  })
 
 addStepRunOptions(
   program

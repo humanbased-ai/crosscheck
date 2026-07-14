@@ -216,12 +216,12 @@ describe('identifyNextWorkflowStep', () => {
   })
 })
 
-// crosscheck watch --only-review uses decideReviewOnly (NOT identifyNextWorkflowStep)
-// so it can never advance to fix/recheck. These cases lock the behaviors that mode
-// depends on: review a fresh PR, skip an already-reviewed SHA, re-review a new SHA,
-// and — critically — treat a fix-pushed SHA from another session as new content to
-// review rather than mistaking it for a recheck (the fixedCurrentSha bypass).
-describe('decideReviewOnly (--only-review)', () => {
+// A per-repo review-only workflow (crosscheck alter --review-only) uses decideReviewOnly
+// (NOT identifyNextWorkflowStep) so it can never advance to fix/recheck. These cases lock
+// the behaviors that mode depends on: review a fresh PR, skip an already-reviewed SHA,
+// re-review a new SHA, and — critically — treat a fix-pushed SHA from another session as
+// new content to review rather than mistaking it for a recheck (the fixedCurrentSha bypass).
+describe('decideReviewOnly (per-repo review-only)', () => {
   it('reviews a fresh PR at round 1', () => {
     expect(decideReviewOnly([], 'head-sha')).toEqual({ alreadyReviewed: false, round: 1 })
   })
@@ -243,7 +243,7 @@ describe('decideReviewOnly (--only-review)', () => {
   })
 
   it('reviews a fix-pushed SHA as new content, not a recheck (fixedCurrentSha bypass)', () => {
-    // A prior non-only-review session reviewed sha-A (BLOCK) and pushed a fix to sha-B
+    // A prior full-workflow session reviewed sha-A (BLOCK) and pushed a fix to sha-B
     // but never rechecked. decideReviewOnly must REVIEW sha-B (it was never reviewed),
     // not skip it and not treat it as a recheck.
     const decision = decideReviewOnly([

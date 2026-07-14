@@ -89,6 +89,10 @@ orgs:
 # repos:
 #   - owner: acme
 #     name: specific-repo
+#
+# To narrow the workflow for one repo (e.g. make it review-only), do NOT edit this
+# file — run `crosscheck alter <owner>/<repo> --review-only`. That writes a standalone
+# override at ~/.crosscheck/workflows/<owner>__<repo>.yml, live-reloaded per PR.
 repos:
   - owner: codatta
     name: my-repo
