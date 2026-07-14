@@ -242,6 +242,20 @@ describe('runFixStep timeout defaults', () => {
     expect(opts.timeout).toBe(1_200_000)
   })
 
+  it('passes the configured Claude model and effort to fix runs', async () => {
+    const { runFixStep } = await import('../reviewers/fix.js')
+    const config = {
+      quality: { tier: 'thorough' },
+      vendors: { claude: { effort: 'max' } },
+    } as import('../config/schema.js').Config
+    await runFixStep('/tmp/repo', 'main', 'My PR', 'Review', '', config, 'claude-opus-4-8')
+    const args = execaMock.mock.calls[0][1] as string[]
+    expect(args).toContain('--model')
+    expect(args).toContain('claude-opus-4-8')
+    expect(args).toContain('--effort')
+    expect(args).toContain('max')
+  })
+
   it('uses tierTimeoutMs(fast) = 300s for fast tier', async () => {
     const { runFixStep } = await import('../reviewers/fix.js')
     await runFixStep('/tmp/repo', 'main', 'My PR', 'Review', '', minimalConfig('fast'))

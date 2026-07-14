@@ -9,14 +9,14 @@ describe('buildReviewCommentBody', () => {
       brand: { service_name: 'Acme' },
       origin: 'codex',
       verdict: 'APPROVE',
-      model: 'claude-opus-4-7',
+      model: 'claude-opus-4-8',
       stepType: 'review',
       round: 2,
       sha: 'abc1234',
     })
 
-    expect(body).toContain('### Code Review by 🤖 Claude Code · Opus 4.7 · Acme')
-    expect(body).toContain('model=claude-opus-4-7 type=review round=2 verdict=APPROVE service=Acme sha=abc1234')
+    expect(body).toContain('### Code Review by 🤖 Claude Code · Opus 4.8 · Acme')
+    expect(body).toContain('model=claude-opus-4-8 type=review round=2 verdict=APPROVE service=Acme sha=abc1234')
   })
 
   it('omits model and service segments for default Codex subscription auth', () => {
@@ -40,7 +40,7 @@ describe('buildReviewCommentBody', () => {
       body: 'VERDICT: APPROVE',
       reviewer: 'codex',
       verdict: 'APPROVE',
-      model: 'o4-mini',
+      model: 'gpt-5.6-terra',
       stepType: 'recheck',
       replyToCommentId: 123,
     })
@@ -48,12 +48,12 @@ describe('buildReviewCommentBody', () => {
       body: 'fixed',
       reviewer: 'claude',
       verdict: 'APPROVE',
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       stepType: 'fix',
     })
 
     expect(recheck).toContain('> Recheck of [original review](#issuecomment-123)')
-    expect(recheck).toContain('### Recheck by ⚡ Codex · o4-mini')
-    expect(fix).toContain('### Fixes by 🤖 Claude Code · Sonnet 4.6')
+    expect(recheck).toContain('### Recheck by ⚡ Codex · gpt-5.6-terra')
+    expect(fix).toContain('### Fixes by 🤖 Claude Code · Sonnet 5')
   })
 })

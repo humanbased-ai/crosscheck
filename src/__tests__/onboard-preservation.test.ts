@@ -59,7 +59,7 @@ describe('applyOnboardConfig — first run', () => {
     const vendors = cfg.vendors as Record<string, Record<string, unknown>>
     expect(vendors.claude.model).toBeUndefined()
     expect(vendors.claude.effort).toBe('max')
-    expect(vendors.codex.model).toBe('o3')
+    expect(vendors.codex.model).toBe('gpt-5.6-sol')
   })
 
   it('writes workflow.yml for all three presets', () => {

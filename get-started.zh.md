@@ -826,7 +826,7 @@ vendors:
   codex:
     enabled: true
     auth: subscription      # subscription | api-key
-    model: o4-mini          # 仅在 auth: api-key 时生效
+    model: gpt-5.6-terra    # 仅在 auth: api-key 时生效
     # timeout_sec: 1200     # 单次 CLI 调用最大秒数；不设 = 按 tier（300/600/1200）
 
   claude:
@@ -1045,14 +1045,14 @@ crosscheck 使用四信号链确定 PR 是否由 Claude Code、Codex 或人工�
 codex review --base <base-branch> --title "<pr-title>"
 ```
 
-`--base` 标志将当前 HEAD 与基础分支进行差异比较——与 PR diff 完全一致。使用 `auth: subscription` 时不传入模型参数。使用 `auth: api-key` 时，模型由质量层级决定（`fast` → `gpt-4o-mini`，`balanced` → `o4-mini`，`thorough` → `o3`）。
+`--base` 标志将当前 HEAD 与基础分支进行差异比较——与 PR diff 完全一致。使用 `auth: subscription` 时不传入模型参数。使用 `auth: api-key` 时，模型由质量层级决定（`fast` → `gpt-5.6-luna`，`balanced` → `gpt-5.6-terra`，`thorough` → `gpt-5.6-sol`）。
 
 ### Claude 审查如何运行
 
 ```bash
 claude \
   --print --bare \
-  --model claude-sonnet-4-6 \
+  --model claude-sonnet-5 \
   --effort medium \
   --max-budget-usd 2.00 \
   --output-last-message /tmp/review.md \

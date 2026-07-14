@@ -18,7 +18,7 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   quality: z.enum(['low', 'medium', 'high']).default('medium'),
   // Optional per-tier model overrides. When unset, the Codex CLI picks the model.
   // Subscription auth: leave unset (CLI default). API-key auth: set explicit model IDs.
-  // Example: { fast: 'codex-mini-latest', balanced: 'codex-latest', thorough: 'codex-latest' }
+  // Example: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol' }
   model_tiers: z.object({
     fast: z.string().optional(),
     balanced: z.string().optional(),

@@ -816,7 +816,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
         return runFixStep(
           tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-          config, 'default', ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs,
+          config, claudeFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs,
         )
       }
 
