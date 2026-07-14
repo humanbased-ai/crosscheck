@@ -1,0 +1,27 @@
+name: Model Tier Sources
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * 1'
+  pull_request:
+    paths:
+      - src/config/review-model-tiers.json
+      - src/lib/review-models.ts
+      - scripts/verify-model-tier-sources.mjs
+      - .github/workflows/model-tier-sources.yml
+
+jobs:
+  verify:
+    name: Verify model tier source docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify configured models appear in provider docs
+        run: node scripts/verify-model-tier-sources.mjs

@@ -45,17 +45,17 @@ const QUALITY_TIERS = {
   fast: {
     description: 'quick scan, top issues only  (~10s, lowest cost)',
     claude: { model: 'haiku', effort: 'low' as const },
-    codex:  { model: 'o4-mini', effort: 'low' as const },
+    codex:  { model: 'gpt-5.6-luna', effort: 'low' as const },
   },
   balanced: {
     description: 'full review, all issues with explanations  (~30s)',
     claude: { model: 'sonnet', effort: 'medium' as const },
-    codex:  { model: 'o4-mini', effort: 'medium' as const },
+    codex:  { model: 'gpt-5.6-terra', effort: 'medium' as const },
   },
   thorough: {
     description: 'deep multi-pass, security + architecture  (~60s+, higher cost)',
     claude: { model: 'opus', effort: 'max' as const },
-    codex:  { model: 'o3', effort: 'high' as const },
+    codex:  { model: 'gpt-5.6-sol', effort: 'high' as const },
   },
 } as const
 
