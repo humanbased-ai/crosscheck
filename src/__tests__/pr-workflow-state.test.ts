@@ -129,7 +129,7 @@ describe('identifyNextWorkflowStep', () => {
           '[crosscheck] fix: apply fixes from code review',
           '',
           'Crosscheck-Reviewer: claude',
-          'Crosscheck-Model: claude-sonnet-4-6',
+          'Crosscheck-Model: claude-sonnet-5',
           'Crosscheck-Step: fix',
           'Crosscheck-Service: crosscheck',
         ].join('\n'),
@@ -141,7 +141,7 @@ describe('identifyNextWorkflowStep', () => {
       type: 'fix',
       pushedSha: '59abeb630af4efbc874650db88ecf3dcb02724fb',
       reviewer: 'claude',
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       source: 'commit',
     })
 
@@ -189,7 +189,7 @@ describe('identifyNextWorkflowStep', () => {
           '[crosscheck] fix: apply fixes from code review',
           '',
           'Crosscheck-Reviewer: claude',
-          'Crosscheck-Model: claude-sonnet-4-6',
+          'Crosscheck-Model: claude-sonnet-5',
           'Crosscheck-Step: fix',
           'Crosscheck-Service: crosscheck',
         ].join('\n'),

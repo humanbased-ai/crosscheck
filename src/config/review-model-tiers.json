@@ -1,0 +1,35 @@
+{
+  "updated": "2026-07-14",
+  "sources": [
+    {
+      "name": "OpenAI model catalog",
+      "url": "https://developers.openai.com/api/docs/models",
+      "checks": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
+    },
+    {
+      "name": "OpenAI code generation guide",
+      "url": "https://developers.openai.com/api/docs/guides/code-generation",
+      "checks": ["gpt-5.6"]
+    },
+    {
+      "name": "Anthropic model catalog",
+      "url": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "checks": ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8"]
+    },
+    {
+      "name": "Anthropic model selection guide",
+      "url": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model",
+      "checks": ["Claude Haiku 4.5", "Claude Sonnet 5", "Claude Opus 4.8"]
+    }
+  ],
+  "claude": {
+    "fast": "claude-haiku-4-5-20251001",
+    "balanced": "claude-sonnet-5",
+    "thorough": "claude-opus-4-8"
+  },
+  "codex_api": {
+    "fast": "gpt-5.6-luna",
+    "balanced": "gpt-5.6-terra",
+    "thorough": "gpt-5.6-sol"
+  }
+}

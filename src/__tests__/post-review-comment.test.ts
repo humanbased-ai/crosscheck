@@ -68,11 +68,11 @@ describe('postReviewComment', () => {
 
     await postReviewComment(
       octokit, 'owner', 'repo', 42, 'Review', 'claude', {}, 'codex', 'NEEDS_WORK',
-      undefined, false, 'claude-opus-4-7', 'review', 3,
+      undefined, false, 'claude-opus-4-8', 'review', 3,
     )
 
     expect(createComment).toHaveBeenCalledWith(expect.objectContaining({
-      body: expect.stringContaining('model=claude-opus-4-7 type=review round=3'),
+      body: expect.stringContaining('model=claude-opus-4-8 type=review round=3'),
     }))
   })
 
