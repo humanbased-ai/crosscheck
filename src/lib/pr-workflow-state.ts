@@ -357,6 +357,27 @@ export function identifyNextWorkflowStep(
   return { step: null, hasExistingReview: true, round: lastReview.round, history }
 }
 
+export interface ReviewOnlyDecision {
+  /** True when `sha` already has a review/recheck record — the run should be skipped. */
+  alreadyReviewed: boolean
+  /** Round number to stamp on the review: highest prior round + 1, or 1 for a never-reviewed PR. */
+  round: number
+}
+
+// Decision logic for a per-repo review-only workflow (crosscheck alter --review-only),
+// which posts reviews but never fixes/rechecks. Unlike identifyNextWorkflowStep, this
+// only asks "has this exact SHA already been reviewed?" — it deliberately ignores fix/recheck state,
+// so a fix-pushed SHA from another session is treated as new content to review
+// (not a recheck) and a SHA already reviewed is skipped. Short/long SHA forms are
+// matched by prefix, the same tolerance the issue_comment bridge uses.
+export function decideReviewOnly(history: StepRecord[], sha: string): ReviewOnlyDecision {
+  const reviews = history.filter(r => r.type === 'review' || r.type === 'recheck')
+  const alreadyReviewed = reviews.some(r =>
+    r.sha !== undefined && (r.sha.startsWith(sha) || sha.startsWith(r.sha)))
+  const maxRound = reviews.reduce((max, r) => Math.max(max, r.round), 0)
+  return { alreadyReviewed, round: alreadyReviewed ? maxRound : maxRound + 1 }
+}
+
 function firstIncompleteInitialStep(history: StepRecord[], steps: WorkflowStep[]): WorkflowStep | null {
   for (const step of steps) {
     if (step.type === 'conflict-resolve') {

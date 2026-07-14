@@ -382,7 +382,7 @@ export async function runIssue(opts: {
   }
 
   if (!existsSync(LOG_DIR)) {
-    console.error(chalk.yellow('No logs found. Run `crosscheck watch` or `crosscheck serve` first.'))
+    console.error(chalk.yellow('No logs found. Run `crosscheck watch` first.'))
     return
   }
 
@@ -577,9 +577,9 @@ export async function runIssue(opts: {
 
     const trigIdx = await pickOne(
       'Which command triggered this?',
-      ['watch', 'serve', 'review', 'Unknown'],
+      ['watch', 'review', 'Unknown'],
     )
-    answers.trigger = ['watch', 'serve', 'review', 'Unknown'][trigIdx] as string
+    answers.trigger = ['watch', 'review', 'Unknown'][trigIdx] as string
 
     const impactIdx = await pickOne(
       'Is this blocking you from using crosscheck?',

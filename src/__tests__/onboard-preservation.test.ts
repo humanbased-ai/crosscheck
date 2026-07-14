@@ -249,6 +249,20 @@ describe('applyOnboardConfig — re-run preservation', () => {
     expect((cfg.server as Record<string, unknown>).port).toBe(9000)
     expect((cfg.logs as Record<string, unknown>).retention_days).toBe(14)
   })
+
+  it('writes selected repos without a steps field (per-repo depth lives in ~/.crosscheck/workflows/)', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'team',
+      repos: [{ owner: 'alice', name: 'myapp' }],
+    }))
+
+    applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
+
+    const cfg = readConfig()
+    expect(cfg.repos).toEqual([
+      { owner: 'alice', name: 'myapp' },
+    ])
+  })
 })
 
 describe('applyOnboardConfig — users / routing edge cases', () => {
@@ -400,8 +414,8 @@ describe('detectCurrentPreset', () => {
     writeFileSync(join(workflowDir, 'workflow.yml'), content)
   }
 
-  it('returns review-only when no workflow file exists', () => {
-    expect(detectCurrentPreset(workflowDir)).toBe('review-only')
+  it('returns review-fix-recheck (the default) when no workflow file exists', () => {
+    expect(detectCurrentPreset(workflowDir)).toBe('review-fix-recheck')
   })
 
   it('returns review-fix for a workflow with review + fix steps', () => {
@@ -435,9 +449,9 @@ describe('detectCurrentPreset', () => {
     expect(detectCurrentPreset(workflowDir)).toBe('review-fix')
   })
 
-  it('returns review-only for malformed workflow', () => {
+  it('returns review-fix-recheck (the default) for a malformed workflow', () => {
     seedWorkflow('not: valid: yaml: at all: [')
-    expect(detectCurrentPreset(workflowDir)).toBe('review-only')
+    expect(detectCurrentPreset(workflowDir)).toBe('review-fix-recheck')
   })
 })
 

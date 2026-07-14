@@ -16,10 +16,23 @@ export const VendorConfigSchema = z.object({
 // backwards compat but is no longer passed as --quality (removed from codex CLI).
 export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   quality: z.enum(['low', 'medium', 'high']).default('medium'),
+  // Optional per-tier model overrides. When unset, the Codex CLI picks the model.
+  // Subscription auth: leave unset (CLI default). API-key auth: set explicit model IDs.
+  // Example: { fast: 'codex-mini-latest', balanced: 'codex-latest', thorough: 'codex-latest' }
+  model_tiers: z.object({
+    fast: z.string().optional(),
+    balanced: z.string().optional(),
+    thorough: z.string().optional(),
+  }).optional(),
 })
 
 export const QualityConfigSchema = z.object({
   tier: z.enum(['fast', 'balanced', 'thorough']).default('balanced'),
+  // fixed: every agent call uses the same tier (legacy behaviour; applied when unset).
+  // smart: the effective tier is chosen per-call based on diff size, prior
+  //        BLOCK verdicts, and step type — reducing cost on small/low-risk PRs
+  //        while still promoting hard calls to stronger models.
+  mode: z.enum(['fixed', 'smart']).optional(),
   focus: z.array(z.string()).default([]),
   custom_prompt: z.string().optional(),
 })
@@ -29,9 +42,26 @@ export const BudgetConfigSchema = z.object({
   per_review_usd: z.number().default(2.0),
 })
 
+export const RepoWorkflowStepSchema = z.enum(['review', 'fix', 'recheck'])
+export type RepoWorkflowStep = z.infer<typeof RepoWorkflowStepSchema>
+
+export const RepoWorkflowStepsSchema = z.array(RepoWorkflowStepSchema).min(1).superRefine((steps, ctx) => {
+  const value = steps.join(',')
+  const valid = value === 'review' || value === 'review,fix' || value === 'review,fix,recheck'
+  if (!valid) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'repo workflow steps must be review, review+fix, or review+fix+recheck',
+    })
+  }
+})
+
 export const RepoConfigSchema = z.object({
   owner: z.string(),
   name: z.string(),
+  // Per-repo workflow depth is NOT stored here. It lives in a standalone file at
+  // ~/.crosscheck/workflows/<owner>__<repo>.yml (written by `crosscheck alter`),
+  // so pipeline shape stays out of the infra config and is live-reloaded per PR.
 })
 
 export const RoutingConfigSchema = z.object({

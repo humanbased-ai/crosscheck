@@ -33,7 +33,8 @@ import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
-import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
+import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
+import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
@@ -354,10 +355,48 @@ export async function runWatch(opts: WatchOpts = {}) {
         : isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
       let resolvedSteps: WorkflowStep[] | undefined
       let detectedReviewComment: { id?: number; body: string } | undefined
+      const repoStepOverride = readRepoWorkflowStepTypes(owner, repoName)
+      const repoAllowsRecheck = repoStepOverride === undefined || repoStepOverride.includes('recheck')
+      const initialRepoSteps = repoStepOverride ? filterStepsByTypes(workflow, repoStepOverride) : workflow
+      const reviewOnlyForRepo = isReviewOnlyWorkflow(initialRepoSteps)
+      if (!repoAllowsRecheck && isRecheckRun) {
+        isRecheckRun = false
+        round = 1
+      }
 
-      if (!isRecheckRun) {
+      if (reviewOnlyForRepo) {
+        // Review-only comes from a per-repo override (crosscheck alter --review-only).
+        // Restrict the workflow to review step(s) and dedup on the exact head sha so
+        // restarts/synchronize events don't post duplicate reviews for content
+        // already covered.
+        const reviewSteps = initialRepoSteps.filter(s => s.type === 'review')
+        if (reviewSteps.length === 0) {
+          await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+          releasePRLock(owner, repoName, prNumber, params.headSha)
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_review_step' })
+          return
+        }
+        isRecheckRun = false
+        round = 1
+        resolvedSteps = reviewSteps
         try {
-          const allSteps = loadWorkflow(process.cwd())
+          const history = await fetchStepHistory(owner, repoName, prNumber, token)
+          const decision = decideReviewOnly(history, params.headSha)
+          if (decision.alreadyReviewed) {
+            await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+            releasePRLock(owner, repoName, prNumber, params.headSha)
+            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'already_reviewed', sha: params.headSha })
+            return
+          }
+          round = decision.round
+        } catch { /* best-effort — fall back to a fresh round-1 review */ }
+      } else if (!isRecheckRun) {
+        try {
+          // Reuse the per-event override snapshot (read once at repoStepOverride)
+          // instead of re-reading the file; the global workflow is still loaded
+          // fresh so live edits to workflow.yml apply across events.
+          const globalWorkflow = loadWorkflow(process.cwd())
+          const allSteps = repoStepOverride ? filterStepsByTypes(globalWorkflow, repoStepOverride) : globalWorkflow
           const history = await fetchStepHistory(owner, repoName, prNumber, token)
           const nextResult = identifyNextWorkflowStep(history, allSteps, params.headSha)
           if (nextResult.step === null) {
@@ -383,7 +422,7 @@ export async function runWatch(opts: WatchOpts = {}) {
               // the fix does not push to the PR head, so a recheck would evaluate the
               // un-fixed diff and post an incorrect verdict on the original PR.
               const deliveryMode = config.post_review.auto_fix.delivery.mode
-              if (deliveryMode === 'commit' && !steps.some(s => s.type === 'recheck')) {
+              if (repoAllowsRecheck && deliveryMode === 'commit' && !steps.some(s => s.type === 'recheck')) {
                 const reviewStep = allSteps.find(s => s.type === 'review')
                 if (reviewStep) {
                   const synthetic: WorkflowStep = {
@@ -404,7 +443,7 @@ export async function runWatch(opts: WatchOpts = {}) {
               // DEFAULT_RECHECK_INSTRUCTIONS rather than falling back to a coerced
               // review step with review instructions.
               const deliveryMode = config.post_review.auto_fix.delivery.mode
-              if (deliveryMode === 'commit') {
+              if (repoAllowsRecheck && deliveryMode === 'commit') {
                 const reviewStep = allSteps.find(s => s.type === 'review')
                 if (reviewStep) {
                   resolvedSteps = [{
@@ -429,7 +468,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       let boardAdded = false
 
       try {
-        clonePRForReview({
+        await clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef,
           tmpDir, token, protocol: config.clone_protocol,
           onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef }),
@@ -477,6 +516,9 @@ export async function runWatch(opts: WatchOpts = {}) {
         board.updatePR(key, { prLoc })
         stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
+        const workflowStepsForRun = resolvedSteps
+          ?? (repoStepOverride ? filterStepsByTypes(loadWorkflow(process.cwd()), repoStepOverride) : undefined)
+
         const { verdict, fixAppliedCount } = await runWorkflow({
           owner, repoName, prNumber, pr,
           tmpDir, token, config: effectiveConfig, origin,
@@ -490,7 +532,7 @@ export async function runWatch(opts: WatchOpts = {}) {
               triggerSwitch(failedVendor, reason, bLog)
             }
           },
-          ...(resolvedSteps !== undefined && { steps: resolvedSteps }),
+          ...(workflowStepsForRun !== undefined && { steps: workflowStepsForRun }),
           ...(detectedReviewComment !== undefined && { initialReviewComment: detectedReviewComment }),
           isRecheckRun,
           round,
@@ -556,9 +598,10 @@ export async function runWatch(opts: WatchOpts = {}) {
         // head and fixCommitSha would be wrong. Also verify the live PR head on
         // GitHub matches before scheduling to guard against the PR advancing
         // concurrently while the recheck was running.
-        if (verdict && verdict !== 'APPROVE' && fixCommitSha) {
+        if (repoAllowsRecheck && verdict && verdict !== 'APPROVE' && fixCommitSha) {
           if (deliveryMode === 'commit') {
-            const allSteps = loadWorkflow(process.cwd())
+            const globalWorkflow = loadWorkflow(process.cwd())
+            const allSteps = repoStepOverride ? filterStepsByTypes(globalWorkflow, repoStepOverride) : globalWorkflow
             const fixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
             const maxRounds = fixRecheckSteps.length > 0
               ? Math.min(...fixRecheckSteps.map(s => s.max_rounds ?? 1))
@@ -567,7 +610,7 @@ export async function runWatch(opts: WatchOpts = {}) {
             // step (workflow.yml has fix but not recheck). The next auto_loop invocation
             // will run only the synthetic recheck; it pushes no new commit so the outer
             // fixCommitSha guard prevents any further scheduling after that recheck.
-            const effectiveSteps = resolvedSteps ?? allSteps
+            const effectiveSteps = workflowStepsForRun ?? allSteps
             const ranRecheck = effectiveSteps.some(s => s.type === 'recheck')
             if (round < maxRounds || !ranRecheck) {
               let prHeadSha: string | null = null
@@ -644,7 +687,16 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      if (event.action === 'synchronize') {
+      const eventSteps = resolveRepoWorkflowSteps(owner, repoName, workflow)
+      const eventReviewOnly = isReviewOnlyWorkflow(eventSteps)
+
+      // The two crosscheck-commit skips below exist only to stop the fix→review
+      // loop from re-entering on crosscheck's own fix commits. A review-only repo has
+      // no fix step and never pushes commits, so there is no loop to guard against;
+      // skipping these would also drop fix commits pushed by another session, which
+      // in review-only mode are just current PR content that should be reviewed.
+      // decideReviewOnly dedups per head SHA, so reviewing them can't repeat.
+      if (!eventReviewOnly && event.action === 'synchronize') {
         const message = await getCommitMessage(owner, repoName, pr.head.sha, token).catch(() => null)
         if (message !== null && isCrosscheckCommitMessage(message)) {
           fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_commit', sha: pr.head.sha })
@@ -654,7 +706,7 @@ export async function runWatch(opts: WatchOpts = {}) {
 
       // Skip synchronize events triggered by our own address commits.
       // crosscheckShas is backed by disk so this also covers SHAs from prior sessions.
-      if (crosscheckShas.has(pr.head.sha)) {
+      if (!eventReviewOnly && crosscheckShas.has(pr.head.sha)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_sha', sha: pr.head.sha })
         return
       }
@@ -672,6 +724,14 @@ export async function runWatch(opts: WatchOpts = {}) {
       const owner = event.repository.owner.login
       const repoName = event.repository.name
       const prNumber = event.issue.number
+
+      // The issue_comment bridge exists solely to advance the workflow to fix.
+      // When the active repo workflow has no fix step, disable it entirely.
+      const commentSteps = resolveRepoWorkflowSteps(owner, repoName, workflow)
+      if (isReviewOnlyWorkflow(commentSteps) || !workflowHasStep(commentSteps, 'fix')) {
+        fileLog({ level: 'info', event: 'comment_trigger_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: isReviewOnlyWorkflow(commentSteps) ? 'only_review' : 'no_fix_step' })
+        return
+      }
 
       // Human feedback in regular PR comments is always valued and never reaches
       // this handler (webhook.ts only forwards comments that contain the hidden
@@ -965,6 +1025,15 @@ export async function runWatch(opts: WatchOpts = {}) {
   if (config.orgs.length === 0 && config.users.length === 0) {
     const labels = scopes.map(s => 'org' in s ? s.org : `${s.owner}/${s.repo}`)
     console.log(`  repos       ${chalk.cyan(labels.join(', '))}`)
+  }
+  const repoWorkflowOverrides = config.repos
+    .map(repo => ({ repo, steps: readRepoWorkflowStepTypes(repo.owner, repo.name) }))
+    .filter(r => r.steps !== undefined)
+  if (repoWorkflowOverrides.length > 0) {
+    const labels = repoWorkflowOverrides
+      .slice(0, 4)
+      .map(r => `${r.repo.owner}/${r.repo.name}: ${formatRepoWorkflowSteps(r.steps!)}`)
+    console.log(`  workflows   ${labels.map(label => chalk.cyan(label)).join(', ')}${repoWorkflowOverrides.length > 4 ? chalk.dim(` +${repoWorkflowOverrides.length - 4} more`) : ''}`)
   }
   const cfgPath = resolveConfigPath(configPath)
   console.log(`  config      ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)

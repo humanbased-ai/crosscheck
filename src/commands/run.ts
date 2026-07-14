@@ -15,6 +15,7 @@ import { initLogger, log as fileLog, logError, classifyError } from '../lib/logg
 import { hintForError } from '../lib/remediation.js'
 import { runWorkflow } from '../lib/runner.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
+import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
@@ -301,9 +302,14 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     console.log(chalk.dim(`  fixer: ${normalizedFixer} (forced for fix steps)`))
   }
 
-  // Resolve steps — filter from workflow.yml by type if --steps is specified, then apply
-  // command-line vendor overrides so runWorkflow doesn't re-derive those step vendors.
-  const allSteps = loadWorkflow(process.cwd())
+  // Resolve steps — a per-repo override file narrows workflow.yml by default. An
+  // explicit --steps flag is a one-shot override and wins over the repo default.
+  const baseSteps = loadWorkflow(process.cwd())
+  const repoStepOverride = !opts.steps ? readRepoWorkflowStepTypes(owner, repo) : undefined
+  const allSteps = repoStepOverride ? resolveRepoWorkflowSteps(owner, repo, baseSteps) : baseSteps
+  if (repoStepOverride) {
+    console.log(chalk.dim(`  repo workflow: ${formatRepoWorkflowSteps(repoStepOverride)}`))
+  }
   let stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
   let initialReviewComment = opts.initialReviewComment
 
@@ -478,7 +484,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
     let workflowError: unknown
     try {
-      clonePRForReview({
+      await clonePRForReview({
         owner, repo, prNumber: number, baseRef: prData.base.ref,
         tmpDir, token, protocol: config.clone_protocol,
         onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref }),

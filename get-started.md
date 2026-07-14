@@ -21,7 +21,6 @@
   - [recheck / fix / resolve](#crosscheck-recheck--fix--resolve-pr-urls)
   - [Multi-PR syntax](#multi-pr-syntax)
   - [watch](#crosscheck-watch)
-  - [serve](#crosscheck-serve-beta)
   - [status](#crosscheck-status)
   - [diagnose](#crosscheck-diagnose)
   - [optimize](#crosscheck-optimize)
@@ -151,7 +150,7 @@ export CROSSCHECK_WEBHOOK_SECRET=your-secret
 crosscheck status
 ```
 
-`crosscheck status` prints the active config path, GitHub auth source, usable reviewer CLIs, webhook-secret handling, and current logs. A webhook secret is auto-managed for `watch` and `serve`, so it does not need to be set before a one-shot review.
+`crosscheck status` prints the active config path, GitHub auth source, usable reviewer CLIs, webhook-secret handling, and current logs. A webhook secret is auto-managed for `watch`, so it does not need to be set before a one-shot review.
 
 If you prefer to create a starter config without the full wizard:
 
@@ -173,7 +172,7 @@ This clones the PR branch, runs Codex review against the base branch, and posts 
 crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
 ```
 
-If this step fails, fix the specific auth, clone, reviewer, or comment-posting error before enabling `watch` or `serve`.
+If this step fails, fix the specific auth, clone, reviewer, or comment-posting error before enabling `watch`.
 
 ## Step 3 — Choose a deployment mode
 
@@ -191,7 +190,7 @@ Once it completes, go straight to `crosscheck watch`. There is no separate init 
 
 ### Personal vs team
 
-On first run, `crosscheck watch` (or `crosscheck serve`) will ask how you're using it:
+On first run, `crosscheck watch` will ask how you're using it:
 
 ```
 How are you using crosscheck?
@@ -262,92 +261,13 @@ When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned 
 
 **Token scope for org webhooks:** `GITHUB_TOKEN` needs `write:org` scope for org-level coverage. For repo-level, `repo` scope is sufficient.
 
-### Serve mode [DEPRECATED] — for an always-on machine (mac-mini, home server)
-
-> **Deprecated:** `serve` is being sunset. `crosscheck watch` now covers the always-on
-> server use case — run it with the smee tunnel backend (a hosted relay that survives
-> restarts and queues events while you're offline). Migrate with:
->
-> ```yaml
-> # crosscheck.config.yml
-> tunnel:
->   backend: smee
->   smee_channel: https://smee.io/your-channel   # get one at https://smee.io/new
-> ```
->
-> then run `crosscheck watch`. `serve` still works for now and prints this reminder at
-> startup, but a future release will remove it.
-
-Listens on a fixed port. You register the webhook(s) manually once and they stay registered.
+**Review-only for a repo:** make a repo post reviews and nothing else with `crosscheck alter <repo> --review-only` — crosscheck never runs the fix, recheck, or conflict-resolve steps for it, and never pushes commits to its PRs:
 
 ```bash
-crosscheck serve
+crosscheck alter humanbased-ai/xny-monorepo --review-only
 ```
 
-```
-crosscheck serving
-⚠  serve is in beta — report issues at github.com/humanbased-ai/crosscheck/issues
-
-  mode      cross-vendor
-  quality   balanced
-  port      7891
-  endpoint  http://your-machine.local:7891/webhook
-
-Register the endpoint above as a GitHub org webhook (content-type: application/json).
-  → https://github.com/organizations/humanbased-ai/settings/hooks
-  → https://github.com/organizations/codatta/settings/hooks
-```
-
-**For org-level coverage** (covers all repos in the org), register at:
-`https://github.com/organizations/<org>/settings/hooks`
-
-**For repo-level coverage**, register at:
-`https://github.com/<owner>/<repo>/settings/hooks`
-
-- Payload URL: `http://your-machine:7891/webhook`
-- Content type: `application/json`
-- Secret: your `CROSSCHECK_WEBHOOK_SECRET` value
-- Which events: **Pull requests** only
-
-**Running as a background service (macOS launchd):**
-
-```xml
-<!-- ~/Library/LaunchAgents/dev.crosscheck.plist -->
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>dev.crosscheck</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/crosscheck</string>
-    <string>serve</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>GITHUB_TOKEN</key><string>ghp_your_token</string>
-    <key>CROSSCHECK_WEBHOOK_SECRET</key><string>your_secret</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/crosscheck.log</string>
-  <key>StandardErrorPath</key><string>/tmp/crosscheck.error.log</string>
-</dict>
-</plist>
-```
-
-```bash
-launchctl load ~/Library/LaunchAgents/dev.crosscheck.plist
-launchctl start dev.crosscheck
-```
-
-**Running with pm2 (cross-platform):**
-
-```bash
-npm install -g pm2
-pm2 start crosscheck -- serve
-pm2 save && pm2 startup
-```
+Each PR (and each new pushed SHA) on a review-only repo gets a fresh review comment; content that has already been reviewed at the current SHA is skipped. Use this when you want crosscheck's verdicts on a repo but want to apply fixes yourself. Review-only is a per-repo setting now — there is no global `--only-review` flag.
 
 ---
 
@@ -373,7 +293,7 @@ crosscheck init
 crosscheck init --config /path/to/crosscheck.config.yml
 ```
 
-What it checks: `codex` CLI, `claude` CLI, `gh` CLI, GitHub auth, and webhook-secret handling. The webhook secret is auto-managed at `~/.crosscheck/webhook-secret` for `watch` and `serve`.
+What it checks: `codex` CLI, `claude` CLI, `gh` CLI, GitHub auth, and webhook-secret handling. The webhook secret is auto-managed at `~/.crosscheck/webhook-secret` for `watch`.
 
 | Flag | Description |
 |---|---|
@@ -512,6 +432,31 @@ crosscheck onboard
 | `--personal` | Use personal deployment mode for this session only |
 | `--team` | Use team deployment mode for this session only |
 | `--reconfigure` | Re-run setup even if `deployment` is already set in config |
+
+Onboard never touches per-repo workflow overrides written by `crosscheck alter` — those live in their own files under `~/.crosscheck/workflows/`.
+
+---
+
+### `crosscheck alter`
+
+Sets the workflow depth for one repo without changing the global default. Writes a standalone file at `~/.crosscheck/workflows/<owner>__<repo>.yml` that narrows the global `~/.crosscheck/workflow.yml` for that repo only. Use it when one watcher should run different depths for different repos. `alter-workflow` is an alias.
+
+```bash
+crosscheck alter humanbased-ai/xny-monorepo --review-only            # alias for --steps review
+crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
+crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
+crosscheck alter humanbased-ai/xny-monorepo --show                   # print effective steps, no write
+crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove the override
+```
+
+| Flag | Description |
+|---|---|
+| `--steps <list>` | `review`, `review,fix`, or `review,fix,recheck` |
+| `--review-only` | Alias for `--steps review` |
+| `--show` | Print the repo's effective steps without writing |
+| `--reset` | Remove the override; revert to the global default |
+
+Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. Changes apply on the next PR event — no need to restart a running `crosscheck watch`.
 
 ---
 
@@ -728,20 +673,9 @@ Uses `localhost.run` (SSH) to open a public tunnel — SSH is pre-installed on m
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Use a specific config file |
-
----
-
-### `crosscheck serve` [BETA]
-
-Always-on mode. Listens on a fixed port; you register webhooks once manually.
-
-```bash
-crosscheck serve
-```
-
-| Flag | Description |
-|---|---|
-| `-c, --config <path>` | Use a specific config file |
+| `--personal` / `--team` | Override the saved deployment mode for this session only |
+| `--reconfigure` | Re-run deployment setup and save the new choice |
+| `--backtrace` / `--no-backtrace` | Force on/off the startup scan for unreviewed open PRs |
 
 ---
 
@@ -992,16 +926,16 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 
 | File | Written by | Read by | Purpose |
 |---|---|---|---|
-| `config.yml` | `onboard`, `init`, `watch`/`serve` (first run) | all commands | Main config — deployment, repos, mode, vendors, quality, tunnel, routing, budget, branding |
-| `workflow.yml` | `onboard` (first run only) | `watch`, `serve`, `run` | Global pipeline steps with per-step inline instructions. Written once on first onboard; never overwritten on re-runs — edit freely |
-| `webhook-secret` | auto-generated on first use | `watch`, `serve` | HMAC secret for GitHub webhook signature verification — reused across restarts |
-| `logs/YYYY-MM-DD.ndjson` | `watch`, `serve` | `diagnose`, `optimize`, `impact`, `issue` | Structured review event log, one file per day |
+| `config.yml` | `onboard`, `init`, `watch` (first run) | all commands | Main config — deployment, repos, mode, vendors, quality, tunnel, routing, budget, branding |
+| `workflow.yml` | `onboard` (first run only) | `watch`, `run` | Global pipeline steps with per-step inline instructions. Written once on first onboard; never overwritten on re-runs — edit freely |
+| `webhook-secret` | auto-generated on first use | `watch` | HMAC secret for GitHub webhook signature verification — reused across restarts |
+| `logs/YYYY-MM-DD.ndjson` | `watch` | `diagnose`, `optimize`, `impact`, `issue` | Structured review event log, one file per day |
 
 ### Per-project overrides (checked before the global files)
 
 | File | Read by | Purpose |
 |---|---|---|
-| `.crosscheck/workflow.yml` *(in repo)* | `watch`, `serve`, `run` | Per-project pipeline — takes priority over `~/.crosscheck/workflow.yml` |
+| `.crosscheck/workflow.yml` *(in repo)* | `watch`, `run` | Per-project pipeline — takes priority over `~/.crosscheck/workflow.yml` |
 | `.crosscheck/AGENT.md` *(in repo)* | `optimize` | Per-project harness — takes priority over bundled `AGENT.md` |
 | `AGENT.md` *(bundled with crosscheck)* | `optimize` | Default harness — shipped with the package, always available as fallback |
 
@@ -1010,6 +944,8 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 On re-runs, `onboard` updates only the fields it collected answers for. Everything else survives unchanged.
 
 **Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
+
+**Never touched by onboard:** per-repo overrides in `~/.crosscheck/workflows/` (owned by `crosscheck alter`), and `~/.crosscheck/workflow.yml` after its first write
 
 **Initialised on first run, never overwritten:** `routing.allowed_authors`, `routing.author_routes`, `routing.fallback_reviewer`
 
@@ -1096,9 +1032,14 @@ users:
 
 # ── Repos — for monitoring specific repos only ────────────────────────────────
 # Omit when using `orgs`/`users`. Auto-detected from git remote if all are empty.
+# To run one repo at a narrower workflow depth, do NOT add fields here — run
+# `crosscheck alter <owner>/<repo> --review-only` (or --steps review,fix). That
+# writes ~/.crosscheck/workflows/<owner>__<repo>.yml, live-reloaded per PR.
 repos:
   - owner: acme
     name: specific-repo
+  - owner: humanbased-ai
+    name: xny-monorepo
 
 # ── Routing ───────────────────────────────────────────────────────────────────
 routing:
@@ -1312,19 +1253,9 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 
 **Known gap — concurrent sessions**
 
-If `crosscheck run <pr-url>` is invoked while a `watch`/`serve` daemon is already reviewing the same PR (or two machines pick up the same webhook), both sessions will pass the current check — which only looks at already-posted comments — and both will post a review. This is a known race condition.
+If `crosscheck run <pr-url>` is invoked while a `watch` daemon is already reviewing the same PR (or two machines pick up the same webhook), both sessions will pass the current check — which only looks at already-posted comments — and both will post a review. This is a known race condition.
 
-The fix (file lock for same-machine + GitHub commit status for cross-machine) is tracked as a P0 item and not yet implemented. Until it lands, avoid running `crosscheck run` manually on a PR that your `watch`/`serve` daemon is actively processing.
-
-### Watch vs serve
-
-| | `watch` | `serve` [BETA] |
-|---|---|---|
-| Tunnel | `localhost.run` via SSH (no install) | None — direct port |
-| Webhook | Auto-managed, cleaned up on exit | Manual, permanent |
-| Scope | Org-level or repo-level | Org-level or repo-level |
-| Machine | Developer laptop | mac-mini / server |
-| Lifecycle | Tied to terminal | Daemon / service |
+The fix (file lock for same-machine + GitHub commit status for cross-machine) is tracked as a P0 item and not yet implemented. Until it lands, avoid running `crosscheck run` manually on a PR that your `watch` daemon is actively processing.
 
 ### Security
 
@@ -1414,6 +1345,8 @@ To reset the review step instructions to defaults, delete `~/.crosscheck/workflo
 
 Yes. Create `.crosscheck/workflow.yml` in your repo root. crosscheck loads it automatically and uses it instead of the built-in default pipeline. This is the recommended way to customize reviewer behavior — it keeps all per-project settings in one file under version control.
 
+For one always-on watcher that monitors many repos, use `crosscheck alter owner/repo --review-only` (or `--steps review,fix`) instead. That writes `~/.crosscheck/workflows/<owner>__<repo>.yml`, which narrows the global workflow for that one repo — live-reloaded, no restart — while the rest keep the global workflow.
+
 ### What is `AGENT.md`?
 
 `AGENT.md` is the harness document that guides the AI during `crosscheck optimize`. It defines the input/output contract, language-detection rules, constraint-writing guidelines, and quality principles. It ships bundled with crosscheck so `optimize` works out of the box.
@@ -1467,7 +1400,7 @@ Each cycle is one `[crosscheck]` fix commit followed by one recheck. The loop st
 
 `max_rounds` is a per-step field. Crosscheck uses the minimum across all fix and recheck steps in the workflow, so setting `max_rounds: 3` on both keeps them in sync. Setting it to different values on fix vs recheck is not recommended.
 
-`max_rounds` is respected by both `crosscheck watch` and `crosscheck run`. `watch` re-triggers on each pushed fix commit; `run` loops inline within the same session. `crosscheck serve` does not yet implement autonomous looping — use `watch` if you need `max_rounds > 1` in continuous mode.
+`max_rounds` is respected by both `crosscheck watch` and `crosscheck run`. `watch` re-triggers on each pushed fix commit; `run` loops inline within the same session.
 
 ### Can I disable the auto-fix step?
 
