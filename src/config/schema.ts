@@ -45,14 +45,29 @@ export const BudgetConfigSchema = z.object({
 export const RepoWorkflowStepSchema = z.enum(['review', 'fix', 'recheck'])
 export type RepoWorkflowStep = z.infer<typeof RepoWorkflowStepSchema>
 
+// Canonical execution order of the three workflow steps. A per-repo override may
+// enable any subset, subject to three rules:
+//   1. it must include `review` — the step every later step builds on,
+//   2. steps must appear in this order (review, then fix, then recheck),
+//   3. no step may repeat.
+// That yields exactly: review, review+fix, review+recheck, review+fix+recheck.
+export const REPO_WORKFLOW_STEP_ORDER: readonly RepoWorkflowStep[] = ['review', 'fix', 'recheck']
+
 export const RepoWorkflowStepsSchema = z.array(RepoWorkflowStepSchema).min(1).superRefine((steps, ctx) => {
-  const value = steps.join(',')
-  const valid = value === 'review' || value === 'review,fix' || value === 'review,fix,recheck'
-  if (!valid) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'repo workflow steps must be review, review+fix, or review+fix+recheck',
-    })
+  const fail = (message: string): void => {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message })
+  }
+  if (new Set(steps).size !== steps.length) {
+    fail('repo workflow steps must not repeat a step')
+    return
+  }
+  if (!steps.includes('review')) {
+    fail('repo workflow steps must include review')
+    return
+  }
+  const canonical = REPO_WORKFLOW_STEP_ORDER.filter(step => steps.includes(step))
+  if (steps.join(',') !== canonical.join(',')) {
+    fail('repo workflow steps must be ordered review, then fix, then recheck')
   }
 })
 

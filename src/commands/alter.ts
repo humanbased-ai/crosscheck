@@ -39,7 +39,7 @@ export function resolveSteps(opts: AlterOpts): RepoWorkflowStep[] {
   }
   if (opts.reviewOnly) return ['review']
   if (opts.steps) return parseRepoWorkflowSteps(opts.steps)
-  throw new Error('Choose a workflow depth with --steps review,fix,recheck or --review-only (or use --show / --reset)')
+  throw new Error('Choose a workflow depth with --steps (e.g. review, review,fix, review,recheck, review,fix,recheck) or --review-only (or use --show / --reset)')
 }
 
 function fail(err: unknown, code: 1 | 2): never {

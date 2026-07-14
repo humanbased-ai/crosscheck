@@ -444,6 +444,7 @@ Sets the workflow depth for one repo without changing the global default. Writes
 ```bash
 crosscheck alter humanbased-ai/xny-monorepo --review-only            # alias for --steps review
 crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
+crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,recheck
 crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
 crosscheck alter humanbased-ai/xny-monorepo --show                   # print effective steps, no write
 crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove the override
@@ -451,7 +452,7 @@ crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove th
 
 | Flag | Description |
 |---|---|
-| `--steps <list>` | `review`, `review,fix`, or `review,fix,recheck` |
+| `--steps <list>` | Any in-order subset beginning with `review`: `review`, `review,fix`, `review,recheck`, or `review,fix,recheck` |
 | `--review-only` | Alias for `--steps review` |
 | `--show` | Print the repo's effective steps without writing |
 | `--reset` | Remove the override; revert to the global default |

@@ -131,9 +131,9 @@ crosscheck alter humanbased-ai/xny-monorepo --reset            # remove the over
 ```
 
 Acceptance criteria:
-- The per-repo file is `{ steps: [review] | [review, fix] | [review, fix, recheck] }`, validated by `RepoWorkflowStepsSchema`. Pipeline shape is **not** stored in `config.yml` (`RepoConfigSchema` has no `steps` field).
+- The per-repo file is `{ steps: [review] | [review, fix] | [review, recheck] | [review, fix, recheck] }` — any in-order subset of `[review, fix, recheck]` that includes `review` — validated by `RepoWorkflowStepsSchema`. Pipeline shape is **not** stored in `config.yml` (`RepoConfigSchema` has no `steps` field).
 - `watch` resolves workflow steps per PR repo by narrowing the global workflow. Repos narrowed to `[review]` do not run fix, recheck, conflict-resolve, or the review→fix `issue_comment` bridge.
-- `conflict-resolve` is orthogonal to the review→fix→recheck depth ladder, so an override cannot list it. It passes through whenever the override permits code modification (`review,fix` or `review,fix,recheck`) and is dropped only for review-only (`review`).
+- `conflict-resolve` is orthogonal to the review→fix→recheck depth ladder, so an override cannot list it. It passes through whenever the override permits code modification (i.e. includes `fix`: `review,fix` or `review,fix,recheck`) and is dropped for overrides without `fix` (`review` or `review,recheck`).
 - Repos without an override file keep the complete configured workflow.
 - `crosscheck alter <repo>` (alias `alter-workflow`) writes/removes the per-repo file; `--show` prints effective steps; `--reset` removes the override; `--review-only` is an alias for `--steps review`.
 - The built-in default and the `onboard` default are the full `review → fix → recheck` loop. Review-only is a pipeline shape (`--steps review`), reachable per-repo via `alter --review-only` or per-run via `run --review-only`; there is no global `watch --only-review` flag.

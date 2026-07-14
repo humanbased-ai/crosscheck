@@ -126,7 +126,7 @@ program
   .command('alter <repo>')
   .alias('alter-workflow')
   .description('Set a per-repo workflow override (writes ~/.crosscheck/workflows/<owner>__<repo>.yml)')
-  .option('--steps <list>', 'repo workflow depth: review, review,fix, or review,fix,recheck')
+  .option('--steps <list>', 'repo workflow depth: review, review,fix, review,recheck, or review,fix,recheck')
   .option('--review-only', 'alias for --steps review')
   .option('--reset', 'remove the per-repo override; revert to the global workflow')
   .option('--show', 'print the repo\'s effective workflow steps without writing')

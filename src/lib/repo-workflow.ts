@@ -11,7 +11,7 @@ export interface RepoRef {
   name: string
 }
 
-const STEP_HINT = 'Expected steps: review, review,fix, or review,fix,recheck'
+const STEP_HINT = 'Expected steps: review, review,fix, review,recheck, or review,fix,recheck'
 
 // Per-repo workflow overrides live in standalone files, keyed by repo, so one
 // long-lived `watch` can narrow individual repos while the pipeline shape stays
@@ -73,7 +73,7 @@ function buildRepoWorkflowFile(owner: string, name: string, steps: RepoWorkflowS
   return [
     `# crosscheck per-repo workflow override — written by \`crosscheck alter\``,
     `# Narrows the global ~/.crosscheck/workflow.yml for ${owner}/${name} to these steps.`,
-    `# Values: review | review,fix | review,fix,recheck. Delete this file (or run`,
+    `# Values: review | review,fix | review,recheck | review,fix,recheck. Delete this file (or run`,
     `# \`crosscheck alter ${owner}/${name} --reset\`) to restore the global default.`,
     yaml.dump({ steps }, { lineWidth: -1, noRefs: true }),
   ].join('\n')

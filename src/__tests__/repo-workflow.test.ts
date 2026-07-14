@@ -37,16 +37,21 @@ describe('repo workflow helpers', () => {
     expect(parseRepoRef('')).toBeNull()
   })
 
-  it('accepts the three repo workflow depths', () => {
+  it('accepts any in-order subset of steps that begins with review', () => {
     expect(parseRepoWorkflowSteps('review')).toEqual(['review'])
     expect(parseRepoWorkflowSteps('[review,fix]')).toEqual(['review', 'fix'])
+    expect(parseRepoWorkflowSteps('review, recheck')).toEqual(['review', 'recheck'])
     expect(parseRepoWorkflowSteps('review, fix, recheck')).toEqual(['review', 'fix', 'recheck'])
   })
 
-  it('rejects unordered or partial step lists', () => {
-    expect(() => parseRepoWorkflowSteps('fix')).toThrow(/Expected steps/)
-    expect(() => parseRepoWorkflowSteps('review,recheck')).toThrow(/Expected steps/)
-    expect(() => parseRepoWorkflowSteps('review,bogus')).toThrow(/Expected steps/)
+  it('rejects step lists missing review, out of order, repeated, or with unknown steps', () => {
+    expect(() => parseRepoWorkflowSteps('fix')).toThrow(/Expected steps/)              // missing review
+    expect(() => parseRepoWorkflowSteps('recheck')).toThrow(/Expected steps/)          // missing review
+    expect(() => parseRepoWorkflowSteps('fix,recheck')).toThrow(/Expected steps/)      // missing review
+    expect(() => parseRepoWorkflowSteps('recheck,review')).toThrow(/Expected steps/)   // out of order
+    expect(() => parseRepoWorkflowSteps('review,recheck,fix')).toThrow(/Expected steps/) // out of order
+    expect(() => parseRepoWorkflowSteps('review,review')).toThrow(/Expected steps/)    // repeated step
+    expect(() => parseRepoWorkflowSteps('review,bogus')).toThrow(/Expected steps/)     // unknown step
   })
 
   it('writes, reads, and removes a per-repo override file', () => {
@@ -91,6 +96,15 @@ describe('repo workflow helpers', () => {
       .toEqual(['review', 'fix', 'conflict-resolve'])
     expect(resolveRepoWorkflowSteps('humanbased-ai', 'web', steps, dir).map(s => s.type))
       .toEqual(['review', 'fix', 'recheck', 'conflict-resolve'])
+  })
+
+  it('honours a review+recheck override: keeps recheck but drops fix and conflict-resolve', () => {
+    const path = writeRepoWorkflowStepTypes('humanbased-ai', 'xny-monorepo', ['review', 'recheck'], dir)
+    expect(readRepoWorkflowStepTypes('humanbased-ai', 'xny-monorepo', dir)).toEqual(['review', 'recheck'])
+    expect(path).toBe(perRepoWorkflowPath('humanbased-ai', 'xny-monorepo', dir))
+    // review,recheck permits no code modification (no fix), so conflict-resolve is dropped too.
+    expect(resolveRepoWorkflowSteps('humanbased-ai', 'xny-monorepo', steps, dir).map(s => s.type))
+      .toEqual(['review', 'recheck'])
   })
 
   it('falls back to the global workflow when the override file is malformed', () => {
