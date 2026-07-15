@@ -144,10 +144,20 @@ export function filterStepsByTypes(
   stepTypes: readonly RepoWorkflowStep[],
 ): WorkflowStep[] {
   const keepConflictResolve = stepTypes.includes('fix')
-  return allSteps.filter(step =>
+  const filtered = allSteps.filter(step =>
     (step.type === 'conflict-resolve' && keepConflictResolve)
     || stepTypes.includes(step.type as RepoWorkflowStep),
   )
+  // recheck-no-fix depth (e.g. `review,recheck`): crosscheck never auto-fixes, so the
+  // default recheck guard `when: "fix.applied_count > 0"` can never be satisfied and
+  // would skip the step forever. Clear it so recheck runs whenever a human pushes a new
+  // SHA — identifyNextWorkflowStep routes new commits to recheck in this mode.
+  if (stepTypes.includes('recheck') && !stepTypes.includes('fix')) {
+    return filtered.map(step =>
+      step.type === 'recheck' ? { ...step, when: undefined } : step,
+    )
+  }
+  return filtered
 }
 
 export function resolveRepoWorkflowSteps(

@@ -457,6 +457,12 @@ crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove th
 | `--show` | Print the repo's effective steps without writing |
 | `--reset` | Remove the override; revert to the global default |
 
+The depths differ in what happens after the initial review:
+
+- **`review`** — review each new SHA; never modify code.
+- **`review,fix`** / **`review,fix,recheck`** — crosscheck auto-applies fixes when the verdict isn't `APPROVE`, then rechecks its own fix commit.
+- **`review,recheck`** — crosscheck never auto-fixes. When an engineer pushes their own fix commits, watch runs a **recheck** (re-evaluates the new code against the original review) instead of a fresh review. Use this when humans own the fix decision but still want automated re-evaluation on every push.
+
 Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. Changes apply on the next PR event — no need to restart a running `crosscheck watch`.
 
 ---

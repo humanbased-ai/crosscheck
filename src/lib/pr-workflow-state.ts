@@ -243,6 +243,8 @@ export function identifyNextWorkflowStep(
 ): NextStepResult {
   const reviewHistory = history.filter(r => r.type === 'review' || r.type === 'recheck')
   const hasExistingReview = reviewHistory.length > 0
+  const hasFixStep = steps.some(s => s.type === 'fix')
+  const hasRecheckStep = steps.some(s => s.type === 'recheck')
 
   if (!hasExistingReview) {
     const firstStep = firstIncompleteInitialStep(history, steps)
@@ -313,6 +315,21 @@ export function identifyNextWorkflowStep(
   }
 
   if (!reviewedCurrentSha) {
+    // A new (unreviewed) SHA has appeared since the last review. In a recheck-no-fix
+    // workflow (e.g. `review,recheck`) crosscheck never auto-fixes, so a human pushing
+    // their own fix commits is the expected trigger: re-evaluate the new code against
+    // the prior review (a recheck) instead of starting an unrelated fresh review. When
+    // the workflow has a fix step, keep the fresh-review behaviour so the auto-fix loop
+    // re-engages on the new SHA.
+    if (hasRecheckStep && !hasFixStep) {
+      return {
+        step: effectiveRecheckStep(steps),
+        reviewComment,
+        hasExistingReview: true,
+        round: lastReview.round + 1,
+        history,
+      }
+    }
     const reviewStep = steps.find(s => s.type === 'review') ?? steps[0] ?? null
     return {
       step: reviewStep,

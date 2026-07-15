@@ -16,7 +16,7 @@ import type { WorkflowStep } from '../lib/workflow.js'
 const steps: WorkflowStep[] = [
   { name: 'review', type: 'review', reviewer: 'auto', max_rounds: 1 },
   { name: 'fix', type: 'fix', reviewer: 'origin', max_rounds: 1 },
-  { name: 'recheck', type: 'recheck', reviewer: 'auto', max_rounds: 1 },
+  { name: 'recheck', type: 'recheck', reviewer: 'auto', max_rounds: 1, when: 'fix.applied_count > 0' },
   { name: 'conflict-resolve', type: 'conflict-resolve', reviewer: 'auto', max_rounds: 1 },
 ]
 
@@ -94,8 +94,10 @@ describe('repo workflow helpers', () => {
     writeRepoWorkflowStepTypes('humanbased-ai', 'web', ['review', 'fix', 'recheck'], dir)
     expect(resolveRepoWorkflowSteps('humanbased-ai', 'api', steps, dir).map(s => s.type))
       .toEqual(['review', 'fix', 'conflict-resolve'])
-    expect(resolveRepoWorkflowSteps('humanbased-ai', 'web', steps, dir).map(s => s.type))
-      .toEqual(['review', 'fix', 'recheck', 'conflict-resolve'])
+    const web = resolveRepoWorkflowSteps('humanbased-ai', 'web', steps, dir)
+    expect(web.map(s => s.type)).toEqual(['review', 'fix', 'recheck', 'conflict-resolve'])
+    // fix is present, so the recheck guard is meaningful and preserved.
+    expect(web.find(s => s.type === 'recheck')?.when).toBe('fix.applied_count > 0')
   })
 
   it('honours a review+recheck override: keeps recheck but drops fix and conflict-resolve', () => {
@@ -103,8 +105,10 @@ describe('repo workflow helpers', () => {
     expect(readRepoWorkflowStepTypes('humanbased-ai', 'xny-monorepo', dir)).toEqual(['review', 'recheck'])
     expect(path).toBe(perRepoWorkflowPath('humanbased-ai', 'xny-monorepo', dir))
     // review,recheck permits no code modification (no fix), so conflict-resolve is dropped too.
-    expect(resolveRepoWorkflowSteps('humanbased-ai', 'xny-monorepo', steps, dir).map(s => s.type))
-      .toEqual(['review', 'recheck'])
+    const resolved = resolveRepoWorkflowSteps('humanbased-ai', 'xny-monorepo', steps, dir)
+    expect(resolved.map(s => s.type)).toEqual(['review', 'recheck'])
+    // The fix-gated guard is cleared so recheck can run on a human-pushed SHA (no fix ever runs here).
+    expect(resolved.find(s => s.type === 'recheck')?.when).toBeUndefined()
   })
 
   it('falls back to the global workflow when the override file is malformed', () => {
