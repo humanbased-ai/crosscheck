@@ -999,6 +999,8 @@ export interface ReviewCommentBodyInput {
   replyToCommentId?: number
   isRecheck?: boolean
   model?: string
+  /** Reasoning effort the reviewer ran at (Claude only). Shown in the attribution. */
+  effort?: string
   stepType?: CrosscheckStepType
   round?: number
   sha?: string
@@ -1022,9 +1024,13 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
   const modelSegment = modelDisplay ? ` · ${modelDisplay}` : ''
   const header = `### ${stepVerb(stepType)} by ${vendorLabel}${modelSegment}${serviceSegment}\n\n`
 
+  // Spell out which model version and (for Claude) reasoning effort produced the
+  // review, so the attribution is self-contained. Effort applies to Claude only;
+  // Codex takes no --effort flag, so it is omitted there even if a value is passed.
+  const attributionDetail = modelEffortSuffix(model, isClaude ? input.effort : undefined)
   const defaultAttribution = isClaude
-    ? `_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
-    : `_Reviewed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
+    ? `_Reviewed with [Claude Code](https://claude.ai/code)${attributionDetail} via [Crosscheck](${CROSSCHECK_REPO_URL})_`
+    : `_Reviewed with [OpenAI Codex](https://openai.com/codex)${attributionDetail} via [Crosscheck](${CROSSCHECK_REPO_URL})_`
   const attribution = brand.reviewer_attribution || defaultAttribution
   const footer = `\n\n---\n${attribution}`
 
@@ -1069,6 +1075,7 @@ export async function postReviewComment(
   sha?: string,
   nextStep?: string,
   trigger?: string,
+  effort?: string,
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -1084,6 +1091,7 @@ export async function postReviewComment(
       replyToCommentId,
       isRecheck,
       model,
+      effort,
       stepType,
       round,
       sha,
@@ -1099,4 +1107,17 @@ function stepVerb(stepType: CrosscheckStepType): string {
   if (stepType === 'fix') return 'Fixes'
   if (stepType === 'conflict-resolve') return 'Conflict resolution'
   return 'Code Review'
+}
+
+// Renders a parenthetical " (Model X.Y, effort: high)" for an attribution line.
+// Omits the model when it resolves to nothing (e.g. Codex subscription 'default')
+// and omits effort when unset — yielding '' when neither is available, so the
+// caller's attribution stays clean. Uses commas (not ' · ') to keep the
+// no-detail path free of separators the header treats as meaningful.
+function modelEffortSuffix(model: string, effort?: string): string {
+  const parts: string[] = []
+  const display = modelDisplayName(model)
+  if (display) parts.push(display)
+  if (effort) parts.push(`effort: ${effort}`)
+  return parts.length > 0 ? ` (${parts.join(', ')})` : ''
 }

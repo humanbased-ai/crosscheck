@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`crosscheck alter <repo>`** (alias `alter-workflow`) — set a per-repo workflow override: `--steps review,fix,recheck`, `--review-only`, `--show`, `--reset`.
 - **`crosscheck run --review-only`** — one-shot alias for `--steps review`.
+- **Effort in review attribution** — the `_Reviewed with …_` footer now spells out the model version and, for Claude, the reasoning effort (e.g. `_Reviewed with [Claude Code](…) (Opus 4.8, effort: high) via [Crosscheck](…)_`). Codex shows the model when it is a non-default (api-key) ID and omits effort (it takes no `--effort` flag); custom `brand.reviewer_attribution` still wins verbatim.
 
 ---
 

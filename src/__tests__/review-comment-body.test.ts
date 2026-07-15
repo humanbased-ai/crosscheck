@@ -56,4 +56,65 @@ describe('buildReviewCommentBody', () => {
     expect(recheck).toContain('### Recheck by ⚡ Codex · gpt-5.6-terra')
     expect(fix).toContain('### Fixes by 🤖 Claude Code · Sonnet 5')
   })
+
+  it('spells out model version and effort in the Claude attribution', () => {
+    const body = buildReviewCommentBody({
+      body: 'VERDICT: APPROVE',
+      reviewer: 'claude',
+      verdict: 'APPROVE',
+      model: 'claude-opus-4-8',
+      effort: 'high',
+      stepType: 'review',
+    })
+
+    expect(body).toContain(
+      '_Reviewed with [Claude Code](https://claude.ai/code) (Opus 4.8, effort: high) via [Crosscheck]',
+    )
+  })
+
+  it('shows the model but never effort in the Codex attribution', () => {
+    const apiKey = buildReviewCommentBody({
+      body: 'VERDICT: APPROVE',
+      reviewer: 'codex',
+      verdict: 'APPROVE',
+      model: 'gpt-5.6-terra',
+      // Codex takes no --effort flag; a stray value must not leak into attribution.
+      effort: 'high',
+      stepType: 'review',
+    })
+
+    expect(apiKey).toContain(
+      '_Reviewed with [OpenAI Codex](https://openai.com/codex) (gpt-5.6-terra) via [Crosscheck]',
+    )
+    expect(apiKey).not.toContain('effort:')
+  })
+
+  it('keeps the attribution bare for default Codex subscription auth', () => {
+    const body = buildReviewCommentBody({
+      body: 'VERDICT: APPROVE',
+      reviewer: 'codex',
+      verdict: 'APPROVE',
+      model: 'default',
+      stepType: 'review',
+    })
+
+    expect(body).toContain(
+      '_Reviewed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck]',
+    )
+  })
+
+  it('honors a custom brand attribution over the model/effort default', () => {
+    const body = buildReviewCommentBody({
+      body: 'VERDICT: APPROVE',
+      reviewer: 'claude',
+      brand: { reviewer_attribution: '_Reviewed by Acme AI_' },
+      verdict: 'APPROVE',
+      model: 'claude-opus-4-8',
+      effort: 'high',
+      stepType: 'review',
+    })
+
+    expect(body).toContain('_Reviewed by Acme AI_')
+    expect(body).not.toContain('effort: high')
+  })
 })

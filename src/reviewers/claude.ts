@@ -31,6 +31,10 @@ export interface ReviewResult {
   inputTokens?: number
   outputTokens?: number
   model: string
+  // Reasoning effort the reviewer ran at (low | medium | high | max). Only Claude
+  // takes an --effort flag; Codex leaves this unset. Surfaced in the review
+  // comment attribution so readers know how hard the model was asked to think.
+  effort?: string
   // Set only when the first attempt timed out and the delayed retry succeeded —
   // signals a transient blip that resolved on its own. The runner surfaces this
   // as a soft banner on the posted review comment.
@@ -121,9 +125,9 @@ export async function runClaudeReview(
         // string: `model` may be an alias ("opus") and the CLI resolves or
         // substitutes it. Fall back to the requested value when absent.
         const actualModel = primaryModelFromUsage(parsed.modelUsage)
-        return { review, tokensUsed, inputTokens, outputTokens, model: actualModel ?? model, retried }
+        return { review, tokensUsed, inputTokens, outputTokens, model: actualModel ?? model, effort: vendor.effort, retried }
       } catch {
-        return { review: raw, model, retried }
+        return { review: raw, model, effort: vendor.effort, retried }
       }
     } catch (err: unknown) {
       const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }

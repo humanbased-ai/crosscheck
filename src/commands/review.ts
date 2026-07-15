@@ -106,6 +106,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     let reviewText: string
     let tokensUsed: number | undefined
     let model = 'default'
+    let effort: string | undefined
     const reviewStart = Date.now()
     fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     let elapsed = 0
@@ -129,7 +130,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           codexTimeoutMs,
         ))
       } else {
-        ;({ review: reviewText, tokensUsed, model } = await runClaudeReview(
+        ;({ review: reviewText, tokensUsed, model, effort } = await runClaudeReview(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -163,7 +164,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     const commentBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
       : prependVerdictToComment(gate.downgraded ? `${SEVERITY_GATE_NOTE}\n\n${clean}` : clean, verdict)
-    await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha)
+    await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, effort)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 
