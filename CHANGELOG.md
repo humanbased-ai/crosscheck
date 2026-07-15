@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`crosscheck run --review-only`** — one-shot alias for `--steps review`.
 - **Effort in review attribution** — the `_Reviewed with …_` footer now spells out the model version and, for Claude, the reasoning effort (e.g. `_Reviewed with [Claude Code](…) (Opus 4.8, effort: high) via [Crosscheck](…)_`). Codex shows the model when it is a non-default (api-key) ID and omits effort (it takes no `--effort` flag); custom `brand.reviewer_attribution` still wins verbatim.
 
+### Changed
+
+- **Config panel surfaces mode and thoroughness** — the `crosscheck watch` dashboard now shows the vendor mode explicitly (`mode: cross-vendor (claude ⇄ codex)` vs `mode: single-vendor (single reviewer)`) and the review depth as a scale (`quality: fast › balanced › thorough`, with the active tier highlighted and `· smart` appended under adaptive tier selection). Cross-vendor runs join the `vendors:` line with `⇄` to signal reciprocal review.
+
 ---
 
 ## [0.10.0] — 2026-05-30

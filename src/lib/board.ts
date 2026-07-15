@@ -3,6 +3,10 @@ import type { Config, DisplayTheme } from '../config/schema.js'
 import type { WorkflowStep } from './workflow.js'
 import { selectTip } from './tips.js'
 
+// Quality tiers in ascending order of review depth. Rendered as a scale in the
+// config panel so the active thoroughness level reads at a glance.
+const QUALITY_TIERS = ['fast', 'balanced', 'thorough'] as const
+
 // ── Phase state ───────────────────────────────────────────────────────────────
 
 export type PRPhase =
@@ -684,7 +688,23 @@ export class PRBoard {
     const cfg = this.config!
     const lines: string[] = []
 
-    lines.push(`  ${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${t.dim(`${cfg.mode} · ${cfg.quality.tier}`)}`)
+    lines.push(`  ${chalk.greenBright('●')} ${chalk.bold('crosscheck')}`)
+
+    // Vendor mode: single-vendor (one AI reviews everything) vs cross-vendor
+    // (Claude ↔ Codex review each other's PRs). Surfaced explicitly so the
+    // operator can tell the review posture at a glance.
+    const isCross = cfg.mode === 'cross-vendor'
+    const modeHint = isCross ? 'claude ⇄ codex' : 'single reviewer'
+    lines.push(`  ${t.dim('mode:    ')} ${t.accent(cfg.mode)} ${t.dim(`(${modeHint})`)}`)
+
+    // Thoroughness: the quality tier rendered as a scale with the active level
+    // highlighted, so how deep each review goes is legible without prior knowledge
+    // of the tier names. `smart` appends when tier selection is per-PR adaptive.
+    const tierScale = QUALITY_TIERS
+      .map(tier => tier === cfg.quality.tier ? t.accent(tier) : t.dim(tier))
+      .join(t.dim(' › '))
+    const smartTag = cfg.quality.mode === 'smart' ? t.dim(' · smart') : ''
+    lines.push(`  ${t.dim('quality: ')} ${tierScale}${smartTag}`)
 
     const stepFlow = this.steps.map(s => s.name).join(t.dim(' → '))
     lines.push(`  ${t.dim('workflow:')} ${stepFlow}`)
@@ -692,7 +712,10 @@ export class PRBoard {
     const vendors: string[] = []
     if (cfg.vendors.claude.enabled) vendors.push('claude')
     if (cfg.vendors.codex.enabled) vendors.push('codex')
-    lines.push(`  ${t.dim('vendors: ')} ${vendors.join(t.dim(' · '))}`)
+    // In cross-vendor mode the vendors review each other — reflect that with a
+    // ⇄ separator; single-vendor keeps the neutral · list separator.
+    const vendorSep = isCross && vendors.length > 1 ? t.dim(' ⇄ ') : t.dim(' · ')
+    lines.push(`  ${t.dim('vendors: ')} ${vendors.join(vendorSep)}`)
 
     return lines
   }

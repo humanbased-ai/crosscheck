@@ -211,6 +211,40 @@ describe('PRBoard — TTY workspace retention', () => {
     expect(idxPR).toBeGreaterThan(idxStats)
   })
 
+  it('surfaces cross-vendor mode, the thoroughness scale, and ⇄ vendors', () => {
+    board.setConfig({
+      ...baseConfig,
+      mode: 'cross-vendor',
+      quality: { tier: 'thorough', mode: 'smart' },
+      vendors: { claude: { enabled: true }, codex: { enabled: true } },
+    } as unknown as Config, [reviewStep])
+
+    const output = stripAnsi(invokeRender())
+    expect(output).toContain('mode:')
+    expect(output).toContain('cross-vendor (claude ⇄ codex)')
+    // Thoroughness rendered as a scale of all three tiers, with smart selection noted.
+    expect(output).toContain('quality:')
+    expect(output).toMatch(/fast › balanced › thorough/)
+    expect(output).toContain('· smart')
+    // Cross-vendor vendors reviewed each other → ⇄ separator.
+    expect(output).toContain('claude ⇄ codex')
+  })
+
+  it('surfaces single-vendor mode without smart or ⇄ markers', () => {
+    board.setConfig({
+      ...baseConfig,
+      mode: 'single-vendor',
+      quality: { tier: 'fast' },
+      vendors: { claude: { enabled: true }, codex: { enabled: false } },
+    } as unknown as Config, [reviewStep])
+
+    const output = stripAnsi(invokeRender())
+    expect(output).toContain('single-vendor (single reviewer)')
+    expect(output).toMatch(/fast › balanced › thorough/)
+    expect(output).not.toContain('· smart')
+    expect(output).not.toContain('⇄')
+  })
+
   it('keeps settled slots folded when a recheck round drops the completed count', () => {
     // 4 completed → completedCount (4) > FOLD_THRESHOLD (3) → all fold to one line.
     // Folded form shows "CR: APPROVE"; expanded form shows "N issues (APPROVE…)".
