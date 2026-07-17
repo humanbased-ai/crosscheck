@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from 'fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { inferVerdictFromCodexOutput } from '../reviewers/codex.js'
+import { inferVerdictFromCodexOutput, stripRepoDirPaths } from '../reviewers/codex.js'
 
 const CODEX_FOOTER = '\n\n---\n_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
 
@@ -72,6 +72,47 @@ Full review comments:
 ---
 _Reviewed with [OpenAI Codex](https://openai.com/codex)_`
     expect(inferVerdictFromCodexOutput(realOutput)).toBe('NEEDS WORK')
+  })
+})
+
+describe('stripRepoDirPaths', () => {
+  let repoDir: string
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+  })
+
+  afterEach(() => {
+    rmSync(repoDir, { force: true, recursive: true })
+  })
+
+  it('strips the repo dir prefix, leaving repo-relative paths', () => {
+    const text = `[P2] Preserve the payer — ${repoDir}/services/executor/store.go:428-428\nFix it.`
+    expect(stripRepoDirPaths(text, repoDir)).toBe(
+      '[P2] Preserve the payer — services/executor/store.go:428-428\nFix it.',
+    )
+  })
+
+  it('strips the realpath variant of the repo dir (macOS /var → /private/var)', () => {
+    // mkdtempSync returns the symlinked path on macOS; codex prints the resolved one
+    const resolved = realpathSync(repoDir)
+    const text = `[P2] Guard settled rows — ${resolved}/internal/store.go:523-523`
+    expect(stripRepoDirPaths(text, repoDir)).toBe('[P2] Guard settled rows — internal/store.go:523-523')
+  })
+
+  it('strips every occurrence, not just the first', () => {
+    const text = `${repoDir}/a.ts:1 and ${repoDir}/b.ts:2`
+    expect(stripRepoDirPaths(text, repoDir)).toBe('a.ts:1 and b.ts:2')
+  })
+
+  it('leaves unrelated absolute paths untouched', () => {
+    const text = 'See /etc/hosts and /usr/local/bin/codex'
+    expect(stripRepoDirPaths(text, repoDir)).toBe(text)
+  })
+
+  it('does not throw when the repo dir no longer exists', () => {
+    const gone = join(repoDir, 'deleted-subdir')
+    expect(stripRepoDirPaths(`${gone}/x.ts:1`, gone)).toBe('x.ts:1')
   })
 })
 
