@@ -142,6 +142,20 @@ To use your own secret instead, set it in your shell profile:
 export CROSSCHECK_WEBHOOK_SECRET=your-secret
 ```
 
+### Linear API key — for issue enrichment (optional)
+
+`LINEAR_API_KEY` is only read when `issue_enrichment.enabled: true` (see
+[Issue enrichment](#issue-enrichment)). It lets crosscheck fetch the linked
+Linear issue so the review is anchored to the ticket's stated goal. A read-only
+personal API key is enough — create one under Linear → Settings → API.
+
+```bash
+export LINEAR_API_KEY=lin_api_...
+```
+
+If it's unset while enrichment is on, crosscheck just skips enrichment and
+reviews the diff as usual — it never errors.
+
 ---
 
 ## Step 1 — Check your setup
@@ -1131,6 +1145,30 @@ server:
 | `fast` | ~10s | Top issues only | High-volume repos, draft PRs |
 | `balanced` | ~30s | Full review, all issues explained | Default for most teams |
 | `thorough` | ~60–90s | Deep multi-pass, architecture + security | Before merging to main |
+
+### Issue enrichment
+
+By default crosscheck infers a PR's intent from the diff. With enrichment on, it
+recovers the linked tracker ref (e.g. `IN-2017`) from the PR title, branch, or
+body, fetches that Linear issue, and prepends its goal — title, description,
+labels, estimate, project — to the reviewer prompt. The review then judges the
+change against the **stated goal**, flagging scope creep and behavior that
+contradicts the ticket.
+
+```yaml
+issue_enrichment:
+  enabled: true
+  provider: linear             # linear (only provider today)
+  team_keys: [IN]              # restrict extraction to these keys; [] = match any
+  max_description_chars: 4000  # cap injected description length (0 = no cap)
+```
+
+Requires `LINEAR_API_KEY` (see [Environment variables](#environment-variables)).
+It's fail-soft at every step: no ref found, no key set, issue not found, or the
+Linear API being unreachable all degrade the run to a normal diff-only review —
+enrichment never blocks or fails a review. Misses are logged (`issue_enrichment_*`
+events) so you can see why a given PR wasn't enriched. Enrichment feeds the
+review and recheck steps only; it does not change reviewer routing or tier.
 
 ### Routing patterns
 

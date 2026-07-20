@@ -61,6 +61,9 @@ export async function runClaudeReview(
   // Split from onLog so callers (e.g. runner) can stay silent on routine
   // `running: ...` chatter while still surfacing the retry signal live.
   onRetry?: (msg: string) => void,
+  // Linked tracker issue rendered as a prompt block (issues/enrich.ts) — anchors
+  // the review to the stated goal. Omitted when enrichment is off / unresolved.
+  issueContext?: string,
 ): Promise<ReviewResult> {
   const model = resolveClaudeModel(quality, vendor)
   const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
@@ -74,6 +77,7 @@ export async function runClaudeReview(
   const prompt = [
     `You are reviewing a pull request titled: "${prTitle}".`,
     `The branch \`${baseBranch}\` is the base. Review only the changes introduced in this PR.`,
+    issueContext ?? '',
     focusLine,
     customLine,
     behaviorInstructions,

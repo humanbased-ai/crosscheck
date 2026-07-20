@@ -253,6 +253,10 @@ export interface WorkflowContext {
   overrideTimeoutMs?: number
   // How this workflow was triggered — logged in step events for analysis segmentation.
   trigger?: WorkflowTrigger
+  // Linked tracker issue rendered as a prompt block (see issues/enrich.ts).
+  // Injected into review/recheck prompts so the reviewer judges against the
+  // stated goal; undefined when enrichment is off or the issue didn't resolve.
+  issueContext?: string
   // Called when a vendor hits a quota/credit limit and the runner can identify
   // an immediate same-step fallback. Long-lived commands use this to activate
   // smart-switch without failing the current PR first.
@@ -589,11 +593,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let retried: { timeoutMs: number; delayMs: number } | undefined
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log))
+          ;({ review: rawReview, tokensUsed, model, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext))
           inputTokens = undefined
           outputTokens = undefined
         } else {
-          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log))
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, ctx.issueContext))
         }
       }
 

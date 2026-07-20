@@ -56,6 +56,9 @@ export async function runCodexReview(
   // Split from onLog so callers (e.g. runner) can stay silent on routine
   // `running: ...` chatter while still surfacing the retry signal live.
   onRetry?: (msg: string) => void,
+  // Linked tracker issue rendered as a prompt block (issues/enrich.ts) — anchors
+  // the review to the stated goal. Omitted when enrichment is off / unresolved.
+  issueContext?: string,
 ): Promise<ReviewResult> {
   const model = resolveCodexModel(quality, vendor)
   const tmpFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
@@ -70,7 +73,7 @@ export async function runCodexReview(
     : ''
   const customNote = quality.custom_prompt ?? ''
   const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
-  const instructionsNote = [focusNote, customNote, behaviorInstructions].filter(Boolean).join('\n\n')
+  const instructionsNote = [issueContext ?? '', focusNote, customNote, behaviorInstructions].filter(Boolean).join('\n\n')
   const instructionsPath = `${repoDir}/.codex/instructions`
   // Save original content so we can restore it after the review — prevents the
   // fix step's git add -A from committing crosscheck's instructions as a PR change.

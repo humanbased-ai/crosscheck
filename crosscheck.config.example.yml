@@ -198,6 +198,20 @@ post_review:
 # backtrace:
 #   enabled: true   # set to true to enable the startup scan (or pass --backtrace)
 
+# ─── Issue enrichment ────────────────────────────────────────────────────────
+# Recover the linked tracker issue (e.g. IN-2017) from the PR title / branch /
+# body and inject its goal — title, description, labels, estimate, project —
+# into the reviewer prompt, so the review judges the change against the stated
+# goal instead of inferring intent from the diff alone.
+# Off by default. Requires LINEAR_API_KEY in the environment (read-only scope is
+# enough). Fail-soft: an unresolved or unreachable issue degrades the review to
+# diff-only, never blocks it.
+# issue_enrichment:
+#   enabled: true
+#   provider: linear          # linear (only provider today)
+#   team_keys: [IN]           # restrict extraction to these keys; [] = match any
+#   max_description_chars: 4000  # cap injected description length (0 = no cap)
+
 # ─── Logs ────────────────────────────────────────────────────────────────────
 # Structured debug logs written to ~/.crosscheck/logs/YYYY-MM-DD.ndjson
 # Each line is a JSON object: { ts, level, event, ...context }
