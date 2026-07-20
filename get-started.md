@@ -461,7 +461,7 @@ The depths differ in what happens after the initial review:
 
 - **`review`** — review each new SHA; never modify code.
 - **`review,fix`** / **`review,fix,recheck`** — crosscheck auto-applies fixes when the verdict isn't `APPROVE`, then rechecks its own fix commit.
-- **`review,recheck`** — crosscheck never auto-fixes. When an engineer pushes their own fix commits, watch runs a **recheck** (re-evaluates the new code against the original review) instead of a fresh review. Use this when humans own the fix decision but still want automated re-evaluation on every push.
+- **`review,recheck`** — crosscheck never auto-fixes. When an engineer pushes their own fix commits **while a review is still unresolved** (last verdict `NEEDS_WORK` or `BLOCK`), watch runs a **recheck** — re-evaluating the new code against that review — instead of a fresh review. Once the verdict is `APPROVE` there is nothing left to resolve, so a later push gets a fresh review rather than a recheck. Use this when humans own the fix decision but still want automated re-evaluation on every push. The recheck only ever runs in its own session, never immediately after the review that triggered it.
 
 Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. Changes apply on the next PR event — no need to restart a running `crosscheck watch`.
 

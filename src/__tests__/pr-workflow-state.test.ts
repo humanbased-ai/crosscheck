@@ -238,6 +238,36 @@ describe('identifyNextWorkflowStep', () => {
 
     expect(next.step).toBeNull()
   })
+
+  // After an APPROVE there are no findings left to re-evaluate, so a push of NEW code
+  // must get a fresh review — a recheck would judge it against a resolved review and
+  // could gloss over defects the new commits introduced.
+  it('routes a post-APPROVE push to a fresh review, not a recheck (recheck-no-fix)', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A' }),
+    ], reviewRecheckWorkflow, 'sha-B')
+
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(2)
+  })
+
+  it('still rechecks a post-BLOCK push (recheck-no-fix)', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'sha-A' }),
+    ], reviewRecheckWorkflow, 'sha-B')
+
+    expect(next.step?.type).toBe('recheck')
+  })
+
+  // An APPROVE recorded by a recheck ends the cycle just like an APPROVE review does.
+  it('routes a push after an APPROVE recheck to a fresh review (recheck-no-fix)', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
+      record({ type: 'recheck', verdict: 'APPROVE', sha: 'sha-B', round: 2, commentId: 102 }),
+    ], reviewRecheckWorkflow, 'sha-C')
+
+    expect(next.step?.type).toBe('review')
+  })
 })
 
 // A per-repo review-only workflow (crosscheck alter --review-only) uses decideReviewOnly

@@ -186,6 +186,13 @@ export function exceedsMaxRounds(
   return false
 }
 
+// True when any step recorded in this session applied at least one change
+// (fix or conflict-resolve). Used to decide whether a following recheck has
+// anything new to evaluate.
+export function anyFixApplied(results: Record<string, StepResult>): boolean {
+  return Object.values(results).some(r => (r.applied_count ?? 0) > 0)
+}
+
 export interface PRPhaseData {
   phase?: PRPhase
   verdict?: string | null
@@ -522,6 +529,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // release the SHA as `failure` rather than `success` in that case.
   let fixPushedShaRequiresRecheck: string | null = null
   let lastFixSkipReason: string | undefined
+  // A `recheck` step re-evaluates code that changed since the review it follows.
+  // Running one in the same session as that review, with no fix in between, just
+  // re-reviews the identical SHA and posts a duplicate verdict.
+  //
+  // The step's usual `when: "fix.applied_count > 0"` guard is not enough on its
+  // own: in a fix-less depth (e.g. the per-repo `review,recheck` override) it
+  // references a step that isn't in the workflow, and evaluateWhen fails open on
+  // missing results, so the guard passes and the recheck runs. Recheck-as-resume
+  // is unaffected — those sessions start at the recheck step, with no review
+  // before it in the same run.
+  let reviewRanThisSession = false
 
   // workflow_complete event accumulators. Each step the runner dispatches is
   // recorded in stepsRun (including ones that get logged as step_skipped —
@@ -559,6 +577,16 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       continue
     }
 
+    // Nothing has changed since the review earlier in this same session, so there
+    // is nothing to recheck. Checks the declared type, not effectiveType, so a
+    // review coerced to a recheck (isRecheckRun) is never blocked here.
+    if (step.type === 'recheck' && reviewRanThisSession && !anyFixApplied(results)) {
+      fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_change_since_review' })
+      results[step.name] = { skipped: true }
+      onPhaseChange('', { phase: 'rechecked' })
+      continue
+    }
+
     if (effectiveType === 'review' || effectiveType === 'recheck') {
       const isRecheck = effectiveType === 'recheck'
       let reviewer = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
@@ -571,6 +599,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // The recheck step is confirmed to run — clear the pending-recheck guard
       // so the finally doesn't release the fix-pushed SHA as failure.
       fixPushedShaRequiresRecheck = null
+      reviewRanThisSession = true
       const stepIdentity = buildStepIdentityFields(effectiveType, step.name)
       fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }) })
 

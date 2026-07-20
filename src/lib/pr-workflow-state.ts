@@ -321,7 +321,12 @@ export function identifyNextWorkflowStep(
     // the prior review (a recheck) instead of starting an unrelated fresh review. When
     // the workflow has a fix step, keep the fresh-review behaviour so the auto-fix loop
     // re-engages on the new SHA.
-    if (hasRecheckStep && !hasFixStep) {
+    //
+    // Only when the prior review left unresolved work. After an APPROVE there are no
+    // findings to re-evaluate, so a recheck — whose instructions centre on resolving
+    // the original review — could gloss over defects in the newly pushed code. Those
+    // pushes get a fresh review instead.
+    if (hasRecheckStep && !hasFixStep && lastReview.verdict !== 'APPROVE') {
       return {
         step: effectiveRecheckStep(steps),
         reviewComment,
