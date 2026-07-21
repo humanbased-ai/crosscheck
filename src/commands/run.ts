@@ -382,16 +382,6 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     user: { login: prData.user?.login ?? '' },
   }
 
-  // Recover the linked tracker issue (if enabled) so the review is anchored to
-  // the stated goal, not just the diff. Fail-soft: a miss degrades to diff-only.
-  const issueContext = (await enrichIssueContext(
-    { title: pr.title, branch: pr.head.ref, body: pr.body },
-    config.issue_enrichment,
-    getLinearApiKey(),
-    (e) => fileLog({ level: e.level, event: e.event, repo: `${owner}/${repo}`, pr: number, ref: e.ref, reason: e.reason }),
-  )) ?? undefined
-  if (issueContext) console.log(chalk.dim('  issue enrichment: linked tracker issue attached'))
-
   const { sha } = prData.head
 
   if (!acquirePRLock(owner, repo, number, sha)) {
@@ -501,6 +491,19 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref }),
       })
       cloneSpinner.succeed('Repo ready')
+
+      // Recover the linked tracker issue (if enabled) so the review is anchored
+      // to the stated goal, not just the diff. Done here — after the PR and
+      // remote locks are secured — so a PR that gets skipped (already under
+      // review elsewhere) never triggers a throwaway tracker fetch. Fail-soft:
+      // a miss degrades to a diff-only review.
+      const issueContext = (await enrichIssueContext(
+        { title: pr.title, branch: pr.head.ref, body: pr.body },
+        config.issue_enrichment,
+        getLinearApiKey(),
+        (e) => fileLog({ level: e.level, event: e.event, repo: `${owner}/${repo}`, pr: number, ref: e.ref, reason: e.reason }),
+      )) ?? undefined
+      if (issueContext) console.log(chalk.dim('  issue enrichment: linked tracker issue attached'))
 
       if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
       let activeSpinner = ora('').start()
