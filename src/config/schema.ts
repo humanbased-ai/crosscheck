@@ -142,6 +142,23 @@ export const ImpactConfigSchema = z.object({
   defect_cost_usd: z.number().min(0).default(150),
 })
 
+export const IssueEnrichmentConfigSchema = z.object({
+  // Fetch the linked tracker issue and inject its goal (title, description,
+  // labels, estimate, project) into the reviewer prompt, so the review judges
+  // the change against the stated goal rather than inferring intent from the
+  // diff. Opt-in — requires LINEAR_API_KEY in the environment.
+  enabled: z.boolean().default(false),
+  provider: z.enum(['linear']).default('linear'),
+  // Restrict ticket-ref extraction to these team keys (e.g. ['IN']). Empty =
+  // match any <LETTERS>-<n> token; unknown refs simply resolve to nothing and
+  // are skipped, so scoping here mainly avoids wasted lookups on tokens like
+  // UTF-8 that share the ticket shape.
+  team_keys: z.array(z.string()).default([]),
+  // Hard cap (chars) on the injected issue description to bound prompt size.
+  // 0 disables the cap.
+  max_description_chars: z.number().int().min(0).default(4000),
+})
+
 export const BacktraceConfigSchema = z.object({
   // Scan for open PRs without a [crosscheck] comment on startup.
   // Off by default — pass --backtrace (watch/serve) or set enabled: true in config to opt in.
@@ -228,6 +245,7 @@ export const ConfigSchema = z.object({
   logs: LogsConfigSchema.default({}),
   impact: ImpactConfigSchema.default({}),
   backtrace: BacktraceConfigSchema.default({}),
+  issue_enrichment: IssueEnrichmentConfigSchema.default({}),
   watch: WatchConfigSchema.default({}),
   post_review: PostReviewConfigSchema.default({}),
   display: DisplayConfigSchema.default({}),
@@ -247,4 +265,5 @@ export type PostReviewFixConfig = z.infer<typeof PostReviewFixSchema>
 export type DisplayConfig = z.infer<typeof DisplayConfigSchema>
 export type DisplayTheme = z.infer<typeof DisplayThemeSchema>
 export type BacktraceConfig = z.infer<typeof BacktraceConfigSchema>
+export type IssueEnrichmentConfig = z.infer<typeof IssueEnrichmentConfigSchema>
 export type WatchConfig = z.infer<typeof WatchConfigSchema>

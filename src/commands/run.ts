@@ -9,7 +9,8 @@ import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
 import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken } from '../config/loader.js'
+import { loadConfig, getGithubToken, getLinearApiKey } from '../config/loader.js'
+import { enrichIssueContext } from '../issues/enrich.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { hintForError } from '../lib/remediation.js'
@@ -381,6 +382,16 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     user: { login: prData.user?.login ?? '' },
   }
 
+  // Recover the linked tracker issue (if enabled) so the review is anchored to
+  // the stated goal, not just the diff. Fail-soft: a miss degrades to diff-only.
+  const issueContext = (await enrichIssueContext(
+    { title: pr.title, branch: pr.head.ref, body: pr.body },
+    config.issue_enrichment,
+    getLinearApiKey(),
+    (e) => fileLog({ level: e.level, event: e.event, repo: `${owner}/${repo}`, pr: number, ref: e.ref, reason: e.reason }),
+  )) ?? undefined
+  if (issueContext) console.log(chalk.dim('  issue enrichment: linked tracker issue attached'))
+
   const { sha } = prData.head
 
   if (!acquirePRLock(owner, repo, number, sha)) {
@@ -506,6 +517,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         roundMode: opts.roundMode,
         overrideTimeoutMs: reviewerTimeoutMs,
         trigger: opts.trigger ?? 'run',
+        issueContext,
       }
 
       let workflowResult = await runWorkflow({
