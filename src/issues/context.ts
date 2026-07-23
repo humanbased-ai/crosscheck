@@ -47,7 +47,7 @@ export function formatIssueContext(issue: TrackerIssue, maxDescriptionChars = 40
     'BEGIN LINKED ISSUE',
     body,
     'END LINKED ISSUE',
-    '\nReview the change against this stated goal — flag scope creep beyond it and behavior that contradicts it.',
+    '\nUse the goal above as context for the intent — flag scope creep beyond it and behavior that contradicts it. This does NOT narrow your review: still independently report every bug, regression, or security issue you find in the diff, including ones the issue never mentions.',
   ]
   return lines.filter(Boolean).join('\n')
 }

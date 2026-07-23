@@ -81,7 +81,13 @@ describe('formatIssueContext', () => {
     expect(out).toContain('labels Bug, kyc')
     expect(out).toContain('https://linear.app/inductive-network/issue/IN-2017')
     expect(out).toContain('Goal / acceptance from the tracker:')
-    expect(out).toContain('Review the change against this stated goal')
+    expect(out).toContain('flag scope creep beyond it')
+  })
+
+  it('tells the reviewer the goal does not narrow the review (guards against over-anchoring)', () => {
+    const out = formatIssueContext(base)
+    expect(out).toContain('does NOT narrow your review')
+    expect(out).toContain('including ones the issue never mentions')
   })
 
   it('truncates a long description to the configured cap', () => {
