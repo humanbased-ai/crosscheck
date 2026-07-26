@@ -11,7 +11,12 @@ export interface RepoRef {
   name: string
 }
 
-const STEP_HINT = 'Expected steps: review, review,fix, or review,fix,recheck'
+const STEP_HINT = 'Expected steps: review, review,fix, review,recheck, or review,fix,recheck'
+
+// Stands in for "no round cap" on a step the runner still gates through
+// exceedsMaxRounds, which compares against a number. Must stay a positive int so it
+// matches the WorkflowStepSchema shape.
+const UNCAPPED_MAX_ROUNDS = Number.MAX_SAFE_INTEGER
 
 // Per-repo workflow overrides live in standalone files, keyed by repo, so one
 // long-lived `watch` can narrow individual repos while the pipeline shape stays
@@ -73,7 +78,7 @@ function buildRepoWorkflowFile(owner: string, name: string, steps: RepoWorkflowS
   return [
     `# crosscheck per-repo workflow override — written by \`crosscheck alter\``,
     `# Narrows the global ~/.crosscheck/workflow.yml for ${owner}/${name} to these steps.`,
-    `# Values: review | review,fix | review,fix,recheck. Delete this file (or run`,
+    `# Values: review | review,fix | review,recheck | review,fix,recheck. Delete this file (or run`,
     `# \`crosscheck alter ${owner}/${name} --reset\`) to restore the global default.`,
     yaml.dump({ steps }, { lineWidth: -1, noRefs: true }),
   ].join('\n')
@@ -144,10 +149,34 @@ export function filterStepsByTypes(
   stepTypes: readonly RepoWorkflowStep[],
 ): WorkflowStep[] {
   const keepConflictResolve = stepTypes.includes('fix')
-  return allSteps.filter(step =>
+  const filtered = allSteps.filter(step =>
     (step.type === 'conflict-resolve' && keepConflictResolve)
     || stepTypes.includes(step.type as RepoWorkflowStep),
   )
+  // recheck-no-fix depth (e.g. `review,recheck`): crosscheck never auto-fixes, so the
+  // default recheck guard `when: "fix.applied_count > 0"` can never be satisfied and
+  // would skip the step forever. Clear it so recheck runs whenever a human pushes a new
+  // SHA — identifyNextWorkflowStep routes new commits to recheck in this mode.
+  //
+  // max_rounds goes with it. That cap bounds the autonomous fix→recheck cycle; here
+  // there is no cycle, and each round is a separate human push. identifyNextWorkflowStep
+  // hands the first post-review SHA `round: lastReview.round + 1`, which already exceeds
+  // the default `max_rounds: 1`, so leaving the cap in place would make the runner skip
+  // every recheck this depth exists to run.
+  if (isRecheckWithoutFix(stepTypes)) {
+    return filtered.map(step =>
+      step.type === 'recheck'
+        ? { ...step, when: undefined, max_rounds: UNCAPPED_MAX_ROUNDS }
+        : step,
+    )
+  }
+  return filtered
+}
+
+// True for a depth that rechecks but never fixes (`review,recheck`). Undefined means
+// there is no per-repo override, so the repo runs the global workflow untouched.
+export function isRecheckWithoutFix(stepTypes: readonly RepoWorkflowStep[] | undefined): boolean {
+  return stepTypes !== undefined && stepTypes.includes('recheck') && !stepTypes.includes('fix')
 }
 
 export function resolveRepoWorkflowSteps(

@@ -458,6 +458,7 @@ Sets the workflow depth for one repo without changing the global default. Writes
 ```bash
 crosscheck alter humanbased-ai/xny-monorepo --review-only            # alias for --steps review
 crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
+crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,recheck
 crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
 crosscheck alter humanbased-ai/xny-monorepo --show                   # print effective steps, no write
 crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove the override
@@ -465,10 +466,17 @@ crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove th
 
 | Flag | Description |
 |---|---|
-| `--steps <list>` | `review`, `review,fix`, or `review,fix,recheck` |
+| `--steps <list>` | Any in-order subset beginning with `review`: `review`, `review,fix`, `review,recheck`, or `review,fix,recheck` |
 | `--review-only` | Alias for `--steps review` |
 | `--show` | Print the repo's effective steps without writing |
 | `--reset` | Remove the override; revert to the global default |
+
+The depths differ in what happens after the initial review:
+
+- **`review`** — review each new SHA; never modify code.
+- **`review,fix`** — crosscheck auto-applies fixes when the verdict isn't `APPROVE`, and stops there; its own fix commit is not re-reviewed.
+- **`review,fix,recheck`** — same, then rechecks its own fix commit. `max_rounds` in `~/.crosscheck/workflow.yml` bounds that fix→recheck cycle.
+- **`review,recheck`** — crosscheck never auto-fixes. When an engineer pushes their own fix commits **while a review is still unresolved** (last verdict `NEEDS_WORK` or `BLOCK`), watch runs a **recheck** — re-evaluating the new code against that review — instead of a fresh review. Once the verdict is `APPROVE` there is nothing left to resolve, so a later push gets a fresh review rather than a recheck. Use this when humans own the fix decision but still want automated re-evaluation on every push. The recheck only ever runs in its own session, never immediately after the review that triggered it. `max_rounds` does not apply here: with no auto-fix cycle to bound, every push is rechecked for as long as the review stays unresolved.
 
 Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. Changes apply on the next PR event — no need to restart a running `crosscheck watch`.
 

@@ -33,7 +33,7 @@ import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
-import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
+import { filterStepsByTypes, formatRepoWorkflowSteps, isRecheckWithoutFix, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
@@ -363,6 +363,17 @@ export async function runWatch(opts: WatchOpts = {}) {
         isRecheckRun = false
         round = 1
       }
+      // A recheck-no-fix depth (`review,recheck`) decides review-vs-recheck per SHA from
+      // the last verdict: an unresolved review gets a recheck, an APPROVE gets a fresh
+      // review (identifyNextWorkflowStep). The session fast-path above is PR-level and
+      // SHA-agnostic, so it would coerce every later push in this process into a recheck
+      // and never consult that decision. Force history detection instead. Comment-
+      // triggered runs keep their SHA-specific fast path — a kickass re-review targets a
+      // SHA history detection would report as already complete.
+      if (isRecheckWithoutFix(repoStepOverride) && isRecheckRun && params.action !== 'comment') {
+        isRecheckRun = false
+        round = 1
+      }
 
       if (reviewOnlyForRepo) {
         // Review-only comes from a per-repo override (crosscheck alter --review-only).
@@ -458,6 +469,9 @@ export async function runWatch(opts: WatchOpts = {}) {
           // best-effort — fall back to session-based detection.
           // For auto_loop, force isRecheckRun=true so a transient history-fetch
           // failure does not restart the workflow from the review step.
+          // A recheck-no-fix repo has no session state left to fall back to (the guard
+          // above cleared it), so it re-reviews the new SHA — the conservative direction,
+          // since a fresh review never assumes findings that may already be resolved.
           if (params.action === 'auto_loop') isRecheckRun = true
         }
       }
