@@ -7,6 +7,7 @@ import {
   isRetryableFixError,
   getEffectiveStepType,
   exceedsMaxRounds,
+  anyFixApplied,
   countCrosscheckCommitsForPR,
   buildWorkflowCompleteEvent,
   resolveFixVendor,
@@ -77,6 +78,37 @@ describe('exceedsMaxRounds', () => {
     expect(exceedsMaxRounds('fix', 'fix', Infinity, 99)).toBe(false)
     expect(exceedsMaxRounds('recheck', 'recheck', Infinity, 99)).toBe(false)
     expect(exceedsMaxRounds('fix', 'fix', Infinity, 1)).toBe(false)
+  })
+})
+
+// Gates whether a recheck step following a review in the SAME session has anything
+// to evaluate. Critical for fix-less depths (per-repo `review,recheck`): there the
+// recheck's `fix.applied_count > 0` guard names a step that isn't in the workflow,
+// and evaluateWhen fails open on missing results — so this is the only thing
+// stopping a duplicate recheck on the freshly reviewed SHA.
+describe('anyFixApplied', () => {
+  it('is false before any step has run', () => {
+    expect(anyFixApplied({})).toBe(false)
+  })
+
+  it('is false after a review-only session (no applied_count recorded)', () => {
+    expect(anyFixApplied({ review: { verdict: 'NEEDS_WORK' } })).toBe(false)
+  })
+
+  it('is false when a fix ran but applied nothing', () => {
+    expect(anyFixApplied({ review: { verdict: 'NEEDS_WORK' }, fix: { applied_count: 0 } })).toBe(false)
+  })
+
+  it('is true once a fix applied at least one change', () => {
+    expect(anyFixApplied({ review: { verdict: 'NEEDS_WORK' }, fix: { applied_count: 1 } })).toBe(true)
+  })
+
+  it('counts a conflict-resolve step that applied changes', () => {
+    expect(anyFixApplied({ 'conflict-resolve': { applied_count: 3 } })).toBe(true)
+  })
+
+  it('ignores skipped steps', () => {
+    expect(anyFixApplied({ fix: { skipped: true } })).toBe(false)
   })
 })
 

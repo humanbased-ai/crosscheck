@@ -26,7 +26,7 @@ clone_protocol: ssh
 vendors:
   codex:
     enabled: true
-    model: o4-mini          # o4-mini | o3 | gpt-4o  (cost/quality tradeoff)
+    model: gpt-5.6-terra    # gpt-5.6-luna | gpt-5.6-terra | gpt-5.6-sol
     auth: subscription      # subscription (device-auth OAuth) | api-key
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
@@ -44,9 +44,9 @@ quality:
   #
   #   tier       claude               codex        time     cost
   #   ─────────  ───────────────────  ───────────  ───────  ──────
-  #   fast       haiku · low          o4-mini · low   ~10s  lowest
-  #   balanced   sonnet · medium      o4-mini · med   ~30s  standard
-  #   thorough   sonnet · max         o3 · high       ~60s  higher
+  #   fast       Haiku 4.5 · low      GPT-5.6 Luna · low    ~10s  lowest
+  #   balanced   Sonnet 5 · medium    GPT-5.6 Terra · med   ~30s  standard
+  #   thorough   Opus 4.8 · max       GPT-5.6 Sol · high    ~60s  higher
   #
   # crosscheck onboard writes these automatically when you pick a tier.
   # You can override individual vendor settings in the vendors: block below.
@@ -89,6 +89,10 @@ orgs:
 # repos:
 #   - owner: acme
 #     name: specific-repo
+#
+# To narrow the workflow for one repo (e.g. make it review-only), do NOT edit this
+# file — run `crosscheck alter <owner>/<repo> --review-only`. That writes a standalone
+# override at ~/.crosscheck/workflows/<owner>__<repo>.yml, live-reloaded per PR.
 repos:
   - owner: codatta
     name: my-repo
@@ -193,6 +197,20 @@ post_review:
 # Off by default — enable with the config below or pass --backtrace at startup.
 # backtrace:
 #   enabled: true   # set to true to enable the startup scan (or pass --backtrace)
+
+# ─── Issue enrichment ────────────────────────────────────────────────────────
+# Recover the linked tracker issue (e.g. IN-2017) from the PR title / branch /
+# body and inject its goal — title, description, labels, estimate, project —
+# into the reviewer prompt, so the review judges the change against the stated
+# goal instead of inferring intent from the diff alone.
+# Off by default. Requires LINEAR_API_KEY in the environment (read-only scope is
+# enough). Fail-soft: an unresolved or unreachable issue degrades the review to
+# diff-only, never blocks it.
+# issue_enrichment:
+#   enabled: true
+#   provider: linear          # linear (only provider today)
+#   team_keys: [IN]           # restrict extraction to these keys; [] = match any
+#   max_description_chars: 4000  # cap injected description length (0 = no cap)
 
 # ─── Logs ────────────────────────────────────────────────────────────────────
 # Structured debug logs written to ~/.crosscheck/logs/YYYY-MM-DD.ndjson

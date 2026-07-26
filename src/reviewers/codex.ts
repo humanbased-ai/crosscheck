@@ -1,5 +1,5 @@
 import { execa } from 'execa'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
@@ -16,6 +16,23 @@ export function inferVerdictFromCodexOutput(text: string): string {
   if (/\[P0\]/i.test(text) || /\[P1\]/i.test(text)) return 'BLOCK'
   if (/\[P2\]/i.test(text) || /\[P3\]/i.test(text)) return 'NEEDS WORK'
   return 'APPROVE'
+}
+
+// Codex prints file references as absolute paths inside the temporary clone dir
+// (e.g. /private/var/.../crosscheck-repo-XXXX/src/a.ts:12). Strip that prefix so
+// posted comments show repo-relative paths. Handles both the dir as given and its
+// realpath — on macOS tmpdir() returns a /var symlink but codex resolves /private/var.
+export function stripRepoDirPaths(text: string, repoDir: string): string {
+  const variants = new Set([repoDir])
+  try { variants.add(realpathSync(repoDir)) } catch { /* dir may already be gone */ }
+  let out = text
+  // Longest first: the realpath contains the symlinked path as a suffix
+  // (/private/var/... vs /var/...), so stripping the short one first would
+  // leave a /private remnant behind.
+  for (const dir of [...variants].sort((a, b) => b.length - a.length)) {
+    out = out.split(`${dir}/`).join('')
+  }
+  return out
 }
 
 // Detect transient Codex API errors that should be retried (socket disconnects, rate limits)
@@ -56,6 +73,9 @@ export async function runCodexReview(
   // Split from onLog so callers (e.g. runner) can stay silent on routine
   // `running: ...` chatter while still surfacing the retry signal live.
   onRetry?: (msg: string) => void,
+  // Linked tracker issue rendered as a prompt block (issues/enrich.ts) — anchors
+  // the review to the stated goal. Omitted when enrichment is off / unresolved.
+  issueContext?: string,
 ): Promise<ReviewResult> {
   const model = resolveCodexModel(quality, vendor)
   const tmpFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
@@ -70,7 +90,7 @@ export async function runCodexReview(
     : ''
   const customNote = quality.custom_prompt ?? ''
   const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
-  const instructionsNote = [focusNote, customNote, behaviorInstructions].filter(Boolean).join('\n\n')
+  const instructionsNote = [issueContext ?? '', focusNote, customNote, behaviorInstructions].filter(Boolean).join('\n\n')
   const instructionsPath = `${repoDir}/.codex/instructions`
   // Save original content so we can restore it after the review — prevents the
   // fix step's git add -A from committing crosscheck's instructions as a PR change.
@@ -108,7 +128,7 @@ export async function runCodexReview(
           },
         )
 
-        const rawReview = result.stdout.trim() || result.stderr.trim()
+        const rawReview = stripRepoDirPaths(result.stdout.trim() || result.stderr.trim(), repoDir)
         const tokensMatch = (result.stderr ?? '').match(/\btokens?:\s*([\d,]+)/i)
         const tokensUsed = tokensMatch ? parseInt(tokensMatch[1].replace(/,/g, ''), 10) : undefined
         // Append inferred VERDICT when Codex didn't include one (its review command

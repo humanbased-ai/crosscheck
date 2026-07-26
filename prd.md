@@ -18,7 +18,7 @@ Published as `@motivation-labs/crosscheck` on npm.
 - **Use existing subscriptions** — run `claude` and `codex` CLIs locally, no per-token billing
 - **Zero infrastructure** — one command on any machine with both CLIs installed
 - **Config-as-code** — one flat YAML file, readable and writable by coding agents
-- **Two deployment modes** — `watch` for laptops, `serve` for always-on machines
+- **Two deployment modes** — `watch` for local laptop use, `watch --team` for always-on team servers
 - **Org-level coverage** — one webhook covers all repos in an org
 - **Self-improving** — `diagnose` + `optimize` create a feedback loop from observed failures to better review instructions; crosscheck gets more useful the longer it runs
 - **Self-annotating** — each crosscheck action embeds machine-readable attribution metadata that makes future attribution more accurate, without relying on external conventions
@@ -111,6 +111,38 @@ The security concern is narrower: the **hidden automation annotation** (`<!-- cr
 - Hidden `<!-- crosscheck: ... type=review -->` annotation from anyone else → annotation injection; blocked; logged as `annotation_injection_blocked`
 
 **Warning**: when `routing.allowed_authors` is unset on a public or broadly accessible repository, any commenter can attempt annotation injection. Surface this at `watch` startup so operators understand the risk.
+
+### P6 — One watcher may run different repo workflows
+
+Teams often want one long-lived Crosscheck process for an org, while individual repos need different automation depth. For example, `humanbased-ai/xny-monorepo` may be review-only, while neighboring repos still run the default review → fix → recheck loop.
+
+Per-repo workflow differences live in **standalone files**, not in `crosscheck.config.yml` (pipeline shape stays out of the infra config) and not in separate watcher processes. A per-repo override is `~/.crosscheck/workflows/<owner>__<repo>.yml`, which *narrows* the global `~/.crosscheck/workflow.yml` by step type — preserving each step's configured instructions and reviewer. It is read per PR event, so edits (or `crosscheck alter`) apply with no `watch` restart. CLI one-shot flags such as `crosscheck run --steps ...` (and `run --review-only`) are session overrides and take precedence over the repo default.
+
+Resolution order (first hit wins): `{repo}/.crosscheck/workflow.yml` → `~/.crosscheck/workflows/<owner>__<repo>.yml` → `~/.crosscheck/workflow.yml` → built-in `DEFAULT_WORKFLOW` (review → fix → recheck).
+
+The operator-facing command is:
+
+```bash
+crosscheck alter humanbased-ai/xny-monorepo --review-only      # alias for --steps review
+crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
+crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
+crosscheck alter humanbased-ai/xny-monorepo --show             # print effective steps
+crosscheck alter humanbased-ai/xny-monorepo --reset            # remove the override
+```
+
+Acceptance criteria:
+- The per-repo file is `{ steps: [review] | [review, fix] | [review, recheck] | [review, fix, recheck] }` — any in-order subset of `[review, fix, recheck]` that includes `review` — validated by `RepoWorkflowStepsSchema`. Pipeline shape is **not** stored in `config.yml` (`RepoConfigSchema` has no `steps` field).
+- `watch` resolves workflow steps per PR repo by narrowing the global workflow. Repos narrowed to `[review]` do not run fix, recheck, conflict-resolve, or the review→fix `issue_comment` bridge.
+- `conflict-resolve` is orthogonal to the review→fix→recheck depth ladder, so an override cannot list it. It passes through whenever the override permits code modification (i.e. includes `fix`: `review,fix` or `review,fix,recheck`) and is dropped for overrides without `fix` (`review` or `review,recheck`).
+- `review,recheck` is a recheck-no-fix depth: crosscheck never auto-fixes, so a new (human-pushed) SHA routes to `recheck` — re-evaluating against the prior review — rather than a fresh review (`identifyNextWorkflowStep`). This routing applies **only while the prior review is unresolved**; after an `APPROVE` there are no findings to re-evaluate, so a later push falls back to a fresh review.
+- A `recheck` step never runs in the same session as the review it would recheck unless a fix applied changes in between (`runner.ts`, `anyFixApplied`). The step's `when: "fix.applied_count > 0"` guard cannot enforce this on its own in a fix-less depth: it names a step that isn't in the workflow, and `evaluateWhen` **fails open** on missing results (returns `true`), so without the runner check `review,recheck` would post a duplicate recheck on the freshly reviewed SHA. The now-meaningless guard is also cleared when the depth omits `fix` (`filterStepsByTypes`) so the resume path doesn't depend on that fail-open behaviour.
+- In a recheck-no-fix depth the recheck step's `max_rounds` is lifted (`filterStepsByTypes`). The cap bounds the autonomous fix→recheck cycle; here each round is a separate human push, and `identifyNextWorkflowStep` returns `lastReview.round + 1` for the first one — already past the default `max_rounds: 1`, which would have made the runner skip every recheck this depth exists to run.
+- The review-vs-recheck routing is decided from PR history, so `watch` bypasses its PR-level session fast-path (`reviewedPRKeys`, SHA-agnostic) for these repos. Otherwise a post-`APPROVE` push handled by the same long-lived watcher would still run as a recheck. Comment-triggered runs keep their SHA-specific fast path so `kickass` can re-review an already-complete SHA.
+- Repos without an override file keep the complete configured workflow.
+- `crosscheck alter <repo>` (alias `alter-workflow`) writes/removes the per-repo file; `--show` prints effective steps; `--reset` removes the override; `--review-only` is an alias for `--steps review`.
+- The built-in default and the `onboard` default are the full `review → fix → recheck` loop. Review-only is a pipeline shape (`--steps review`), reachable per-repo via `alter --review-only` or per-run via `run --review-only`; there is no global `watch --only-review` flag.
+- `onboard` never touches per-repo override files.
+- README and get-started docs explain local use and always-on team server use after the feature ships.
 
 ---
 
@@ -2864,6 +2896,42 @@ Phase 1 (this feature): Config-gap detection + `--apply` + `--issue`. Delivers i
 Phase 2: `--prd` — generates prd.md proposal, opens draft PR. No code generation.
 
 Phase 3: `--build` — full autonomous contribution. Requires careful scoping of the agent prompt to prevent scope creep.
+
+---
+
+### 🔜 Next Up
+
+- [x] **`--port <n>` flag for `watch` and `serve`** — shipped in `c0ed2dd`. Override the webhook server port for one session without editing `crosscheck.config.yml`. Requested to run a second instance or dodge a port already claimed by another process.
+  - **User:** Anyone running `crosscheck watch` / `crosscheck serve` who needs a specific port for this session — a second instance on a different port, a machine where `7891` is taken, or a fixed port required by an external tunnel/reverse-proxy config.
+  - **Scope:** Only `watch` and `serve` bind a local port. `init`, `review`, `run`, and `status` do not listen, so the flag is not added there.
+  - **Acceptance Criteria:**
+    - `crosscheck watch --port 8080` and `crosscheck serve --port 8080` bind the HTTP webhook server to `8080` for this session only. Config file is never written.
+    - The flag value overrides `config.server.port`; the value flows through every downstream use (server `listen`, smee `--port`, localhost.run `-R 80:localhost:<port>`, and the printed endpoint/banner).
+    - `watch`: forces exactly the given port. If it is in use, the existing `EADDRINUSE` guidance is printed and the process exits 1 (unchanged behavior, just on the forced port).
+    - `serve`: `--port` is a **hard** port — it bypasses the `findAvailablePort` auto-shift. If the forced port is in use, exit 1 with a clear message rather than silently moving to the next free port. (Without the flag, auto-shift behavior is unchanged.)
+    - Invalid values (non-integer, <1, >65535) exit 1 with a clear error before any server is created.
+    - Flag is additive and optional — no change to any existing exit code or config field. Minor version bump.
+  - **Technical Notes:**
+    - `cli.ts`: add `.option('--port <number>', 'override webhook server port for this session')` to both the `watch` and `serve` command definitions, and widen the two `.action` opts types.
+    - Parse + validate once at the command boundary (or via a small `parsePort` helper) — Commander passes the raw string.
+    - Simplest threading: right after `loadConfig`, if `opts.port` is set, do `config = { ...config, server: { ...config.server, port } }`. Every existing `config.server.port` reference then picks it up automatically.
+    - `serve.ts`: when `opts.port` is set, skip `findAvailablePort` and use the forced port directly so the auto-shift can't override it.
+    - Add `port?: number` to `WatchOpts` (watch.ts) and `ServeOpts` (serve.ts).
+  - **Tests Required:** `parsePort` accepts `1`–`65535` and rejects `0`, `65536`, `-1`, `"abc"`, empty; `watch`/`serve` bind the forced port when free; `serve --port` on a busy port exits 1 (no auto-shift); omitting the flag preserves current behavior (watch = config port, serve = auto-shift).
+
+- [ ] **Sunset `crosscheck serve`** — `watch` (especially with `tunnel.backend: smee`) now covers the always-on server use case, so `serve` (still BETA) is redundant. Remove it gradually so no existing operator's setup breaks mid-flight.
+  - **User:** Existing `serve` operators running an always-on home server / mac-mini, plus everyone maintaining the two near-duplicate command implementations (`serve.ts` ≈ `watch.ts` review pipeline).
+  - **Migration target (decided):** operators move to `crosscheck watch` with `tunnel.backend: smee`. smee.io is a hosted relay that survives restarts and queues events while offline, so it covers the always-on server use case that `serve` was built for. This pairs with the existing backlog item "smee.io as default tunnel." (`serve`'s only behavior `watch` lacks is raw-port/no-tunnel operation; we accept smee as the answer rather than adding a `tunnel.backend: none` mode. Revisit only if Phase 1 telemetry shows real raw-port usage.)
+  - **Phased plan:**
+    - **Phase 1 — soft-deprecate (next release, minor):** mark the command `[DEPRECATED]` in its `cli.ts` description; print a one-time startup warning pointing to `watch` + migration steps; emit a `serve_deprecated` log event to measure real usage. No behavior change. Add a deprecation banner + migration steps to the `serve` section of `get-started.md`.
+    - **Phase 2 — announce the removal window:** after ≥1 release carrying the warning (and telemetry showing usage is effectively zero, or a fixed calendar date), record the target removal version in the changelog and docs.
+    - **Phase 3 — remove (major; minor acceptable while pre-1.0):** delete `src/commands/serve.ts`, drop the `serve` command + `runServe` import from `cli.ts`, delete `ServeOpts`, remove the `serve` docs. Optionally keep a one-release stub command that only prints migration guidance and exits 1, then delete that too. `findAvailablePort` (`src/lib/port.ts`) is serve-only — remove it in the same change (the new `--port` on `watch` does not use it; keep `parsePort`).
+  - **Acceptance Criteria (Phase 1 only — Phases 2–3 are separate future items):**
+    - `crosscheck serve` still works identically, but prints a clearly-worded deprecation warning at startup with the exact migration command.
+    - Command description in `--help` is prefixed `[DEPRECATED]`.
+    - A `serve_deprecated` event is logged once per invocation.
+    - Docs steer new users to `watch`; the `serve` section is marked deprecated with a migration recipe.
+  - **Tests Required:** startup path emits the deprecation warning + `serve_deprecated` log event; `serve` review behavior otherwise unchanged (existing serve coverage still passes).
 
 ---
 

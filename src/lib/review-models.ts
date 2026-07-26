@@ -1,16 +1,25 @@
+import { createRequire } from 'module'
+import { z } from 'zod'
 import type { CodexVendorConfig, QualityConfig, VendorConfig } from '../config/schema.js'
 
-export const CLAUDE_TIER_MODELS: Record<string, string> = {
-  fast: 'claude-haiku-4-5-20251001',
-  balanced: 'claude-sonnet-4-6',
-  thorough: 'claude-opus-4-7',
-}
+const require = createRequire(import.meta.url)
 
-export const CODEX_TIER_MODELS_API: Record<string, string> = {
-  fast: 'gpt-4o-mini',
-  balanced: 'o4-mini',
-  thorough: 'o3',
-}
+const TierModelSchema = z.object({
+  fast: z.string(),
+  balanced: z.string(),
+  thorough: z.string(),
+})
+
+const ReviewModelTierConfigSchema = z.object({
+  claude: TierModelSchema,
+  codex_api: TierModelSchema,
+})
+
+const rawReviewModelTierConfig: unknown = require('../config/review-model-tiers.json')
+const reviewModelTierConfig = ReviewModelTierConfigSchema.parse(rawReviewModelTierConfig)
+
+export const CLAUDE_TIER_MODELS: Record<QualityConfig['tier'], string> = reviewModelTierConfig.claude
+export const CODEX_TIER_MODELS_API: Record<QualityConfig['tier'], string> = reviewModelTierConfig.codex_api
 
 export function resolveClaudeModel(quality: QualityConfig, vendor?: VendorConfig): string {
   // An explicit vendors.claude.model wins over the tier mapping. The claude CLI
@@ -22,13 +31,13 @@ export function resolveClaudeModel(quality: QualityConfig, vendor?: VendorConfig
 
 export function resolveCodexModel(quality: QualityConfig, vendor: CodexVendorConfig): string {
   if (vendor.auth !== 'api-key') return 'default'
-  return vendor.model || CODEX_TIER_MODELS_API[quality.tier] || CODEX_TIER_MODELS_API.balanced
+  return vendor.model || vendor.model_tiers?.[quality.tier] || CODEX_TIER_MODELS_API[quality.tier] || CODEX_TIER_MODELS_API.balanced
 }
 
 // Derives a display name from the regular claude model ID shape:
 // claude-{family}-{major}[-{minor}][-YYYYMMDD]. New models then render
 // nicely without code changes. Returns null when the shape differs
-// (e.g. old-style claude-3-5-sonnet-20241022 or codex IDs like o4-mini),
+// (e.g. old-style claude-3-5-sonnet-20241022 or codex IDs like gpt-5.6-sol),
 // in which case the raw ID is displayed as-is.
 function claudePrettyName(model: string): string | null {
   const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/.exec(model)

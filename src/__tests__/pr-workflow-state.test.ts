@@ -129,7 +129,7 @@ describe('identifyNextWorkflowStep', () => {
           '[crosscheck] fix: apply fixes from code review',
           '',
           'Crosscheck-Reviewer: claude',
-          'Crosscheck-Model: claude-sonnet-4-6',
+          'Crosscheck-Model: claude-sonnet-5',
           'Crosscheck-Step: fix',
           'Crosscheck-Service: crosscheck',
         ].join('\n'),
@@ -141,7 +141,7 @@ describe('identifyNextWorkflowStep', () => {
       type: 'fix',
       pushedSha: '59abeb630af4efbc874650db88ecf3dcb02724fb',
       reviewer: 'claude',
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       source: 'commit',
     })
 
@@ -189,7 +189,7 @@ describe('identifyNextWorkflowStep', () => {
           '[crosscheck] fix: apply fixes from code review',
           '',
           'Crosscheck-Reviewer: claude',
-          'Crosscheck-Model: claude-sonnet-4-6',
+          'Crosscheck-Model: claude-sonnet-5',
           'Crosscheck-Step: fix',
           'Crosscheck-Service: crosscheck',
         ].join('\n'),
@@ -214,14 +214,68 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.step?.type).toBe('review')
     expect(next.round).toBe(2)
   })
+
+  // recheck-no-fix mode (per-repo `review,recheck`): crosscheck never auto-fixes, so a
+  // human pushing their own fix commits is the trigger to re-evaluate — as a recheck
+  // against the prior review, not a fresh review.
+  const reviewRecheckWorkflow = [reviewStep, recheckStep]
+
+  it('routes a human-pushed SHA to recheck (not review) in a recheck-no-fix workflow', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
+    ], reviewRecheckWorkflow, 'sha-B')
+
+    expect(next.step?.type).toBe('recheck')
+    expect(next.reviewComment?.id).toBe(100) // links back to the original review
+    expect(next.round).toBe(2)
+  })
+
+  it('completes once the human-pushed SHA has been rechecked (recheck-no-fix)', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
+      record({ type: 'recheck', verdict: 'NEEDS_WORK', sha: 'sha-B', round: 2, commentId: 102 }),
+    ], reviewRecheckWorkflow, 'sha-B')
+
+    expect(next.step).toBeNull()
+  })
+
+  // After an APPROVE there are no findings left to re-evaluate, so a push of NEW code
+  // must get a fresh review — a recheck would judge it against a resolved review and
+  // could gloss over defects the new commits introduced.
+  it('routes a post-APPROVE push to a fresh review, not a recheck (recheck-no-fix)', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A' }),
+    ], reviewRecheckWorkflow, 'sha-B')
+
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(2)
+  })
+
+  it('still rechecks a post-BLOCK push (recheck-no-fix)', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'sha-A' }),
+    ], reviewRecheckWorkflow, 'sha-B')
+
+    expect(next.step?.type).toBe('recheck')
+  })
+
+  // An APPROVE recorded by a recheck ends the cycle just like an APPROVE review does.
+  it('routes a push after an APPROVE recheck to a fresh review (recheck-no-fix)', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
+      record({ type: 'recheck', verdict: 'APPROVE', sha: 'sha-B', round: 2, commentId: 102 }),
+    ], reviewRecheckWorkflow, 'sha-C')
+
+    expect(next.step?.type).toBe('review')
+  })
 })
 
-// crosscheck watch --only-review uses decideReviewOnly (NOT identifyNextWorkflowStep)
-// so it can never advance to fix/recheck. These cases lock the behaviors that mode
-// depends on: review a fresh PR, skip an already-reviewed SHA, re-review a new SHA,
-// and — critically — treat a fix-pushed SHA from another session as new content to
-// review rather than mistaking it for a recheck (the fixedCurrentSha bypass).
-describe('decideReviewOnly (--only-review)', () => {
+// A per-repo review-only workflow (crosscheck alter --review-only) uses decideReviewOnly
+// (NOT identifyNextWorkflowStep) so it can never advance to fix/recheck. These cases lock
+// the behaviors that mode depends on: review a fresh PR, skip an already-reviewed SHA,
+// re-review a new SHA, and — critically — treat a fix-pushed SHA from another session as
+// new content to review rather than mistaking it for a recheck (the fixedCurrentSha bypass).
+describe('decideReviewOnly (per-repo review-only)', () => {
   it('reviews a fresh PR at round 1', () => {
     expect(decideReviewOnly([], 'head-sha')).toEqual({ alreadyReviewed: false, round: 1 })
   })
@@ -243,7 +297,7 @@ describe('decideReviewOnly (--only-review)', () => {
   })
 
   it('reviews a fix-pushed SHA as new content, not a recheck (fixedCurrentSha bypass)', () => {
-    // A prior non-only-review session reviewed sha-A (BLOCK) and pushed a fix to sha-B
+    // A prior full-workflow session reviewed sha-A (BLOCK) and pushed a fix to sha-B
     // but never rechecked. decideReviewOnly must REVIEW sha-B (it was never reviewed),
     // not skip it and not treat it as a recheck.
     const decision = decideReviewOnly([

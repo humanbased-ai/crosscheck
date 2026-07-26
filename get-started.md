@@ -142,6 +142,20 @@ To use your own secret instead, set it in your shell profile:
 export CROSSCHECK_WEBHOOK_SECRET=your-secret
 ```
 
+### Linear API key — for issue enrichment (optional)
+
+`LINEAR_API_KEY` is only read when `issue_enrichment.enabled: true` (see
+[Issue enrichment](#issue-enrichment)). It lets crosscheck fetch the linked
+Linear issue so the review is anchored to the ticket's stated goal. A read-only
+personal API key is enough — create one under Linear → Settings → API.
+
+```bash
+export LINEAR_API_KEY=lin_api_...
+```
+
+If it's unset while enrichment is on, crosscheck just skips enrichment and
+reviews the diff as usual — it never errors.
+
 ---
 
 ## Step 1 — Check your setup
@@ -217,7 +231,12 @@ You can override the saved choice for a single session without touching the conf
 ```bash
 crosscheck watch --personal   # personal mode this session only
 crosscheck watch --team       # team mode this session only
+crosscheck watch --port 8080  # force a specific webhook port this session (overrides config; not saved)
 ```
+
+`--port <n>` forces the local webhook server onto that exact port for this session
+without editing `server.port` in config — useful for running a second instance or
+avoiding a port already in use. If the port is taken, `watch` exits with an error.
 
 To re-run the prompt and permanently change your choice:
 
@@ -256,13 +275,13 @@ When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned 
 
 **Token scope for org webhooks:** `GITHUB_TOKEN` needs `write:org` scope for org-level coverage. For repo-level, `repo` scope is sufficient.
 
-**Review-only mode:** pass `--only-review` to post reviews and nothing else — crosscheck never runs the fix, recheck, or conflict-resolve steps, and never pushes commits to your PRs:
+**Review-only for a repo:** make a repo post reviews and nothing else with `crosscheck alter <repo> --review-only` — crosscheck never runs the fix, recheck, or conflict-resolve steps for it, and never pushes commits to its PRs:
 
 ```bash
-crosscheck watch --only-review
+crosscheck alter humanbased-ai/xny-monorepo --review-only
 ```
 
-Each PR (and each new pushed SHA) gets a fresh review comment; content that has already been reviewed at the current SHA is skipped. Use this when you want crosscheck's verdicts but want to apply fixes yourself.
+Each PR (and each new pushed SHA) on a review-only repo gets a fresh review comment; content that has already been reviewed at the current SHA is skipped. Use this when you want crosscheck's verdicts on a repo but want to apply fixes yourself. Review-only is a per-repo setting now — there is no global `--only-review` flag.
 
 ---
 
@@ -427,6 +446,39 @@ crosscheck onboard
 | `--personal` | Use personal deployment mode for this session only |
 | `--team` | Use team deployment mode for this session only |
 | `--reconfigure` | Re-run setup even if `deployment` is already set in config |
+
+Onboard never touches per-repo workflow overrides written by `crosscheck alter` — those live in their own files under `~/.crosscheck/workflows/`.
+
+---
+
+### `crosscheck alter`
+
+Sets the workflow depth for one repo without changing the global default. Writes a standalone file at `~/.crosscheck/workflows/<owner>__<repo>.yml` that narrows the global `~/.crosscheck/workflow.yml` for that repo only. Use it when one watcher should run different depths for different repos. `alter-workflow` is an alias.
+
+```bash
+crosscheck alter humanbased-ai/xny-monorepo --review-only            # alias for --steps review
+crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
+crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,recheck
+crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
+crosscheck alter humanbased-ai/xny-monorepo --show                   # print effective steps, no write
+crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove the override
+```
+
+| Flag | Description |
+|---|---|
+| `--steps <list>` | Any in-order subset beginning with `review`: `review`, `review,fix`, `review,recheck`, or `review,fix,recheck` |
+| `--review-only` | Alias for `--steps review` |
+| `--show` | Print the repo's effective steps without writing |
+| `--reset` | Remove the override; revert to the global default |
+
+The depths differ in what happens after the initial review:
+
+- **`review`** — review each new SHA; never modify code.
+- **`review,fix`** — crosscheck auto-applies fixes when the verdict isn't `APPROVE`, and stops there; its own fix commit is not re-reviewed.
+- **`review,fix,recheck`** — same, then rechecks its own fix commit. `max_rounds` in `~/.crosscheck/workflow.yml` bounds that fix→recheck cycle.
+- **`review,recheck`** — crosscheck never auto-fixes. When an engineer pushes their own fix commits **while a review is still unresolved** (last verdict `NEEDS_WORK` or `BLOCK`), watch runs a **recheck** — re-evaluating the new code against that review — instead of a fresh review. Once the verdict is `APPROVE` there is nothing left to resolve, so a later push gets a fresh review rather than a recheck. Use this when humans own the fix decision but still want automated re-evaluation on every push. The recheck only ever runs in its own session, never immediately after the review that triggered it. `max_rounds` does not apply here: with no auto-fix cycle to bound, every push is rechecked for as long as the review stays unresolved.
+
+Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. Changes apply on the next PR event — no need to restart a running `crosscheck watch`.
 
 ---
 
@@ -643,7 +695,6 @@ Uses `localhost.run` (SSH) to open a public tunnel — SSH is pre-installed on m
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Use a specific config file |
-| `--only-review` | Review-only mode: post reviews but never fix, recheck, or resolve |
 | `--personal` / `--team` | Override the saved deployment mode for this session only |
 | `--reconfigure` | Re-run deployment setup and save the new choice |
 | `--backtrace` / `--no-backtrace` | Force on/off the startup scan for unreviewed open PRs |
@@ -916,6 +967,8 @@ On re-runs, `onboard` updates only the fields it collected answers for. Everythi
 
 **Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
 
+**Never touched by onboard:** per-repo overrides in `~/.crosscheck/workflows/` (owned by `crosscheck alter`), and `~/.crosscheck/workflow.yml` after its first write
+
 **Initialised on first run, never overwritten:** `routing.allowed_authors`, `routing.author_routes`, `routing.fallback_reviewer`
 
 **Never touched by onboard:** `quality.focus`, `quality.custom_prompt`, `budget.*`, `branding.*`, `server.*`, `logs.*`, `backtrace.*`, `workflow.yml` (after first write), harness files
@@ -962,7 +1015,7 @@ vendors:
   codex:
     enabled: true
     auth: subscription      # subscription | api-key
-    model: o4-mini          # only used when auth: api-key
+    model: gpt-5.6-terra    # only used when auth: api-key
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
@@ -1001,9 +1054,14 @@ users:
 
 # ── Repos — for monitoring specific repos only ────────────────────────────────
 # Omit when using `orgs`/`users`. Auto-detected from git remote if all are empty.
+# To run one repo at a narrower workflow depth, do NOT add fields here — run
+# `crosscheck alter <owner>/<repo> --review-only` (or --steps review,fix). That
+# writes ~/.crosscheck/workflows/<owner>__<repo>.yml, live-reloaded per PR.
 repos:
   - owner: acme
     name: specific-repo
+  - owner: humanbased-ai
+    name: xny-monorepo
 
 # ── Routing ───────────────────────────────────────────────────────────────────
 routing:
@@ -1095,6 +1153,30 @@ server:
 | `fast` | ~10s | Top issues only | High-volume repos, draft PRs |
 | `balanced` | ~30s | Full review, all issues explained | Default for most teams |
 | `thorough` | ~60–90s | Deep multi-pass, architecture + security | Before merging to main |
+
+### Issue enrichment
+
+By default crosscheck infers a PR's intent from the diff. With enrichment on, it
+recovers the linked tracker ref (e.g. `IN-2017`) from the PR title, branch, or
+body, fetches that Linear issue, and prepends its goal — title, description,
+labels, estimate, project — to the reviewer prompt. The review then judges the
+change against the **stated goal**, flagging scope creep and behavior that
+contradicts the ticket.
+
+```yaml
+issue_enrichment:
+  enabled: true
+  provider: linear             # linear (only provider today)
+  team_keys: [IN]              # restrict extraction to these keys; [] = match any
+  max_description_chars: 4000  # cap injected description length (0 = no cap)
+```
+
+Requires `LINEAR_API_KEY` (see [Environment variables](#environment-variables)).
+It's fail-soft at every step: no ref found, no key set, issue not found, or the
+Linear API being unreachable all degrade the run to a normal diff-only review —
+enrichment never blocks or fails a review. Misses are logged (`issue_enrichment_*`
+events) so you can see why a given PR wasn't enriched. Enrichment feeds the
+review and recheck steps only; it does not change reviewer routing or tier.
 
 ### Routing patterns
 
@@ -1192,14 +1274,14 @@ If none match, origin is `human` and the PR is skipped in cross-vendor mode.
 codex review --base <base-branch> --title "<pr-title>"
 ```
 
-The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. With `auth: subscription`, no model flag is passed. With `auth: api-key`, the model is selected by quality tier (`fast` → `gpt-4o-mini`, `balanced` → `o4-mini`, `thorough` → `o3`).
+The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. With `auth: subscription`, no model flag is passed. With `auth: api-key`, the model is selected by quality tier (`fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `thorough` → `gpt-5.6-sol`).
 
 ### How Claude reviews run
 
 ```bash
 claude \
   --print --bare \
-  --model claude-sonnet-4-6 \
+  --model claude-sonnet-5 \
   --effort medium \
   --max-budget-usd 2.00 \
   --output-last-message /tmp/review.md \
@@ -1308,6 +1390,8 @@ To reset the review step instructions to defaults, delete `~/.crosscheck/workflo
 ### Can I have per-project workflow?
 
 Yes. Create `.crosscheck/workflow.yml` in your repo root. crosscheck loads it automatically and uses it instead of the built-in default pipeline. This is the recommended way to customize reviewer behavior — it keeps all per-project settings in one file under version control.
+
+For one always-on watcher that monitors many repos, use `crosscheck alter owner/repo --review-only` (or `--steps review,fix`) instead. That writes `~/.crosscheck/workflows/<owner>__<repo>.yml`, which narrows the global workflow for that one repo — live-reloaded, no restart — while the rest keep the global workflow.
 
 ### What is `AGENT.md`?
 

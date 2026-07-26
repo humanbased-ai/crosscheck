@@ -87,6 +87,12 @@ export function getWebhookSecretPath(): string {
   return SECRET_FILE
 }
 
+// Read once here per the "env vars only in loader" rule. Returns undefined when
+// unset — issue enrichment treats that as "skip", never an error.
+export function getLinearApiKey(): string | undefined {
+  return process.env.LINEAR_API_KEY ?? undefined
+}
+
 export function detectGitHubLogin(): string | null {
   const envVariants = [
     { ...process.env, GITHUB_TOKEN: undefined, GH_TOKEN: undefined }, // keyring first

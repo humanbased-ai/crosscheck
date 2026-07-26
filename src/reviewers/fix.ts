@@ -101,8 +101,9 @@ export async function runFixStep(
   let tokensUsed: number | undefined
   try {
     const modelArgs = model !== 'default' ? ['--model', model] : []
+    const effort = config.vendors?.claude?.effort ?? 'medium'
     const resolvedTimeout = timeoutMs === undefined ? tierTimeoutMs(config.quality.tier) : timeoutMs === 0 ? undefined : timeoutMs
-    const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs], {
+    const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs, '--effort', effort], {
       input: prompt,
       timeout: resolvedTimeout,
       env: { ...process.env },

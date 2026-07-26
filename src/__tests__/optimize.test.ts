@@ -27,6 +27,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     tunnel: { backend: 'localhost.run', smee_channel: '' },
     impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },
     backtrace: { enabled: false },
+    issue_enrichment: { enabled: false, provider: 'linear', team_keys: [], max_description_chars: 4000 },
     watch: { idle_issue: { enabled: true, timeout_min: 30 } },
     display: { theme: { bar_fill: 'blue', bar_empty: 'dim', cr_approve: 'green', cr_needs_work: 'yellow', cr_block: 'red', fix_fill: 'cyan' } },
     post_review: {

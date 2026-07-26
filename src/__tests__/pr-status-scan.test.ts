@@ -18,6 +18,17 @@ vi.mock('../github/merge.js', () => ({
   getPRMergeSummary: vi.fn(),
 }))
 
+// Per-repo overrides are files under ~/.crosscheck/workflows/. Stub the lookup so
+// the scan sees a review-only override for acme/web-reviewonly without touching disk.
+vi.mock('../lib/repo-workflow.js', async () => {
+  const actual = await vi.importActual<typeof import('../lib/repo-workflow.js')>('../lib/repo-workflow.js')
+  return {
+    ...actual,
+    readRepoWorkflowStepTypes: vi.fn((owner: string, name: string) =>
+      owner === 'acme' && name === 'web-reviewonly' ? ['review'] : undefined),
+  }
+})
+
 vi.mock('../lib/logger.js', async () => {
   const actual = await vi.importActual<typeof import('../lib/logger.js')>('../lib/logger.js')
   return {
@@ -110,5 +121,24 @@ describe('scanOpenPRStatuses', () => {
     )
 
     expect(maxActive).toBeLessThanOrEqual(8)
+  })
+
+  it('removes disallowed next actions for repo workflow overrides', async () => {
+    mockListOpenPRs.mockResolvedValue([openPR(1)])
+    mockListIssueComments.mockResolvedValue([{
+      body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+      createdAt: '2026-05-27T01:00:00.000Z',
+      updatedAt: '2026-05-27T01:00:00.000Z',
+    }])
+
+    const result = await scanOpenPRStatuses(
+      ConfigSchema.parse({ repos: [{ owner: 'acme', name: 'web-reviewonly' }] }),
+      'token',
+      { now: new Date('2026-05-29T00:00:00.000Z'), staleAfterMs: 24 * 60 * 60 * 1000 },
+    )
+
+    expect(result.prs[0].reviewState).toBe('NEEDS_FIX')
+    expect(result.prs[0].nextAction).toBeNull()
+    expect(result.summary.actionable).toBe(0)
   })
 })

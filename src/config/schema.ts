@@ -18,7 +18,7 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   quality: z.enum(['low', 'medium', 'high']).default('medium'),
   // Optional per-tier model overrides. When unset, the Codex CLI picks the model.
   // Subscription auth: leave unset (CLI default). API-key auth: set explicit model IDs.
-  // Example: { fast: 'codex-mini-latest', balanced: 'codex-latest', thorough: 'codex-latest' }
+  // Example: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol' }
   model_tiers: z.object({
     fast: z.string().optional(),
     balanced: z.string().optional(),
@@ -42,9 +42,41 @@ export const BudgetConfigSchema = z.object({
   per_review_usd: z.number().default(2.0),
 })
 
+export const RepoWorkflowStepSchema = z.enum(['review', 'fix', 'recheck'])
+export type RepoWorkflowStep = z.infer<typeof RepoWorkflowStepSchema>
+
+// Canonical execution order of the three workflow steps. A per-repo override may
+// enable any subset, subject to three rules:
+//   1. it must include `review` — the step every later step builds on,
+//   2. steps must appear in this order (review, then fix, then recheck),
+//   3. no step may repeat.
+// That yields exactly: review, review+fix, review+recheck, review+fix+recheck.
+export const REPO_WORKFLOW_STEP_ORDER: readonly RepoWorkflowStep[] = ['review', 'fix', 'recheck']
+
+export const RepoWorkflowStepsSchema = z.array(RepoWorkflowStepSchema).min(1).superRefine((steps, ctx) => {
+  const fail = (message: string): void => {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message })
+  }
+  if (new Set(steps).size !== steps.length) {
+    fail('repo workflow steps must not repeat a step')
+    return
+  }
+  if (!steps.includes('review')) {
+    fail('repo workflow steps must include review')
+    return
+  }
+  const canonical = REPO_WORKFLOW_STEP_ORDER.filter(step => steps.includes(step))
+  if (steps.join(',') !== canonical.join(',')) {
+    fail('repo workflow steps must be ordered review, then fix, then recheck')
+  }
+})
+
 export const RepoConfigSchema = z.object({
   owner: z.string(),
   name: z.string(),
+  // Per-repo workflow depth is NOT stored here. It lives in a standalone file at
+  // ~/.crosscheck/workflows/<owner>__<repo>.yml (written by `crosscheck alter`),
+  // so pipeline shape stays out of the infra config and is live-reloaded per PR.
 })
 
 export const RoutingConfigSchema = z.object({
@@ -123,6 +155,23 @@ export const ImpactConfigSchema = z.object({
   assumed_human_review_minutes: z.number().int().min(1).default(60),
   hourly_rate_usd: z.number().min(0).default(150),
   defect_cost_usd: z.number().min(0).default(150),
+})
+
+export const IssueEnrichmentConfigSchema = z.object({
+  // Fetch the linked tracker issue and inject its goal (title, description,
+  // labels, estimate, project) into the reviewer prompt, so the review judges
+  // the change against the stated goal rather than inferring intent from the
+  // diff. Opt-in — requires LINEAR_API_KEY in the environment.
+  enabled: z.boolean().default(false),
+  provider: z.enum(['linear']).default('linear'),
+  // Restrict ticket-ref extraction to these team keys (e.g. ['IN']). Empty =
+  // match any <LETTERS>-<n> token; unknown refs simply resolve to nothing and
+  // are skipped, so scoping here mainly avoids wasted lookups on tokens like
+  // UTF-8 that share the ticket shape.
+  team_keys: z.array(z.string()).default([]),
+  // Hard cap (chars) on the injected issue description to bound prompt size.
+  // 0 disables the cap.
+  max_description_chars: z.number().int().min(0).default(4000),
 })
 
 export const BacktraceConfigSchema = z.object({
@@ -211,6 +260,7 @@ export const ConfigSchema = z.object({
   logs: LogsConfigSchema.default({}),
   impact: ImpactConfigSchema.default({}),
   backtrace: BacktraceConfigSchema.default({}),
+  issue_enrichment: IssueEnrichmentConfigSchema.default({}),
   watch: WatchConfigSchema.default({}),
   post_review: PostReviewConfigSchema.default({}),
   display: DisplayConfigSchema.default({}),
@@ -230,4 +280,5 @@ export type PostReviewFixConfig = z.infer<typeof PostReviewFixSchema>
 export type DisplayConfig = z.infer<typeof DisplayConfigSchema>
 export type DisplayTheme = z.infer<typeof DisplayThemeSchema>
 export type BacktraceConfig = z.infer<typeof BacktraceConfigSchema>
+export type IssueEnrichmentConfig = z.infer<typeof IssueEnrichmentConfigSchema>
 export type WatchConfig = z.infer<typeof WatchConfigSchema>

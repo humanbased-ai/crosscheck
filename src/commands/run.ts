@@ -9,12 +9,14 @@ import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
 import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken } from '../config/loader.js'
+import { loadConfig, getGithubToken, getLinearApiKey } from '../config/loader.js'
+import { enrichIssueContext } from '../issues/enrich.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { hintForError } from '../lib/remediation.js'
 import { runWorkflow } from '../lib/runner.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
+import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
@@ -301,9 +303,14 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     console.log(chalk.dim(`  fixer: ${normalizedFixer} (forced for fix steps)`))
   }
 
-  // Resolve steps — filter from workflow.yml by type if --steps is specified, then apply
-  // command-line vendor overrides so runWorkflow doesn't re-derive those step vendors.
-  const allSteps = loadWorkflow(process.cwd())
+  // Resolve steps — a per-repo override file narrows workflow.yml by default. An
+  // explicit --steps flag is a one-shot override and wins over the repo default.
+  const baseSteps = loadWorkflow(process.cwd())
+  const repoStepOverride = !opts.steps ? readRepoWorkflowStepTypes(owner, repo) : undefined
+  const allSteps = repoStepOverride ? resolveRepoWorkflowSteps(owner, repo, baseSteps) : baseSteps
+  if (repoStepOverride) {
+    console.log(chalk.dim(`  repo workflow: ${formatRepoWorkflowSteps(repoStepOverride)}`))
+  }
   let stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
   let initialReviewComment = opts.initialReviewComment
 
@@ -485,6 +492,19 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       })
       cloneSpinner.succeed('Repo ready')
 
+      // Recover the linked tracker issue (if enabled) so the review is anchored
+      // to the stated goal, not just the diff. Done here — after the PR and
+      // remote locks are secured — so a PR that gets skipped (already under
+      // review elsewhere) never triggers a throwaway tracker fetch. Fail-soft:
+      // a miss degrades to a diff-only review.
+      const issueContext = (await enrichIssueContext(
+        { title: pr.title, branch: pr.head.ref, body: pr.body },
+        config.issue_enrichment,
+        getLinearApiKey(),
+        (e) => fileLog({ level: e.level, event: e.event, repo: `${owner}/${repo}`, pr: number, ref: e.ref, reason: e.reason }),
+      )) ?? undefined
+      if (issueContext) console.log(chalk.dim('  issue enrichment: linked tracker issue attached'))
+
       if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
       let activeSpinner = ora('').start()
 
@@ -500,6 +520,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         roundMode: opts.roundMode,
         overrideTimeoutMs: reviewerTimeoutMs,
         trigger: opts.trigger ?? 'run',
+        issueContext,
       }
 
       let workflowResult = await runWorkflow({

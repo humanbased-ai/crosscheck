@@ -243,6 +243,8 @@ export function identifyNextWorkflowStep(
 ): NextStepResult {
   const reviewHistory = history.filter(r => r.type === 'review' || r.type === 'recheck')
   const hasExistingReview = reviewHistory.length > 0
+  const hasFixStep = steps.some(s => s.type === 'fix')
+  const hasRecheckStep = steps.some(s => s.type === 'recheck')
 
   if (!hasExistingReview) {
     const firstStep = firstIncompleteInitialStep(history, steps)
@@ -313,6 +315,26 @@ export function identifyNextWorkflowStep(
   }
 
   if (!reviewedCurrentSha) {
+    // A new (unreviewed) SHA has appeared since the last review. In a recheck-no-fix
+    // workflow (e.g. `review,recheck`) crosscheck never auto-fixes, so a human pushing
+    // their own fix commits is the expected trigger: re-evaluate the new code against
+    // the prior review (a recheck) instead of starting an unrelated fresh review. When
+    // the workflow has a fix step, keep the fresh-review behaviour so the auto-fix loop
+    // re-engages on the new SHA.
+    //
+    // Only when the prior review left unresolved work. After an APPROVE there are no
+    // findings to re-evaluate, so a recheck — whose instructions centre on resolving
+    // the original review — could gloss over defects in the newly pushed code. Those
+    // pushes get a fresh review instead.
+    if (hasRecheckStep && !hasFixStep && lastReview.verdict !== 'APPROVE') {
+      return {
+        step: effectiveRecheckStep(steps),
+        reviewComment,
+        hasExistingReview: true,
+        round: lastReview.round + 1,
+        history,
+      }
+    }
     const reviewStep = steps.find(s => s.type === 'review') ?? steps[0] ?? null
     return {
       step: reviewStep,
@@ -364,9 +386,9 @@ export interface ReviewOnlyDecision {
   round: number
 }
 
-// Decision logic for `crosscheck watch --only-review`, which posts reviews but
-// never fixes/rechecks. Unlike identifyNextWorkflowStep, this only asks "has this
-// exact SHA already been reviewed?" — it deliberately ignores fix/recheck state,
+// Decision logic for a per-repo review-only workflow (crosscheck alter --review-only),
+// which posts reviews but never fixes/rechecks. Unlike identifyNextWorkflowStep, this
+// only asks "has this exact SHA already been reviewed?" — it deliberately ignores fix/recheck state,
 // so a fix-pushed SHA from another session is treated as new content to review
 // (not a recheck) and a SHA already reviewed is skipped. Short/long SHA forms are
 // matched by prefix, the same tolerance the issue_comment bridge uses.

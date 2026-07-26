@@ -16,6 +16,7 @@ import { checkClaudeAuth } from '../reviewers/claude.js'
 import { execSync } from 'child_process'
 import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/repo-picker.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS } from '../lib/workflow.js'
+import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
 
 export interface OnboardOpts {
   config?: string
@@ -45,17 +46,17 @@ const QUALITY_TIERS = {
   fast: {
     description: 'quick scan, top issues only  (~10s, lowest cost)',
     claude: { model: 'haiku', effort: 'low' as const },
-    codex:  { model: 'o4-mini', effort: 'low' as const },
+    codex:  { model: 'gpt-5.6-luna', effort: 'low' as const },
   },
   balanced: {
     description: 'full review, all issues with explanations  (~30s)',
     claude: { model: 'sonnet', effort: 'medium' as const },
-    codex:  { model: 'o4-mini', effort: 'medium' as const },
+    codex:  { model: 'gpt-5.6-terra', effort: 'medium' as const },
   },
   thorough: {
     description: 'deep multi-pass, security + architecture  (~60s+, higher cost)',
     claude: { model: 'opus', effort: 'max' as const },
-    codex:  { model: 'o3', effort: 'high' as const },
+    codex:  { model: 'gpt-5.6-sol', effort: 'high' as const },
   },
 } as const
 
@@ -265,9 +266,10 @@ export function detectCurrentPreset(workflowDir: string = join(homedir(), '.cros
       if (types.includes('recheck')) return 'review-fix-recheck'
       if (types.includes('fix')) return 'review-fix'
       return 'review-only'
-    } catch { /* malformed — default to review-only */ }
+    } catch { /* malformed — fall through to the default below */ }
   }
-  return 'review-only'
+  // No global workflow file yet (fresh install) — default to the full loop.
+  return 'review-fix-recheck'
 }
 
 export function detectConflictResolveEnabled(workflowDir: string = join(homedir(), '.crosscheck')): boolean {
@@ -344,7 +346,7 @@ async function promptWorkflowPipeline(opts: OnboardOpts): Promise<WorkflowPreset
 
   const idx = await promptSinglePicker(items, {
     title: 'What should happen after a review?',
-    defaultIndex: defaultIdx >= 0 ? defaultIdx : 1,
+    defaultIndex: defaultIdx >= 0 ? defaultIdx : 2,
   })
   console.log()
 
@@ -507,7 +509,8 @@ export function applyOnboardConfig(
   raw.mode = vendorConfig.mode
   raw.clone_protocol = cloneProtocol
 
-  // Repos
+  // Repos. Per-repo workflow depth is NOT stored here — it lives in standalone
+  // files under ~/.crosscheck/workflows/ (written by `crosscheck alter`).
   raw.repos = selectedRepos.map(r => {
     const [owner, name] = r.split('/')
     return { owner, name }
@@ -944,6 +947,12 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   const cloneProtocol = await promptCloneProtocol(existingConfig?.clone_protocol, opts)
 
   // ── Step 10: Confirm and write ─────────────────────────────────────────────
+  const selectedRepoWorkflowOverrides = selectedRepos.flatMap(repoKey => {
+    const [owner, name] = repoKey.split('/')
+    const steps = readRepoWorkflowStepTypes(owner, name)
+    return steps ? [`${repoKey}: ${formatRepoWorkflowSteps(steps)}`] : []
+  })
+
   console.log(chalk.bold('Step 10 — review and write config'))
   console.log()
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
@@ -971,6 +980,9 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
   if (selectedRepos.length > 0) {
     console.log(`  repos        ${selectedRepos.slice(0, 5).map(r => chalk.cyan(r)).join(', ')}${selectedRepos.length > 5 ? chalk.dim(` +${selectedRepos.length - 5} more`) : ''}`)
+  }
+  if (selectedRepoWorkflowOverrides.length > 0) {
+    console.log(`  repo rules   ${selectedRepoWorkflowOverrides.slice(0, 3).map(r => chalk.cyan(r)).join(', ')}${selectedRepoWorkflowOverrides.length > 3 ? chalk.dim(` +${selectedRepoWorkflowOverrides.length - 3} more`) : ''}`)
   }
   if (selectedOrgs.length === 0 && selectedRepos.length === 0) {
     console.log(`  ${chalk.yellow('No repos or orgs selected. Config will have empty scope.')}`)
@@ -1016,5 +1028,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log()
 
   // ── Next step hint ─────────────────────────────────────────────────────────
-  console.log(chalk.dim('  Run crosscheck watch to start monitoring.\n'))
+  console.log(chalk.dim('  Run crosscheck watch to start monitoring.'))
+  const alterExample = selectedRepos[0] ?? 'owner/repo'
+  console.log(chalk.dim(`  Tune one repo later: crosscheck alter ${alterExample} --review-only\n`))
 }
