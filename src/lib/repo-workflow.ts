@@ -13,6 +13,11 @@ export interface RepoRef {
 
 const STEP_HINT = 'Expected steps: review, review,fix, review,recheck, or review,fix,recheck'
 
+// Stands in for "no round cap" on a step the runner still gates through
+// exceedsMaxRounds, which compares against a number. Must stay a positive int so it
+// matches the WorkflowStepSchema shape.
+const UNCAPPED_MAX_ROUNDS = Number.MAX_SAFE_INTEGER
+
 // Per-repo workflow overrides live in standalone files, keyed by repo, so one
 // long-lived `watch` can narrow individual repos while the pipeline shape stays
 // out of the infra config. Files are read per PR event (live reload — no restart).
@@ -152,12 +157,26 @@ export function filterStepsByTypes(
   // default recheck guard `when: "fix.applied_count > 0"` can never be satisfied and
   // would skip the step forever. Clear it so recheck runs whenever a human pushes a new
   // SHA — identifyNextWorkflowStep routes new commits to recheck in this mode.
-  if (stepTypes.includes('recheck') && !stepTypes.includes('fix')) {
+  //
+  // max_rounds goes with it. That cap bounds the autonomous fix→recheck cycle; here
+  // there is no cycle, and each round is a separate human push. identifyNextWorkflowStep
+  // hands the first post-review SHA `round: lastReview.round + 1`, which already exceeds
+  // the default `max_rounds: 1`, so leaving the cap in place would make the runner skip
+  // every recheck this depth exists to run.
+  if (isRecheckWithoutFix(stepTypes)) {
     return filtered.map(step =>
-      step.type === 'recheck' ? { ...step, when: undefined } : step,
+      step.type === 'recheck'
+        ? { ...step, when: undefined, max_rounds: UNCAPPED_MAX_ROUNDS }
+        : step,
     )
   }
   return filtered
+}
+
+// True for a depth that rechecks but never fixes (`review,recheck`). Undefined means
+// there is no per-repo override, so the repo runs the global workflow untouched.
+export function isRecheckWithoutFix(stepTypes: readonly RepoWorkflowStep[] | undefined): boolean {
+  return stepTypes !== undefined && stepTypes.includes('recheck') && !stepTypes.includes('fix')
 }
 
 export function resolveRepoWorkflowSteps(

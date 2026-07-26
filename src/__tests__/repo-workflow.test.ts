@@ -3,6 +3,7 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
+  isRecheckWithoutFix,
   parseRepoRef,
   parseRepoWorkflowSteps,
   perRepoWorkflowPath,
@@ -11,6 +12,7 @@ import {
   resolveRepoWorkflowSteps,
   writeRepoWorkflowStepTypes,
 } from '../lib/repo-workflow.js'
+import { exceedsMaxRounds } from '../lib/runner.js'
 import type { WorkflowStep } from '../lib/workflow.js'
 
 const steps: WorkflowStep[] = [
@@ -109,6 +111,35 @@ describe('repo workflow helpers', () => {
     expect(resolved.map(s => s.type)).toEqual(['review', 'recheck'])
     // The fix-gated guard is cleared so recheck can run on a human-pushed SHA (no fix ever runs here).
     expect(resolved.find(s => s.type === 'recheck')?.when).toBeUndefined()
+  })
+
+  it('lifts the recheck round cap for review+recheck so a human-pushed SHA is not skipped', () => {
+    writeRepoWorkflowStepTypes('humanbased-ai', 'xny-monorepo', ['review', 'recheck'], dir)
+    const recheck = resolveRepoWorkflowSteps('humanbased-ai', 'xny-monorepo', steps, dir)
+      .find(s => s.type === 'recheck')!
+    // identifyNextWorkflowStep hands the first human-pushed SHA `lastReview.round + 1`,
+    // so the declared max_rounds: 1 would have the runner skip every recheck.
+    expect(exceedsMaxRounds('recheck', 'recheck', 1, 2)).toBe(true)
+    expect(exceedsMaxRounds('recheck', 'recheck', recheck.max_rounds, 2)).toBe(false)
+    expect(exceedsMaxRounds('recheck', 'recheck', recheck.max_rounds, 9)).toBe(false)
+  })
+
+  it('keeps the recheck round cap when the depth includes fix', () => {
+    writeRepoWorkflowStepTypes('humanbased-ai', 'web', ['review', 'fix', 'recheck'], dir)
+    const recheck = resolveRepoWorkflowSteps('humanbased-ai', 'web', steps, dir)
+      .find(s => s.type === 'recheck')!
+    // The auto-fix cycle is still bounded by the operator's configured cap.
+    expect(recheck.max_rounds).toBe(1)
+    expect(exceedsMaxRounds('recheck', 'recheck', recheck.max_rounds, 2)).toBe(true)
+  })
+
+  it('identifies the recheck-no-fix depth that needs history-based routing', () => {
+    expect(isRecheckWithoutFix(['review', 'recheck'])).toBe(true)
+    expect(isRecheckWithoutFix(['review'])).toBe(false)
+    expect(isRecheckWithoutFix(['review', 'fix'])).toBe(false)
+    expect(isRecheckWithoutFix(['review', 'fix', 'recheck'])).toBe(false)
+    // No per-repo override — the global workflow, whatever its shape.
+    expect(isRecheckWithoutFix(undefined)).toBe(false)
   })
 
   it('falls back to the global workflow when the override file is malformed', () => {
