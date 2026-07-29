@@ -99,6 +99,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     await clonePRForReview({
       owner, repo, prNumber: number, baseRef: pr.base.ref,
       tmpDir, token, protocol: config.clone_protocol,
+      onProgress: line => { spinner2.text = `Cloning repo for review... ${line}` },
       onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref }),
     })
     spinner2.succeed('Repo ready')
