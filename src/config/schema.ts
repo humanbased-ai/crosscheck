@@ -254,6 +254,11 @@ export const LinearIdentityConfigSchema = z.object({
   // createAsUser base name in T1; the {actor} placeholder in the signature template.
   actor: z.string().default('crosscheck'),
   signature: z.string().default('🤖 {actor} · {product}'),
+  // Suffix the actor with the workflow step that produced the write, so a review,
+  // a recheck and a fix are distinguishable rather than all reading as one bot:
+  //   crosscheck/review, crosscheck/fix, crosscheck/recheck
+  // Set false for a single flat actor name.
+  per_step_actor: z.boolean().default(true),
 })
 
 export const LinearVerdictFilterSchema = z.enum(['APPROVE', 'NEEDS_WORK', 'BLOCK', 'UNKNOWN'])
