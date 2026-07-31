@@ -122,6 +122,61 @@ should appear authored by the app, not by you.
 
 ---
 
+## Verifying which identity you're on
+
+`crosscheck status` shows a **Linear** section whenever `linear.enabled` is true. It
+resolves the configured identity for real — minting a T1 token if that's the mode —
+and reports what a write would render as:
+
+```
+  Linear
+  ✓ auth mode             client_credentials
+    organization          Inductive Network
+  ✓ writes as             crosscheck/<step> (app actor)
+```
+
+On T0 it names the human account instead, because that's the state worth seeing:
+
+```
+  Linear
+  ✓ auth mode             api_key
+    organization          Inductive Network
+  ✗ writes as             yi@example.com (human — switch to client_credentials)
+```
+
+Run this before and after a cutover. The `✗` is the condition to eliminate.
+
+---
+
+## Deploying with an existing OAuth app
+
+If your organization already operates a gateway app, point the daemon at its
+credentials rather than creating a second app. Only the env var *names* go in config:
+
+```yaml
+linear:
+  enabled: true
+  auth:
+    mode: client_credentials
+    client_id_env: LINEAR_HB_AGENT_GATEWAY_CLIENT_ID
+    client_secret_env: LINEAR_HB_AGENT_GATEWAY_CLIENT_SECRET
+  identity:
+    actor: crosscheck
+    per_step_actor: true
+```
+
+Cutover sequence:
+
+1. Make the gateway credentials available to the **daemon's** environment — not just
+   your interactive shell. A systemd unit or launchd plist needs them explicitly.
+2. Run `crosscheck status` and confirm `writes as ... (app actor)`.
+3. Run one review end to end and confirm the Linear comment is authored by the app.
+4. Only then retire the old personal API key from the daemon's environment.
+
+Step 4 last, deliberately: until steps 2 and 3 pass, the old key is your rollback.
+
+---
+
 ## How crosscheck finds the issue
 
 Checked in order — branch name, then PR title, then PR body. Within each, an explicit
