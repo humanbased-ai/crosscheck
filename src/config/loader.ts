@@ -5,8 +5,9 @@ import { resolve, join, dirname } from 'path'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
 import yaml from 'js-yaml'
-import { ConfigSchema, type Config } from './schema.js'
+import { ConfigSchema, type Config, type LinearAuthConfig } from './schema.js'
 import { listUserOrgs } from '../github/client.js'
+import type { LinearCredentials } from '../linear/identity.js'
 
 const CONFIG_FILENAME = 'crosscheck.config.yml'
 
@@ -63,6 +64,20 @@ export function getGithubToken(): string {
     '  Option 1: run: gh auth login\n' +
     '  Option 2: set GITHUB_TOKEN in your shell profile or .env file'
   )
+}
+
+// Linear credentials. Env var NAMES come from config; the values are read here and
+// nowhere else, so no other module touches process.env for secrets.
+export function getLinearCredentials(auth: LinearAuthConfig): LinearCredentials {
+  const read = (name: string): string | undefined => {
+    const value = process.env[name]
+    return value && value.trim() ? value.trim() : undefined
+  }
+  return {
+    apiKey: read(auth.api_key_env),
+    clientId: read(auth.client_id_env),
+    clientSecret: read(auth.client_secret_env),
+  }
 }
 
 const SECRET_FILE = join(homedir(), '.crosscheck', 'webhook-secret')

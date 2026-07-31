@@ -8,7 +8,9 @@ import { createGithubClient, postReviewComment } from '../github/client.js'
 import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
-import { loadConfig, getGithubToken } from '../config/loader.js'
+import { loadConfig, getGithubToken, getLinearCredentials } from '../config/loader.js'
+import { resolveLinearAuth, type ResolvedLinearAuth } from '../linear/identity.js'
+import { notifyLinear } from '../linear/notify.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
@@ -39,6 +41,21 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   }
 
   const octokit = createGithubClient(token)
+
+  // Resolve Linear identity up front — before the expensive review — so a
+  // misconfigured T1 setup fails fast. A failed mint aborts the run; it must never
+  // silently fall back to an API key, which would re-attribute the write to a human.
+  let linearAuth: ResolvedLinearAuth | null = null
+  if (config.linear.enabled) {
+    try {
+      linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+      fileLog({ level: 'info', event: 'linear_auth_resolved', mode: linearAuth.mode, actor: linearAuth.actor })
+    } catch (err) {
+      logError({ command: 'review', phase: 'linear-auth' }, err)
+      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+      process.exit(1)
+    }
+  }
 
   const parsed = parsePRUrl(prUrl)
   if (!parsed) {
@@ -166,6 +183,32 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
+
+    if (linearAuth) {
+      const linear = await notifyLinear({
+        auth: linearAuth,
+        config: config.linear,
+        pr: { branch: pr.head.ref, title: pr.title, body: pr.body ?? '', url: prUrl, sha: pr.head.sha },
+        verdict,
+        reviewer,
+        origin,
+        model,
+        service: config.brand.service_name,
+      })
+      fileLog({
+        level: linear.status === 'failed' ? 'warn' : 'info',
+        event: 'linear_comment',
+        repo: `${owner}/${repo}`, pr: number,
+        status: linear.status, reason: linear.reason, issue: linear.identifier,
+      })
+      if (linear.status === 'posted') {
+        console.log(chalk.dim(`  linear: commented on ${linear.identifier} (${linear.url})`))
+      } else if (linear.status === 'failed') {
+        // The review itself succeeded and is already on the PR — surface the Linear
+        // failure without failing the run.
+        console.error(chalk.yellow(`  linear: write failed — ${linear.reason}`))
+      }
+    }
 
   } catch (err: unknown) {
     spinner2.fail()

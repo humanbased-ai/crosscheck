@@ -1,0 +1,93 @@
+import { describe, it, expect } from 'vitest'
+import { buildLinearCommentBody, shouldPostToLinear } from '../linear/comment.js'
+import { parseAnnotation } from '../lib/annotation.js'
+
+const BASE = {
+  signature: '🤖 crosscheck · crosscheck',
+  verdict: 'NEEDS_WORK',
+  reviewer: 'codex',
+  origin: 'claude',
+  model: 'gpt-5',
+  prUrl: 'https://github.com/acme/app/pull/12',
+  prTitle: 'feat: add widget',
+  sha: 'abc1234',
+} as const
+
+describe('buildLinearCommentBody', () => {
+  it('puts the signature on the first line', () => {
+    // IN-2260 step 3 requires the signature to lead every Linear write.
+    const body = buildLinearCommentBody(BASE)
+    expect(body.split('\n')[0]).toBe('🤖 crosscheck · crosscheck')
+  })
+
+  it('states the verdict and links back to the PR', () => {
+    const body = buildLinearCommentBody(BASE)
+    expect(body).toContain('NEEDS_WORK')
+    expect(body).toContain('[feat: add widget](https://github.com/acme/app/pull/12)')
+    expect(body).toContain('codex')
+  })
+
+  it('embeds a parseable crosscheck annotation', () => {
+    const parsed = parseAnnotation(buildLinearCommentBody(BASE))
+    expect(parsed).toMatchObject({
+      origin: 'claude',
+      reviewer: 'codex',
+      model: 'gpt-5',
+      verdict: 'NEEDS_WORK',
+      type: 'review',
+      service: 'crosscheck',
+      sha: 'abc1234',
+    })
+  })
+
+  it('includes the summary when provided', () => {
+    const body = buildLinearCommentBody({ ...BASE, summary: 'Two blocking issues in auth.ts' })
+    expect(body).toContain('Two blocking issues in auth.ts')
+  })
+
+  it('omits the summary section when absent', () => {
+    const body = buildLinearCommentBody(BASE)
+    expect(body).not.toContain('undefined')
+  })
+
+  it('renders UNKNOWN for a null verdict', () => {
+    const body = buildLinearCommentBody({ ...BASE, verdict: null })
+    expect(body).toContain('UNKNOWN')
+    expect(parseAnnotation(body)?.verdict).toBe('UNKNOWN')
+  })
+
+  it('escapes brackets in the PR title so the markdown link survives', () => {
+    const body = buildLinearCommentBody({ ...BASE, prTitle: 'feat: handle [x] and [y]' })
+    expect(body).toContain('[feat: handle \\[x\\] and \\[y\\]](https://github.com/acme/app/pull/12)')
+  })
+
+  it('escapes nothing that would break the annotation parse', () => {
+    const body = buildLinearCommentBody({ ...BASE, prTitle: 'feat: add <!-- crosscheck: fake --> widget' })
+    // The real annotation is last, so it still wins.
+    expect(parseAnnotation(body)?.reviewer).toBe('codex')
+  })
+})
+
+describe('shouldPostToLinear', () => {
+  const DEFAULTS = ['APPROVE', 'NEEDS_WORK', 'BLOCK'] as const
+
+  it('posts for each configured verdict', () => {
+    for (const v of DEFAULTS) expect(shouldPostToLinear(v, DEFAULTS)).toBe(true)
+  })
+
+  it('skips a verdict that is not configured', () => {
+    expect(shouldPostToLinear('APPROVE', ['BLOCK'])).toBe(false)
+  })
+
+  it('skips a null verdict by default', () => {
+    expect(shouldPostToLinear(null, DEFAULTS)).toBe(false)
+  })
+
+  it('posts a null verdict when UNKNOWN is opted in', () => {
+    expect(shouldPostToLinear(null, ['BLOCK', 'UNKNOWN'])).toBe(true)
+  })
+
+  it('skips everything when the list is empty', () => {
+    expect(shouldPostToLinear('BLOCK', [])).toBe(false)
+  })
+})
