@@ -60,9 +60,24 @@ describe('review model resolution', () => {
     expect(resolveCodexModel(quality('balanced'), vendor)).toBe('gpt-5.6-terra')
   })
 
-  it('uses default for Codex subscription auth', () => {
+  it('uses the CLI default for Codex subscription auth with no model configured', () => {
     expect(resolveCodexModel(quality('thorough'), codexVendor('subscription'))).toBe('default')
     expect(modelDisplayName('default')).toBeNull()
+  })
+
+  it('honors an explicit model under Codex subscription auth', () => {
+    expect(resolveCodexModel(quality('balanced'), codexVendor('subscription', 'gpt-5.6-sol'))).toBe('gpt-5.6-sol')
+  })
+
+  it('honors model_tiers under Codex subscription auth without the built-in fallback', () => {
+    const vendor = {
+      ...codexVendor('subscription'),
+      model_tiers: { thorough: 'custom-thorough-model' },
+    }
+    expect(resolveCodexModel(quality('thorough'), vendor)).toBe('custom-thorough-model')
+    // Tiers without an explicit entry stay on the CLI default — the built-in
+    // tier mapping applies to api-key auth only.
+    expect(resolveCodexModel(quality('balanced'), vendor)).toBe('default')
   })
 
   it('derives display names for current claude and codex models', () => {

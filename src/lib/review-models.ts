@@ -23,15 +23,21 @@ export const CODEX_TIER_MODELS_API: Record<QualityConfig['tier'], string> = revi
 
 export function resolveClaudeModel(quality: QualityConfig, vendor?: VendorConfig): string {
   // An explicit vendors.claude.model wins over the tier mapping. The claude CLI
-  // accepts --model under both subscription and api-key auth (unlike Codex), so
-  // we honor it regardless of auth instead of silently dropping it.
+  // accepts --model under both subscription and api-key auth, so we honor it
+  // regardless of auth instead of silently dropping it.
   if (vendor?.model) return vendor.model
   return CLAUDE_TIER_MODELS[quality.tier] ?? CLAUDE_TIER_MODELS.balanced
 }
 
 export function resolveCodexModel(quality: QualityConfig, vendor: CodexVendorConfig): string {
+  // An explicitly configured model wins under either auth — the codex CLI
+  // accepts -c model= with subscription (ChatGPT) auth too. Only the built-in
+  // tier mapping stays api-key-only: with nothing configured, subscription
+  // users keep the CLI's own default model.
+  const explicit = vendor.model || vendor.model_tiers?.[quality.tier]
+  if (explicit) return explicit
   if (vendor.auth !== 'api-key') return 'default'
-  return vendor.model || vendor.model_tiers?.[quality.tier] || CODEX_TIER_MODELS_API[quality.tier] || CODEX_TIER_MODELS_API.balanced
+  return CODEX_TIER_MODELS_API[quality.tier] || CODEX_TIER_MODELS_API.balanced
 }
 
 // Derives a display name from the regular claude model ID shape:
