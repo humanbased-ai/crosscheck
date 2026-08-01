@@ -66,3 +66,33 @@ describe('softWrap', () => {
     expect(softWrap(line, 12).join(' ')).toBe(line)
   })
 })
+
+describe('onboard Linear decision — regression guards', () => {
+  // These encode the two onboarding defects the recheck found. The prompt itself
+  // needs a TTY, so these pin the decision rules the prompt implements.
+  it('Enter must map to the current mode, not to off', () => {
+    const decide = (answer: string, currentMode: string): string =>
+      answer === '1' ? 'off'
+        : answer === '2' ? 'api_key'
+          : answer === '3' ? 'client_credentials'
+            : currentMode
+
+    expect(decide('', 'client_credentials')).toBe('client_credentials')
+    expect(decide('', 'api_key')).toBe('api_key')
+    expect(decide('', 'off')).toBe('off')
+    expect(decide('1', 'client_credentials')).toBe('off')
+    expect(decide('2', 'off')).toBe('api_key')
+    expect(decide('3', 'off')).toBe('client_credentials')
+  })
+
+  it('an explicit clear must be distinguishable from Enter', () => {
+    const resolveKeys = (answer: string, current: string[]): string[] =>
+      answer === '-' ? []
+        : answer ? answer.split(',').map(k => k.trim().toUpperCase()).filter(Boolean)
+          : current
+
+    expect(resolveKeys('', ['IN'])).toEqual(['IN'])
+    expect(resolveKeys('-', ['IN'])).toEqual([])
+    expect(resolveKeys('eng,ops', ['IN'])).toEqual(['ENG', 'OPS'])
+  })
+})

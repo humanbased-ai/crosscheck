@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command, Option, InvalidArgumentError } from 'commander'
+import chalk from 'chalk'
 import { parsePort } from './lib/port.js'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -17,6 +18,7 @@ import { runIssue } from './commands/issue.js'
 import { runRunSpec, runRecheckSpec, runFixSpec, runResolveSpec, type RunSpecOpts } from './commands/run.js'
 import { runDetectStep } from './commands/detect-step.js'
 import { runLinearTest } from './commands/linear-test.js'
+import { isLinearConfigError } from './linear/identity.js'
 import { runScan } from './commands/scan.js'
 import { runKickass } from './commands/kickass.js'
 
@@ -213,8 +215,14 @@ program
   .option('--branch <name>', 'resolve the issue from a branch name instead of naming it')
   .option('--title <text>', 'resolve the issue from a PR title instead of naming it')
   .option('--verdict <verdict>', 'verdict to preview (APPROVE, NEEDS_WORK, BLOCK)')
-  .action((issue: string | undefined, opts: { config?: string; branch?: string; title?: string; verdict?: string }) =>
-    void runLinearTest(issue, opts))
+  .action((issue: string | undefined, opts: { config?: string; branch?: string; title?: string; verdict?: string }) => {
+    // `void` on its own leaves a rejection unhandled — the process would print a
+    // Node warning and exit 0 instead of reporting the failure.
+    runLinearTest(issue, opts).catch((err: unknown) => {
+      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+      process.exit(isLinearConfigError(err) ? 1 : 2)
+    })
+  })
 
 program
   .command('scan')

@@ -374,6 +374,8 @@ export async function promptLinear(
 
   if (opts.yes) return { mode: currentMode, teamKeys: current?.teamKeys ?? [] }
 
+  const currentChoice = currentMode === 'client_credentials' ? '3' : currentMode === 'api_key' ? '2' : '1'
+
   console.log(chalk.dim('  Post the review verdict onto the Linear issue a PR belongs to.\n'))
   console.log('  [1] off           — leave Linear alone')
   console.log(`  [2] api key       — works immediately. Comments post under ${chalk.dim('your own Linear account')}`)
@@ -382,9 +384,14 @@ export async function promptLinear(
   console.log(chalk.dim(`\n  Current: ${currentMode}`))
   console.log()
 
-  const answer = (await ask('  Choice [1]: ')).trim()
+  // Enter keeps whatever is configured. Defaulting to `off` meant a re-run where
+  // the user just pressed enter silently disabled a working integration.
+  const answer = (await ask(`  Choice [${currentChoice}]: `)).trim()
   const mode: LinearDecision['mode'] =
-    answer === '2' ? 'api_key' : answer === '3' ? 'client_credentials' : 'off'
+    answer === '1' ? 'off'
+      : answer === '2' ? 'api_key'
+        : answer === '3' ? 'client_credentials'
+          : currentMode
 
   if (mode === 'off') return { mode, teamKeys: [] }
 
@@ -640,7 +647,9 @@ export function applyOnboardConfig(
     if (linear.mode !== 'off') {
       if (!linearObj.auth || typeof linearObj.auth !== 'object') linearObj.auth = {}
       ;(linearObj.auth as Record<string, unknown>).mode = linear.mode
-      if (linear.teamKeys.length > 0) linearObj.team_keys = linear.teamKeys
+      // Write the selection even when empty — otherwise the `-` clear silently
+      // leaves the previous keys in the file and nothing appears to happen.
+      linearObj.team_keys = linear.teamKeys
     }
   }
 
