@@ -1178,6 +1178,7 @@ linear:                       # write review verdicts back to a Linear issue (op
     actor: crosscheck
     signature: "🤖 {actor} · {model}"
     icon_url: ""
+    per_step_actor: true      # crosscheck/review vs crosscheck/fix in Linear
   comment_on:                 # verdicts that get mirrored
     - NEEDS_WORK
     - BLOCK
