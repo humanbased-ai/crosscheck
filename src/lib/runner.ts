@@ -72,7 +72,17 @@ export function getEffectiveStepType(stepType: string, isRecheckRun: boolean): s
 // base ref with `base_branch_fetch_skipped`), fall back to the full-history
 // count rather than returning 0. Over-counting can stop fix early; returning 0
 // would silently disable the cap and let runaway fix loops keep pushing.
-export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): number {
+export interface CrosscheckCommitCount {
+  count: number
+  /**
+   * false when origin/<base> was unavailable and the count covers the whole
+   * history rather than just this PR. Such a count is an upper bound, usually a
+   * wild over-count, and must be reported as such rather than as a real limit hit.
+   */
+  scoped: boolean
+}
+
+export function countCrosscheckCommitsForPRDetailed(tmpDir: string, baseRef: string): CrosscheckCommitCount {
   const runLog = (args: string[]): string =>
     execFileSync(
       'git',
@@ -82,17 +92,21 @@ export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): nu
   const count = (out: string): number => out.split('\n').filter(l => l.includes('[crosscheck]')).length
 
   try {
-    return count(runLog([`origin/${baseRef}..HEAD`]))
+    return { count: count(runLog([`origin/${baseRef}..HEAD`])), scoped: true }
   } catch {
     // Scoped range unavailable — fall back to full history so the cap still
-    // applies. May over-count when the branch has prior merged crosscheck
-    // commits, but that's preferable to bypassing the safety guard.
+    // applies. Over-counts when the branch has prior merged crosscheck commits,
+    // but that's preferable to bypassing the safety guard.
     try {
-      return count(runLog([]))
+      return { count: count(runLog([])), scoped: false }
     } catch {
-      return 0
+      return { count: 0, scoped: false }
     }
   }
+}
+
+export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): number {
+  return countCrosscheckCommitsForPRDetailed(tmpDir, baseRef).count
 }
 
 // Subset of WorkflowContext + accumulators the workflow_complete event needs.
@@ -885,12 +899,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // Scope to commits ahead of base so long-lived branches (e.g. staging)
       // don't count [crosscheck] commits from previously merged PRs.
       // Crazy/halfcrazy mode doubles the cap since it deliberately loops.
-      const existingCount = countCrosscheckCommitsForPR(tmpDir, pr.base.ref)
+      const commitCount = countCrosscheckCommitsForPRDetailed(tmpDir, pr.base.ref)
       const effectiveCommitLimit = ctx.roundMode ? MAX_CROSSCHECK_COMMITS * 2 : MAX_CROSSCHECK_COMMITS
 
-      if (existingCount >= effectiveCommitLimit) {
-        log(chalk.yellow(`⚠  PR #${prNumber}: ${effectiveCommitLimit} [crosscheck] commits already — stopping auto-fix`))
-        skipFix('commit_limit_reached')
+      if (commitCount.count >= effectiveCommitLimit) {
+        // Report the count, not the limit. An unscoped count means origin/<base>
+        // was missing, so this is an over-count from whole-repo history rather
+        // than a real cap hit — say so, or the next person debugs the wrong thing.
+        log(commitCount.scoped
+          ? chalk.yellow(`⚠  PR #${prNumber}: ${commitCount.count}/${effectiveCommitLimit} [crosscheck] commits already — stopping auto-fix`)
+          : chalk.yellow(`⚠  PR #${prNumber}: cannot scope [crosscheck] commit count (origin/${pr.base.ref} missing; ${commitCount.count} across all history) — stopping auto-fix`))
+        skipFix(commitCount.scoped ? 'commit_limit_reached' : 'commit_count_unscoped')
         continue
       }
 
@@ -1173,10 +1192,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
       if (isFork) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
 
-      const existingCount = countCrosscheckCommitsForPR(tmpDir, pr.base.ref)
-      if (existingCount >= MAX_CROSSCHECK_COMMITS) {
+      const crCommitCount = countCrosscheckCommitsForPRDetailed(tmpDir, pr.base.ref)
+      if (crCommitCount.count >= MAX_CROSSCHECK_COMMITS) {
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
-        log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping conflict-resolve`))
+        log(crCommitCount.scoped
+          ? chalk.yellow(`⚠  PR #${prNumber}: ${crCommitCount.count}/${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping conflict-resolve`)
+          : chalk.yellow(`⚠  PR #${prNumber}: cannot scope [crosscheck] commit count (origin/${pr.base.ref} missing) — stopping conflict-resolve`))
         skipConflictResolve('commit_limit_reached')
         continue
       }
