@@ -22,16 +22,34 @@ export interface PRMetadata {
   body?: string | null
 }
 
-// Key shape matches parseTicketId: 2+ leading letters, then digits.
-//
-// The leading group pins the host to exactly linear.app. Without it the fragment
-// also matches `notlinear.app/acme/issue/IN-1`, which would let an arbitrary
-// domain bypass the team_keys gate and direct a comment at any issue.
-const URL_PATTERN = /(?:^|[^A-Za-z0-9.-])linear\.app\/[^/\s]+\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)/i
+// Issue path inside a linear.app URL. Key shape matches parseTicketId.
+const ISSUE_PATH = /\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)/i
+
+// Absolute URLs are parsed and their hostname compared exactly. A boundary check
+// on the text is not enough: `https://evil.example/linear.app/acme/issue/IN-1`
+// satisfies any "character before linear.app" rule while pointing somewhere else
+// entirely, and would bypass the team_keys gate.
+const ABSOLUTE_URL = /\bhttps?:\/\/[^\s<>()"'`]+/gi
+
+// Scheme-less form, e.g. "see linear.app/acme/issue/IN-7". Anchored to the start of
+// the field or whitespace so `notlinear.app/...` cannot match.
+const BARE_URL = /(?:^|\s)linear\.app\/[^/\s]+\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)/i
 
 function fromUrl(text: string): TicketRef | null {
-  const match = text.match(URL_PATTERN)
-  return match ? parseTicketId(match[1]) : null
+  for (const match of text.matchAll(ABSOLUTE_URL)) {
+    let parsed: URL
+    try {
+      parsed = new URL(match[0])
+    } catch {
+      continue
+    }
+    if (parsed.hostname.toLowerCase() !== 'linear.app') continue
+    const issue = parsed.pathname.match(ISSUE_PATH)
+    if (issue) return parseTicketId(issue[1])
+  }
+
+  const bare = text.match(BARE_URL)
+  return bare ? parseTicketId(bare[1]) : null
 }
 
 function matchField(text: string, teamKeys: readonly string[]): TicketRef | null {
