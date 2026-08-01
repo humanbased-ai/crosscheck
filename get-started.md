@@ -1201,10 +1201,10 @@ linear:                       # write review verdicts back to a Linear issue (op
     scopes: "read,write"      # comma-separated; initiative:* are separate scopes
   identity:
     actor: crosscheck
-    signature: "🤖 {actor} · {product}"
+    signature: "🤖 {actor} · {model}"   # {actor} {product} {model} {reviewer} {icon}
+    icon_url: ""              # rendered where {icon} appears; app avatar is preferred
     per_step_actor: true      # crosscheck/review vs crosscheck/fix in Linear
-  comment_on:                 # verdicts mirrored to the issue
-    - APPROVE
+  comment_on:                 # verdicts mirrored to the issue (default omits APPROVE)
     - NEEDS_WORK
     - BLOCK
   team_keys: []               # e.g. [IN] — required to match bare refs like IN-42
