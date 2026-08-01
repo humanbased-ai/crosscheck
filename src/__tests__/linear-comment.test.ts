@@ -118,3 +118,33 @@ describe('workflow step metadata', () => {
     expect(parsed?.sha).toBe(BASE.sha)
   })
 })
+
+describe('verdict normalisation', () => {
+  // parseVerdict yields "NEEDS WORK"; config and the annotation use "NEEDS_WORK".
+  // Comparing raw dropped every NEEDS WORK verdict on the default config.
+  it('matches the spaced verdict against the underscored filter', () => {
+    expect(shouldPostToLinear('NEEDS WORK', ['NEEDS_WORK', 'BLOCK'])).toBe(true)
+  })
+
+  it('matches the underscored verdict too', () => {
+    expect(shouldPostToLinear('NEEDS_WORK', ['NEEDS_WORK', 'BLOCK'])).toBe(true)
+  })
+
+  it('tolerates a spaced filter entry', () => {
+    expect(shouldPostToLinear('NEEDS_WORK', ['NEEDS WORK'])).toBe(true)
+  })
+
+  it('is case insensitive', () => {
+    expect(shouldPostToLinear('needs work', ['NEEDS_WORK'])).toBe(true)
+  })
+
+  it('still excludes a verdict that is genuinely not configured', () => {
+    expect(shouldPostToLinear('NEEDS WORK', ['BLOCK'])).toBe(false)
+    expect(shouldPostToLinear('APPROVE', ['NEEDS_WORK', 'BLOCK'])).toBe(false)
+  })
+
+  it('still maps null to UNKNOWN', () => {
+    expect(shouldPostToLinear(null, ['UNKNOWN'])).toBe(true)
+    expect(shouldPostToLinear(null, ['NEEDS_WORK', 'BLOCK'])).toBe(false)
+  })
+})

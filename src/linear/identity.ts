@@ -56,6 +56,21 @@ export interface ResolveOptions extends MintOptions {
 
 const DEFAULT_PRODUCT = 'crosscheck'
 
+// Misconfiguration (missing env var, rejected credentials) is a user error, so it
+// must surface as exit 1 — the CLI contract reserves 2 for unexpected failures.
+// commands/review.ts already exits 1 here; the workflow path has to agree.
+export class LinearConfigError extends Error {
+  readonly userError = true
+  constructor(message: string) {
+    super(message)
+    this.name = 'LinearConfigError'
+  }
+}
+
+export function isLinearConfigError(err: unknown): boolean {
+  return err instanceof LinearConfigError
+}
+
 export function renderSignature(template: string, actor: string, product: string): string {
   return template.replaceAll('{actor}', actor).replaceAll('{product}', product)
 }
@@ -127,7 +142,7 @@ export async function resolveLinearAuth(
     if (!creds.clientSecret) missing.push(config.auth.client_secret_env)
     if (missing.length > 0) {
       // Abort rather than fall back — see the module header.
-      throw new Error(
+      throw new LinearConfigError(
         `Linear auth mode is client_credentials but ${missing.join(' and ')} ` +
         `${missing.length > 1 ? 'are' : 'is'} not set. ` +
         'Set them, or switch linear.auth.mode to api_key.',
@@ -141,7 +156,7 @@ export async function resolveLinearAuth(
         opts,
       )
     } catch (err: unknown) {
-      throw new Error(
+      throw new LinearConfigError(
         `Linear client_credentials token mint failed — aborting rather than falling back ` +
         `to an API key (that would attribute agent writes to a human). ` +
         `${err instanceof Error ? err.message : String(err)}`,
@@ -155,7 +170,7 @@ export async function resolveLinearAuth(
   }
 
   if (!creds.apiKey) {
-    throw new Error(
+    throw new LinearConfigError(
       `Linear is enabled but ${config.auth.api_key_env} is not set. ` +
       `Set it, or disable the linear block in your config.`,
     )
