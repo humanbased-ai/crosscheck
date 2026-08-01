@@ -269,3 +269,24 @@ describe('the identifier must be a whole path segment', () => {
     })
   }
 })
+
+describe('a malformed candidate does not hide a valid one', () => {
+  it('skips a malformed scheme-less URL and finds the later valid one', () => {
+    const body = 'linear.app/acme/issue/IN-bad and then linear.app/acme/issue/IN-42'
+    expect(extractLinearRef({ body }, [])?.id).toBe('IN-42')
+  })
+
+  it('skips a malformed absolute URL and finds the later valid one', () => {
+    const body = 'https://linear.app/acme/issue/IN-bad https://linear.app/acme/issue/IN-42'
+    expect(extractLinearRef({ body }, [])?.id).toBe('IN-42')
+  })
+
+  it('returns null when every candidate is malformed', () => {
+    expect(extractLinearRef({ body: 'linear.app/a/issue/IN-bad linear.app/b/issue/X' }, [])).toBeNull()
+  })
+
+  it('keeps the workspace of the candidate that actually resolved', () => {
+    const body = 'linear.app/wrong/issue/IN-bad linear.app/right/issue/IN-42'
+    expect(extractLinearRef({ body }, [])?.workspace).toBe('right')
+  })
+})

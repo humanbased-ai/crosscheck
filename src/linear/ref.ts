@@ -30,7 +30,7 @@ export interface PRMetadata {
 // `IN-123`. Take the segment, strip trailing sentence punctuation, and require
 // parseTicketId to match it whole.
 const ISSUE_SEGMENTS = /^\/([^/]+)\/issue\/([^/]+)/i
-const BARE_URL = /(?:^|\s)linear\.app\/([^/\s]+)\/issue\/([^/\s]+)/i
+const BARE_URL = /(?:^|\s)linear\.app\/([^/\s]+)\/issue\/([^/\s]+)/gi
 
 // Absolute URLs are parsed and their hostname compared exactly. A boundary check
 // on the text is not enough: `https://evil.example/linear.app/acme/issue/IN-1`
@@ -57,10 +57,13 @@ function fromUrl(text: string): LinearIssueRef | null {
     if (ref) return withWorkspace(ref, segments[1])
   }
 
-  const bare = text.match(BARE_URL)
-  if (!bare) return null
-  const ref = parseTicketId(stripTrailingPunctuation(bare[2]))
-  return ref ? withWorkspace(ref, bare[1]) : null
+  // Iterate, like the absolute-URL path above: a malformed candidate earlier in
+  // the text must not stop a valid one later from resolving.
+  for (const bare of text.matchAll(BARE_URL)) {
+    const ref = parseTicketId(stripTrailingPunctuation(bare[2]))
+    if (ref) return withWorkspace(ref, bare[1])
+  }
+  return null
 }
 
 // An explicit URL names a workspace. Identifiers are only unique within one, so

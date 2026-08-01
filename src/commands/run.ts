@@ -493,7 +493,13 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       // Only when the selected workflow can actually write a verdict — the public
       // `fix` and `resolve` aliases run steps that never call notifyLinear, and a
       // missing credential must not abort work that was never going to write.
-      const linearAuth = !opts.dryRun && linearWritePossible(config.linear, filteredSteps)
+      // --crazy / --halfcrazy synthesise a recheck after a fix, so a fix-only
+      // selection can still reach a verdict write. Resolving once here keeps the
+      // one-token-per-run contract; leaving it null made every loop round mint its
+      // own, and a late outage could abort after fixes had already been pushed.
+      const roundModeCanWrite = opts.roundMode !== undefined
+      const linearAuth = !opts.dryRun
+        && linearWritePossible(config.linear, roundModeCanWrite ? undefined : filteredSteps)
         ? await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
         : null
 
