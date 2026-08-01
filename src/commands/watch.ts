@@ -213,7 +213,10 @@ export async function runWatch(opts: WatchOpts = {}) {
   // board. Fail loudly at boot instead, the way the run path fails before its
   // clone. The token is discarded — per-event resolution mints a fresh one, since
   // app tokens outlive neither a long daemon run nor a rotation.
-  if (config.linear.enabled) {
+  // Same gate as the run and per-event paths: a daemon whose configured workflow
+  // is fix/conflict-resolve only can never call notifyLinear, so a missing
+  // credential must not stop it booting.
+  if (config.linear.enabled && canWriteVerdict(loadWorkflow(process.cwd()))) {
     try {
       const preflight = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
       console.log(chalk.dim(`  linear: ${preflight.mode} — writes as ${preflight.actor}`))
@@ -500,6 +503,27 @@ export async function runWatch(opts: WatchOpts = {}) {
       let boardAdded = false
 
       try {
+        // Board first, so any failure below is visible rather than swallowed by the
+        // enclosing catch (which only calls logError — a no-op when file logging is
+        // off). Then auth, then the clone: during an outage a long-running watcher
+        // would otherwise pay for a full clone on every event before rejecting it.
+        board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
+        boardAdded = true
+
+        // Only workflows that can write a verdict need an identity — the fix and
+        // resolve paths never call notifyLinear.
+        let linearAuth: ResolvedLinearAuth | null = null
+        if (effectiveConfig.linear.enabled && canWriteVerdict(resolvedSteps)) {
+          try {
+            linearAuth = await resolveLinearAuth(effectiveConfig.linear, getLinearCredentials(effectiveConfig.linear.auth))
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err)
+            board.failPR(key, `linear identity unavailable: ${message}`)
+            fileLog({ level: 'error', event: 'linear_auth_failed', repo: `${owner}/${repoName}`, pr: prNumber, reason: message })
+            throw err
+          }
+        }
+
         await clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef,
           tmpDir, token, protocol: config.clone_protocol,
@@ -538,31 +562,12 @@ export async function runWatch(opts: WatchOpts = {}) {
             logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'no_diff_comment' }, err)
           }
           await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+          // The PR is on the board from before the clone, so close its slot rather
+          // than leaving a row that never resolves.
+          board.completePR(key, { elapsedMs: Date.now() - reviewStart, url: `https://github.com/${owner}/${repoName}/pull/${prNumber}` })
           return
         }
 
-        board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
-        boardAdded = true
-
-        // Registered on the board first so a failure here is visible, then resolved
-        // before any further expensive work. The failure is surfaced explicitly:
-        // the enclosing catch only calls logError, a no-op when file logging is
-        // off, so relying on it dropped events silently.
-        //
-        // Only the steps that can write a verdict need an identity — `crosscheck
-        // fix` and `crosscheck resolve` never call notifyLinear, and an outage
-        // must not abort work that was never going to write.
-        let linearAuth: ResolvedLinearAuth | null = null
-        if (effectiveConfig.linear.enabled && canWriteVerdict(resolvedSteps)) {
-          try {
-            linearAuth = await resolveLinearAuth(effectiveConfig.linear, getLinearCredentials(effectiveConfig.linear.auth))
-          } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err)
-            board.failPR(key, `linear identity unavailable: ${message}`)
-            fileLog({ level: 'error', event: 'linear_auth_failed', repo: `${owner}/${repoName}`, pr: prNumber, reason: message })
-            throw err
-          }
-        }
 
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })
