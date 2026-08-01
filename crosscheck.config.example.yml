@@ -260,6 +260,10 @@ logs:
 #   identity:
 #     actor: crosscheck                 # createAsUser name in T1
 #     signature: "🤖 {actor} · {product}"   # first line of every Linear write
+#     # Suffix the actor with the step that produced the write, so a review, a fix
+#     # and a recheck are distinguishable: crosscheck/review, crosscheck/fix, ...
+#     # Set false for one flat actor name.
+#     per_step_actor: true
 #   comment_on:                         # which verdicts get mirrored
 #     - APPROVE
 #     - NEEDS_WORK

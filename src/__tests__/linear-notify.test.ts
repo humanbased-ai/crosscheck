@@ -9,6 +9,8 @@ const AUTH: ResolvedLinearAuth = {
   bearer: true,
   actor: 'crosscheck',
   signature: '🤖 crosscheck · crosscheck',
+  signatureTemplate: '🤖 {actor} · {product}',
+  product: 'crosscheck',
   createAsUser: 'crosscheck',
 }
 

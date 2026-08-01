@@ -9,7 +9,7 @@ import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detec
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getLinearCredentials } from '../config/loader.js'
-import { resolveLinearAuth, type ResolvedLinearAuth } from '../linear/identity.js'
+import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
@@ -186,7 +186,9 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     if (linearAuth) {
       const linear = await notifyLinear({
-        auth: linearAuth,
+        // Attribute to crosscheck/review rather than a flat crosscheck, so this
+        // write is distinguishable from a fix or a recheck.
+        auth: config.linear.identity.per_step_actor ? withWorker(linearAuth, 'review') : linearAuth,
         config: config.linear,
         pr: { branch: pr.head.ref, title: pr.title, body: pr.body ?? '', url: prUrl, sha: pr.head.sha },
         verdict,

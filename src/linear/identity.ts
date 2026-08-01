@@ -40,6 +40,9 @@ export interface ResolvedLinearAuth {
   signature: string
   /** Set in T1 only — Linear attributes the write to this display name. */
   createAsUser?: string
+  /** Retained so withWorker() can re-render the signature for a derived actor. */
+  signatureTemplate: string
+  product: string
 }
 
 export interface MintOptions {
@@ -160,7 +163,10 @@ export async function resolveLinearAuth(
       )
     }
 
-    return { mode: 'client_credentials', token, bearer: true, actor, signature, createAsUser: actor }
+    return {
+      mode: 'client_credentials', token, bearer: true, actor, signature,
+      createAsUser: actor, signatureTemplate: template, product,
+    }
   }
 
   if (!creds.apiKey) {
@@ -170,5 +176,30 @@ export async function resolveLinearAuth(
     )
   }
 
-  return { mode: 'api_key', token: creds.apiKey, bearer: false, actor, signature }
+  return {
+    mode: 'api_key', token: creds.apiKey, bearer: false, actor, signature,
+    signatureTemplate: template, product,
+  }
+}
+
+// Derives a step-scoped identity: `crosscheck` → `crosscheck/review`.
+//
+// The epic calls for per-worker display names (its example is `symphony/worker-3`)
+// so a fleet of agents does not collapse into one indistinguishable bot. crosscheck's
+// natural axis is the workflow step that produced the write.
+//
+// T1 re-points createAsUser, which is what Linear actually renders. T0 has no
+// createAsUser, so the suffix only reaches the signature line — still an improvement,
+// since that is T0's whole attribution mechanism.
+export function withWorker(auth: ResolvedLinearAuth, worker: string): ResolvedLinearAuth {
+  const trimmed = worker.trim()
+  if (!trimmed) return auth
+
+  const actor = `${auth.actor}/${trimmed}`
+  return {
+    ...auth,
+    actor,
+    signature: renderSignature(auth.signatureTemplate, actor, auth.product),
+    ...(auth.createAsUser !== undefined && { createAsUser: actor }),
+  }
 }

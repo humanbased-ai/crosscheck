@@ -13,7 +13,7 @@ import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
-import { resolveLinearAuth, type ResolvedLinearAuth } from '../linear/identity.js'
+import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
 import { shouldPostToLinear } from '../linear/comment.js'
 import { getLinearCredentials } from '../config/loader.js'
@@ -785,8 +785,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         // commands/review.ts are the exception, not the rule.
         if (linearAuth && shouldPostToLinear(verdict ?? null, config.linear.comment_on)) {
           {
+            // Attribute to crosscheck/review, /fix, /recheck rather than a flat actor.
+            const stepAuth = config.linear.identity.per_step_actor ? withWorker(linearAuth, effectiveType) : linearAuth
             const linearResult = await notifyLinear({
-              auth: linearAuth,
+              auth: stepAuth,
               config: config.linear,
               pr: { branch: pr.head.ref, title: pr.title, body: pr.body ?? '', url: `https://${commentUrl}`, sha: annotationSha },
               verdict: verdict ?? null,

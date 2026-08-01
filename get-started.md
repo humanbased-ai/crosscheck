@@ -1177,6 +1177,7 @@ linear:                       # write review verdicts back to a Linear issue (op
   identity:
     actor: crosscheck
     signature: "🤖 {actor} · {product}"
+    per_step_actor: true      # crosscheck/review vs crosscheck/fix in Linear
   comment_on:                 # verdicts mirrored to the issue
     - APPROVE
     - NEEDS_WORK

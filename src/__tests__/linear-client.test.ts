@@ -9,6 +9,8 @@ const API_KEY_AUTH: ResolvedLinearAuth = {
   bearer: false,
   actor: 'crosscheck',
   signature: '🤖 crosscheck · crosscheck',
+  signatureTemplate: '🤖 {actor} · {product}',
+  product: 'crosscheck',
 }
 
 const APP_AUTH: ResolvedLinearAuth = {
@@ -17,6 +19,8 @@ const APP_AUTH: ResolvedLinearAuth = {
   bearer: true,
   actor: 'crosscheck',
   signature: '🤖 crosscheck · crosscheck',
+  signatureTemplate: '🤖 {actor} · {product}',
+  product: 'crosscheck',
   createAsUser: 'crosscheck',
 }
 
