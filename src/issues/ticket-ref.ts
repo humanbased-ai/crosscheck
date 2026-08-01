@@ -11,13 +11,14 @@ export interface TicketRef {
   id: string
 }
 
-// A tracker identifier: 2+ leading letters, then digits — the shape Linear and
-// Jira both use. Matched case-insensitively; the source is upper-cased first so
-// a branch like `claude/in-2017-slug` still yields `IN-2017`.
-const TICKET_PATTERN = /\b([A-Z][A-Z0-9]{1,9})-(\d+)\b/g
+// A tracker identifier: 1-10 key characters, then digits. Linear permits
+// one-character team keys (X-42), so requiring two silently skipped those
+// workspaces entirely. Matched case-insensitively; the source is upper-cased
+// first so a branch like `claude/in-2017-slug` still yields `IN-2017`.
+const TICKET_PATTERN = /\b([A-Z][A-Z0-9]{0,9})-(\d+)\b/g
 
 export function parseTicketId(id: string): TicketRef | null {
-  const m = /^([A-Za-z][A-Za-z0-9]{1,9})-(\d+)$/.exec(id.trim())
+  const m = /^([A-Za-z][A-Za-z0-9]{0,9})-(\d+)$/.exec(id.trim())
   if (!m) return null
   const key = m[1].toUpperCase()
   return { key, number: Number(m[2]), id: `${key}-${m[2]}` }

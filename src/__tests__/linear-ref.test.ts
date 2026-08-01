@@ -290,3 +290,37 @@ describe('a malformed candidate does not hide a valid one', () => {
     expect(extractLinearRef({ body }, [])?.workspace).toBe('right')
   })
 })
+
+describe('punctuated scheme-less URLs keep their workspace', () => {
+  // Regression: `(linear.app/...)` missed the URL matcher, fell through to the
+  // bare-ID extractor, and came back without a workspace — silently losing the
+  // workspace-mismatch protection that an explicit URL is supposed to carry.
+  const wrapped = ['(linear.app/acme/issue/IN-42)', '[linear.app/acme/issue/IN-42]', '"linear.app/acme/issue/IN-42"', 'see: linear.app/acme/issue/IN-42']
+
+  for (const body of wrapped) {
+    it(`keeps the workspace for ${JSON.stringify(body.slice(0, 32))}`, () => {
+      const ref = extractLinearRef({ body }, ['IN'])
+      expect(ref?.id).toBe('IN-42')
+      expect(ref?.workspace).toBe('acme')
+    })
+  }
+
+  it('still refuses a lookalike host after punctuation', () => {
+    expect(extractLinearRef({ body: '(notlinear.app/acme/issue/IN-42)' }, [])).toBeNull()
+  })
+})
+
+describe('one-character team keys', () => {
+  // Linear permits them; requiring two silently skipped those workspaces.
+  it('resolves a one-character key from a URL', () => {
+    expect(extractLinearRef({ body: 'https://linear.app/acme/issue/X-42' }, [])?.id).toBe('X-42')
+  })
+
+  it('resolves a one-character key as a configured bare ref', () => {
+    expect(extractLinearRef({ branch: 'feat/x-42-thing' }, ['X'])?.id).toBe('X-42')
+  })
+
+  it('still rejects a bare ref whose key is not configured', () => {
+    expect(extractLinearRef({ branch: 'feat/y-42-thing' }, ['X'])).toBeNull()
+  })
+})

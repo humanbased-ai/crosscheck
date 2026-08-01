@@ -30,7 +30,11 @@ export interface PRMetadata {
 // `IN-123`. Take the segment, strip trailing sentence punctuation, and require
 // parseTicketId to match it whole.
 const ISSUE_SEGMENTS = /^\/([^/]+)\/issue\/([^/]+)/i
-const BARE_URL = /(?:^|\s)linear\.app\/([^/\s]+)\/issue\/([^/\s]+)/gi
+// Leading punctuation is safe to allow — but only characters that cannot be part
+// of a hostname, so `notlinear.app` still cannot match. Missing `(linear.app/...)`
+// made it fall through to the bare-ID extractor, which returns no workspace and
+// so silently loses the workspace-mismatch protection.
+const BARE_URL = /(?:^|[\s([{<"'`,;])linear\.app\/([^/\s]+)\/issue\/([^/\s]+)/gi
 
 // Absolute URLs are parsed and their hostname compared exactly. A boundary check
 // on the text is not enough: `https://evil.example/linear.app/acme/issue/IN-1`
