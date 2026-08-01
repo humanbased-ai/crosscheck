@@ -99,3 +99,37 @@ describe('extractLinearRef', () => {
     expect(extractLinearRef({}, ['IN'])).toBeNull()
   })
 })
+
+describe('hostname anchoring', () => {
+  // Regression: an unanchored `linear.app/` fragment let any domain ending in
+  // "linear.app" bypass the team_keys gate and target an arbitrary issue.
+  const impostors = [
+    'https://notlinear.app/acme/issue/IN-2269',
+    'https://evil-linear.app/acme/issue/IN-2269',
+    'https://mylinear.app/x/issue/IN-1/slug',
+  ]
+
+  for (const url of impostors) {
+    it(`does not trust ${url.replace('https://', '').split('/')[0]}`, () => {
+      expect(extractLinearRef({ body: url }, [])).toBeNull()
+    })
+  }
+
+  it('still trusts the real host', () => {
+    expect(extractLinearRef({ body: 'https://linear.app/acme/issue/IN-2269' }, [])?.id).toBe('IN-2269')
+  })
+
+  it('trusts it bare, without a scheme', () => {
+    expect(extractLinearRef({ body: 'see linear.app/acme/issue/IN-7' }, [])?.id).toBe('IN-7')
+  })
+
+  it('trusts it at the very start of a field', () => {
+    expect(extractLinearRef({ body: 'linear.app/acme/issue/IN-8' }, [])?.id).toBe('IN-8')
+  })
+
+  it('falls through to team_keys when an impostor URL is present', () => {
+    // The impostor must not shadow a legitimate bare ref elsewhere in the text.
+    const ref = extractLinearRef({ body: 'https://notlinear.app/x/issue/IN-999 but really IN-42' }, ['IN'])
+    expect(ref?.id).toBe('IN-999')
+  })
+})

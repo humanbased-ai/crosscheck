@@ -13,6 +13,10 @@ import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
+import { resolveLinearAuth, type ResolvedLinearAuth } from '../linear/identity.js'
+import { notifyLinear } from '../linear/notify.js'
+import { shouldPostToLinear } from '../linear/comment.js'
+import { getLinearCredentials } from '../config/loader.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
@@ -524,6 +528,27 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // can iterate the same list and release these shas if SIGINT/SIGTERM fires
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
+
+  // Linear write-back. Resolved once per workflow and only when a verdict actually
+  // needs posting, so a run that never reaches Linear pays nothing. A resolution
+  // failure disables write-back for the run and is logged — it must not fail a
+  // review that already succeeded and posted to GitHub.
+  let linearAuth: ResolvedLinearAuth | null = null
+  let linearAuthAttempted = false
+  const resolveLinearForRun = async (): Promise<ResolvedLinearAuth | null> => {
+    if (linearAuthAttempted) return linearAuth
+    linearAuthAttempted = true
+    try {
+      linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+      fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
+    } catch (err: unknown) {
+      linearAuth = null
+      fileLog({ level: 'warn', event: 'linear_auth_failed', repo: `${owner}/${repoName}`, pr: prNumber, reason: err instanceof Error ? err.message : String(err) })
+      log(chalk.yellow(`  linear: identity unavailable — ${err instanceof Error ? err.message : String(err)}`))
+    }
+    return linearAuth
+  }
+
   let workflowFailed = false
   let workflowError: unknown = undefined
   let failedStep: string | undefined = undefined
@@ -761,6 +786,35 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
+
+        // Mirror the verdict onto the PR's Linear issue. `run` and `watch` both
+        // land here, so this is the path that matters — reviews posted from
+        // commands/review.ts are the exception, not the rule.
+        if (config.linear.enabled && shouldPostToLinear(verdict ?? null, config.linear.comment_on)) {
+          const auth = await resolveLinearForRun()
+          if (auth) {
+            const linearResult = await notifyLinear({
+              auth,
+              config: config.linear,
+              pr: { branch: pr.head.ref, title: pr.title, body: pr.body ?? '', url: `https://${commentUrl}`, sha: annotationSha },
+              verdict: verdict ?? null,
+              reviewer,
+              origin,
+              model,
+              service: config.brand.service_name,
+            })
+            fileLog({
+              level: linearResult.status === 'failed' ? 'warn' : 'info',
+              event: 'linear_comment', repo: `${owner}/${repoName}`, pr: prNumber,
+              status: linearResult.status, reason: linearResult.reason, issue: linearResult.identifier,
+            })
+            if (linearResult.status === 'posted') {
+              log(chalk.dim(`  linear: commented on ${linearResult.identifier}`))
+            } else if (linearResult.status === 'failed') {
+              log(chalk.yellow(`  linear: write failed — ${linearResult.reason}`))
+            }
+          }
+        }
         results[step.name] = { verdict, commentBody, commentUrl, commentId, tokens_used: tokensUsed, input_tokens: inputTokens, output_tokens: outputTokens, vendor: reviewer, model }
       }
 
