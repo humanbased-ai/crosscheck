@@ -35,6 +35,19 @@ export function stripRepoDirPaths(text: string, repoDir: string): string {
   return out
 }
 
+// Maps crosscheck's vendor effort vocabulary (shared with claude) to the codex
+// CLI's model_reasoning_effort values — codex calls its top tier "xhigh", not "max".
+const REASONING_EFFORT_MAP: Record<string, string> = {
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  max: 'xhigh',
+}
+
+export function codexReasoningEffort(effort: string): string {
+  return REASONING_EFFORT_MAP[effort] ?? 'medium'
+}
+
 // Detect transient Codex API errors that should be retried (socket disconnects, rate limits)
 function isRetryableCodexError(message: string): boolean {
   return /socket.*closed|429|rate limit|connection.*reset|econnreset/i.test(message)
@@ -105,13 +118,15 @@ export async function runCodexReview(
     for (let attempt = 1; attempt <= MAX_CODEX_RETRIES; attempt++) {
       try {
         const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
-        onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''}`)
+        const reasoningEffort = codexReasoningEffort(vendor.effort)
+        const effortArgs = ['-c', `model_reasoning_effort="${reasoningEffort}"`]
+        onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''} -c model_reasoning_effort="${reasoningEffort}"`)
 
         const { result, retried } = await withTimeoutRetry(
           resolvedTimeout,
           (t) => execa(
             'codex',
-            ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
+            ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs, ...effortArgs],
             {
               cwd: repoDir,
               timeout: t,

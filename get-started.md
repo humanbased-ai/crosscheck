@@ -1016,6 +1016,7 @@ vendors:
     enabled: true
     auth: subscription      # subscription | api-key
     model: gpt-5.6-terra    # only used when auth: api-key
+    effort: medium          # low | medium | high | max (max = codex xhigh reasoning)
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
@@ -1275,6 +1276,8 @@ codex review --base <base-branch> --title "<pr-title>"
 ```
 
 The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. With `auth: subscription`, no model flag is passed. With `auth: api-key`, the model is selected by quality tier (`fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `thorough` → `gpt-5.6-sol`).
+
+Reasoning effort comes from `vendors.codex.effort` and is always passed as `-c model_reasoning_effort=...`: `low`/`medium`/`high` map directly, and `max` maps to the codex CLI's `xhigh` tier.
 
 ### How Claude reviews run
 
