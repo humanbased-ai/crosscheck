@@ -9,7 +9,7 @@ import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detec
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getLinearCredentials } from '../config/loader.js'
-import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
+import { resolveLinearAuth, withWorker, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
@@ -53,7 +53,9 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     } catch (err) {
       logError({ command: 'review', phase: 'linear-auth' }, err)
       console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
-      process.exit(1)
+      // A misconfiguration is the operator's to fix (exit 1); a Linear outage is
+      // not (exit 2). Matches the classification the run path uses.
+      process.exit(isLinearConfigError(err) ? 1 : 2)
     }
   }
 

@@ -209,3 +209,30 @@ describe('workspace and issue-number boundaries', () => {
     expect(extractLinearRef({ body: 'see linear.app/acme/issue/IN-123abc' }, [])).toBeNull()
   })
 })
+
+describe('punctuation after a URL', () => {
+  // A ref at the end of a sentence is still a ref. Requiring a slash or the exact
+  // end of the path silently missed these.
+  const cases: Array<[string, string]> = [
+    ['Fixes https://linear.app/acme/issue/IN-42.', 'IN-42'],
+    ['See https://linear.app/acme/issue/IN-42, then merge', 'IN-42'],
+    ['(https://linear.app/acme/issue/IN-42)', 'IN-42'],
+    ['see linear.app/acme/issue/IN-42.', 'IN-42'],
+    ['see linear.app/acme/issue/IN-42, ok', 'IN-42'],
+  ]
+
+  for (const [body, expected] of cases) {
+    it(`resolves ${expected} from ${JSON.stringify(body.slice(0, 46))}`, () => {
+      expect(extractLinearRef({ body }, [])?.id).toBe(expected)
+    })
+  }
+
+  it('still rejects an alphanumeric suffix', () => {
+    expect(extractLinearRef({ body: 'https://linear.app/acme/issue/IN-123abc' }, [])).toBeNull()
+    expect(extractLinearRef({ body: 'see linear.app/acme/issue/IN-123abc' }, [])).toBeNull()
+  })
+
+  it('still rejects extra digits', () => {
+    expect(extractLinearRef({ body: 'https://linear.app/acme/issue/IN-12/x' }, [])?.id).toBe('IN-12')
+  })
+})

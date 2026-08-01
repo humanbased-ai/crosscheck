@@ -543,10 +543,6 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // resolves once and passes it in; resolving here is the single-round fallback.
   // A dry run posts nothing, so it never mints.
   let linearAuth: ResolvedLinearAuth | null = ctx.linearAuth ?? null
-  if (config.linear.enabled && !ctx.dryRun && !linearAuth) {
-    linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
-    fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
-  }
 
   let workflowFailed = false
   let workflowError: unknown = undefined
@@ -581,6 +577,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   emitPRComplexity(ctx, triggerField)
 
   try {
+  // Inside the try so a preflight failure still reaches the completion handler in
+  // the finally — resolving above it meant a failed mint skipped workflow_complete
+  // entirely and left no record of the run.
+  if (config.linear.enabled && !ctx.dryRun && !linearAuth) {
+    linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+    fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
+  }
+
   for (const step of steps) {
     currentStepName = step.name
     stepsRun.push(step.name)

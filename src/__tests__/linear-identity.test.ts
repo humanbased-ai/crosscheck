@@ -262,3 +262,19 @@ describe('outage vs misconfiguration', () => {
     }
   })
 })
+
+describe('rate limiting is transient, not misconfiguration', () => {
+  const t1 = () => cfg({ auth: { mode: 'client_credentials' } })
+  const creds = { clientId: 'id', clientSecret: 'secret' }
+  const status = (code: number): FetchLike => vi.fn(async () => new Response('x', { status: code }))
+
+  it('does not blame the config for a 429', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(429) }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(false)
+  })
+
+  it('still blames the config for a 403', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(403) }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(true)
+  })
+})

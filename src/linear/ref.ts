@@ -27,7 +27,7 @@ export interface PRMetadata {
 // Issue path inside a linear.app URL. Key shape matches parseTicketId. The
 // lookahead is load-bearing: without it `/issue/IN-123abc` matches the `IN-123`
 // prefix and would post to an unrelated issue while bypassing team_keys.
-const ISSUE_PATH = /^\/([^/]+)\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)(?=\/|$)/i
+const ISSUE_PATH = /^\/([^/]+)\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)(?![A-Za-z0-9])/i
 
 // Absolute URLs are parsed and their hostname compared exactly. A boundary check
 // on the text is not enough: `https://evil.example/linear.app/acme/issue/IN-1`
@@ -37,7 +37,7 @@ const ABSOLUTE_URL = /\bhttps?:\/\/[^\s<>()"'`]+/gi
 
 // Scheme-less form, e.g. "see linear.app/acme/issue/IN-7". Anchored to the start of
 // the field or whitespace so `notlinear.app/...` cannot match.
-const BARE_URL = /(?:^|\s)linear\.app\/([^/\s]+)\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)(?=\/|\s|$)/i
+const BARE_URL = /(?:^|\s)linear\.app\/([^/\s]+)\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)(?![A-Za-z0-9])/i
 
 function fromUrl(text: string): LinearIssueRef | null {
   for (const match of text.matchAll(ABSOLUTE_URL)) {

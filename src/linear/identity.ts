@@ -112,9 +112,11 @@ export async function mintAppToken(
   const text = await response.text()
   if (!response.ok) {
     // 4xx means Linear rejected these credentials or scopes — the operator can fix
-    // that. 5xx is an outage on their side and must not be blamed on the config.
+    // that. 5xx is an outage, and 429 is rate limiting: both are transient and must
+    // not be blamed on the config.
     const message = `Linear token mint rejected (HTTP ${response.status})`
-    throw response.status >= 500 ? new Error(message) : new LinearConfigError(message)
+    const transient = response.status >= 500 || response.status === 429
+    throw transient ? new Error(message) : new LinearConfigError(message)
   }
 
   let parsed: unknown

@@ -486,6 +486,14 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
     let workflowError: unknown
     try {
+      // One token for the whole command run, resolved before the clone: a
+      // misconfiguration should fail without spending a clone, and runWorkflow is
+      // re-entered per fix/recheck round so resolving inside it would mint every
+      // round. Inside the try, so a failure still reaches the completion handler.
+      const linearAuth = config.linear.enabled && !opts.dryRun
+        ? await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+        : null
+
       await clonePRForReview({
         owner, repo, prNumber: number, baseRef: prData.base.ref,
         tmpDir, token, protocol: config.clone_protocol,
@@ -508,13 +516,6 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
       if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
       let activeSpinner = ora('').start()
-
-      // One token for the whole command run. runWorkflow is re-entered per
-      // fix/recheck round; resolving inside it would mint per round and let a late
-      // transient failure abort after earlier rounds had already landed.
-      const linearAuth = config.linear.enabled && !opts.dryRun
-        ? await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
-        : null
 
       const sharedCtx = {
         owner, repoName: repo, prNumber: number, token, config, origin,
