@@ -39,7 +39,7 @@ import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '..
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
-import { resolveLinearAuth } from '../linear/identity.js'
+import { resolveLinearAuth, isLinearConfigError } from '../linear/identity.js'
 import {
   getSmartSwitch,
   isSubscriptionLimitError,
@@ -206,6 +206,22 @@ export async function runWatch(opts: WatchOpts = {}) {
     logError({ command: 'watch', phase: 'auth' }, err)
     console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
     process.exit(1)
+  }
+
+  // Preflight Linear identity at startup. watch is a long-running daemon: a bad
+  // credential discovered per-event would either drop events silently or spam the
+  // board. Fail loudly at boot instead, the way the run path fails before its
+  // clone. The token is discarded — per-event resolution mints a fresh one, since
+  // app tokens outlive neither a long daemon run nor a rotation.
+  if (config.linear.enabled) {
+    try {
+      const preflight = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+      console.log(chalk.dim(`  linear: ${preflight.mode} — writes as ${preflight.actor}`))
+    } catch (err) {
+      logError({ command: 'watch', phase: 'linear-auth' }, err)
+      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+      process.exit(isLinearConfigError(err) ? 1 : 2)
+    }
   }
 
   fileLog({ level: 'info', event: 'session_start', command: 'watch' })
@@ -484,13 +500,6 @@ export async function runWatch(opts: WatchOpts = {}) {
       let boardAdded = false
 
       try {
-        // Resolved before the clone so a misconfiguration fails fast, and once per
-        // event so a multi-round workflow mints a single token. Matches the run
-        // path; without this the watch path only resolved after cloning.
-        const linearAuth = effectiveConfig.linear.enabled
-          ? await resolveLinearAuth(effectiveConfig.linear, getLinearCredentials(effectiveConfig.linear.auth))
-          : null
-
         await clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef,
           tmpDir, token, protocol: config.clone_protocol,
@@ -534,6 +543,15 @@ export async function runWatch(opts: WatchOpts = {}) {
 
         board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
         boardAdded = true
+
+        // After board.addPR on purpose: a throw before this point is caught by a
+        // handler that only calls logError — a no-op when file logging is off — so
+        // the daemon would look healthy while silently dropping every affected
+        // event. Startup already preflights credentials; this catches expiry and
+        // outages mid-run, and surfaces them on the board.
+        const linearAuth = effectiveConfig.linear.enabled
+          ? await resolveLinearAuth(effectiveConfig.linear, getLinearCredentials(effectiveConfig.linear.auth))
+          : null
 
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })
