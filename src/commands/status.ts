@@ -2,7 +2,7 @@ import { execSync } from 'child_process'
 import { existsSync, statSync } from 'fs'
 import chalk from 'chalk'
 import { loadConfig, getGithubTokenSource, getWebhookSecretPath, resolveConfigPath, getLinearCredentials } from '../config/loader.js'
-import { verifyLinearIdentity } from '../linear/verify.js'
+import { verifyLinearIdentity, type LinearIdentityReport } from '../linear/verify.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
 import { getLogDir, getTodayLogPath } from '../lib/logger.js'
@@ -13,9 +13,28 @@ function row(label: string, value: string, ok?: boolean) {
   console.log(`  ${indicator} ${chalk.bold(label.padEnd(22))} ${value}`)
 }
 
+const LINEAR_PROBE_TIMEOUT_MS = 10_000
+
 export async function runStatus(configPath?: string) {
   const config = loadConfig(configPath)
   const activeConfigPath = resolveConfigPath(configPath)
+
+  // Start the Linear probe before the CLI auth checks so the two network round
+  // trips overlap, and bound it — status must stay responsive even if Linear is
+  // slow or unreachable. verifyLinearIdentity never throws; the timeout is the
+  // only way this can reject, so it resolves to a report either way.
+  const linearProbe = config.linear.enabled
+    ? Promise.race([
+        verifyLinearIdentity(config.linear, getLinearCredentials(config.linear.auth)),
+        new Promise<LinearIdentityReport>(resolve => setTimeout(() => resolve({
+          ok: false,
+          mode: config.linear.auth.mode,
+          actor: config.linear.identity.actor,
+          attribution: config.linear.auth.mode === 'client_credentials' ? 'app' : 'user',
+          error: `timed out after ${LINEAR_PROBE_TIMEOUT_MS / 1000}s`,
+        }), LINEAR_PROBE_TIMEOUT_MS).unref?.()),
+      ])
+    : null
 
   console.log(chalk.bold('\ncrosscheck status\n'))
 
@@ -62,10 +81,10 @@ export async function runStatus(configPath?: string) {
   }
 
   // Linear identity — only when the operator has opted in.
-  if (config.linear.enabled) {
+  if (linearProbe) {
     console.log()
     console.log(chalk.dim('  Linear'))
-    const report = await verifyLinearIdentity(config.linear, getLinearCredentials(config.linear.auth))
+    const report = await linearProbe
     row('auth mode', report.mode, report.ok)
     if (!report.ok) {
       row('identity', report.error ?? 'verification failed', false)
