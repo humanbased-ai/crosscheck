@@ -148,3 +148,32 @@ describe('verdict normalisation', () => {
     expect(shouldPostToLinear(null, ['NEEDS_WORK', 'BLOCK'])).toBe(false)
   })
 })
+
+describe('the visible line names the step', () => {
+  // The annotation carries type=recheck; the human-readable line saying "review"
+  // contradicted it two lines above.
+  it('says review by default', () => {
+    expect(buildLinearCommentBody(BASE)).toContain('review of [')
+  })
+
+  it('says recheck for a recheck', () => {
+    const body = buildLinearCommentBody({ ...BASE, stepType: 'recheck' })
+    expect(body).toContain('recheck of [')
+    expect(body).not.toContain(' review of [')
+  })
+
+  it('says fix for a fix step', () => {
+    expect(buildLinearCommentBody({ ...BASE, stepType: 'fix' })).toContain('fix for [')
+  })
+
+  it('says conflict resolution for a conflict-resolve step', () => {
+    expect(buildLinearCommentBody({ ...BASE, stepType: 'conflict-resolve' }))
+      .toContain('conflict resolution for [')
+  })
+
+  it('agrees with the annotation it embeds', () => {
+    const body = buildLinearCommentBody({ ...BASE, stepType: 'recheck', round: 2 })
+    expect(body).toContain('recheck of [')
+    expect(parseAnnotation(body)).toMatchObject({ type: 'recheck', round: 2 })
+  })
+})

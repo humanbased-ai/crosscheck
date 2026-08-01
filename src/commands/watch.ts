@@ -26,6 +26,7 @@ import {
   detectScopesForDeployment,
   patchDeploymentConfig,
   detectGitHubLogin,
+  getLinearCredentials,
 } from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
 import { scanUnreviewedPRs } from '../lib/backtrace.js'
@@ -38,6 +39,7 @@ import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '..
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
+import { resolveLinearAuth } from '../linear/identity.js'
 import {
   getSmartSwitch,
   isSubscriptionLimitError,
@@ -482,6 +484,13 @@ export async function runWatch(opts: WatchOpts = {}) {
       let boardAdded = false
 
       try {
+        // Resolved before the clone so a misconfiguration fails fast, and once per
+        // event so a multi-round workflow mints a single token. Matches the run
+        // path; without this the watch path only resolved after cloning.
+        const linearAuth = effectiveConfig.linear.enabled
+          ? await resolveLinearAuth(effectiveConfig.linear, getLinearCredentials(effectiveConfig.linear.auth))
+          : null
+
         await clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef,
           tmpDir, token, protocol: config.clone_protocol,
@@ -536,6 +545,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         const { verdict, fixAppliedCount } = await runWorkflow({
           owner, repoName, prNumber, pr,
           tmpDir, token, config: effectiveConfig, origin,
+          linearAuth,
           reviewStart,
           log: (msg: string) => bLog(`${chalk.dim(fmtTime())}  ${msg}`),
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
