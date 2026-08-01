@@ -60,6 +60,13 @@ export function renderSignature(template: string, actor: string, product: string
   return template.replaceAll('{actor}', actor).replaceAll('{product}', product)
 }
 
+// Linear's token endpoint documents scope as a COMMA-separated list, but OAuth 2.0
+// itself specifies space-separated, so operators write it both ways. Accept either
+// and always send commas.
+export function normalizeScopes(scopes: string): string {
+  return scopes.split(/[\s,]+/).filter(Boolean).join(',')
+}
+
 export async function mintAppToken(
   creds: { clientId: string; clientSecret: string; scopes: string },
   opts: MintOptions = {},
@@ -71,7 +78,7 @@ export async function mintAppToken(
     grant_type: 'client_credentials',
     client_id: creds.clientId,
     client_secret: creds.clientSecret,
-    scope: creds.scopes,
+    scope: normalizeScopes(creds.scopes),
   })
 
   let response: Response

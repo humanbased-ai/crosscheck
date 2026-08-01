@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { renderSignature, mintAppToken, resolveLinearAuth, type FetchLike } from '../linear/identity.js'
+import { renderSignature, mintAppToken, normalizeScopes, resolveLinearAuth, type FetchLike } from '../linear/identity.js'
 import { LinearConfigSchema } from '../config/schema.js'
 
 const SECRET = 'super-secret-value'
@@ -48,7 +48,7 @@ describe('mintAppToken', () => {
     expect(body.get('grant_type')).toBe('client_credentials')
     expect(body.get('client_id')).toBe(CLIENT_ID)
     expect(body.get('client_secret')).toBe(SECRET)
-    expect(body.get('scope')).toBe('read write')
+    expect(body.get('scope')).toBe('read,write')
   })
 
   it('throws without leaking the secret when the mint is rejected', async () => {
@@ -129,7 +129,7 @@ describe('resolveLinearAuth — client_credentials mode (T1)', () => {
     await resolveLinearAuth(config, { clientId: CLIENT_ID, clientSecret: SECRET }, { fetchImpl })
 
     const [, init] = (fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(new URLSearchParams(init.body as string).get('scope')).toBe('read write initiative:read')
+    expect(new URLSearchParams(init.body as string).get('scope')).toBe('read,write,initiative:read')
   })
 
   describe('abort semantics — never silently fall back to api_key', () => {
@@ -165,5 +165,29 @@ describe('resolveLinearAuth — client_credentials mode (T1)', () => {
   it('respects custom env var names in the abort message', async () => {
     const config = cfg({ auth: { mode: 'client_credentials', client_id_env: 'LINEAR_HB_AGENT_GATEWAY_CLIENT_ID' } })
     await expect(resolveLinearAuth(config, {})).rejects.toThrow(/LINEAR_HB_AGENT_GATEWAY_CLIENT_ID/)
+  })
+})
+
+describe('normalizeScopes', () => {
+  // Linear documents comma-separated; OAuth 2.0 specifies space-separated. Operators
+  // write both, so accept either and always send what Linear asks for.
+  it('passes a comma-separated list through', () => {
+    expect(normalizeScopes('read,write')).toBe('read,write')
+  })
+
+  it('converts a space-separated list', () => {
+    expect(normalizeScopes('read write')).toBe('read,write')
+  })
+
+  it('handles mixed separators and stray whitespace', () => {
+    expect(normalizeScopes('  read,  write   initiative:read ')).toBe('read,write,initiative:read')
+  })
+
+  it('drops empty entries rather than sending blanks', () => {
+    expect(normalizeScopes('read,,write,')).toBe('read,write')
+  })
+
+  it('returns empty for an empty input', () => {
+    expect(normalizeScopes('   ')).toBe('')
   })
 })
