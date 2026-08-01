@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { renderSignature, mintAppToken, normalizeScopes, resolveLinearAuth, type FetchLike } from '../linear/identity.js'
+import { renderSignature, mintAppToken, normalizeScopes, resolveLinearAuth, isLinearConfigError, type FetchLike } from '../linear/identity.js'
 import { LinearConfigSchema } from '../config/schema.js'
 
 const SECRET = 'super-secret-value'
@@ -189,5 +189,33 @@ describe('normalizeScopes', () => {
 
   it('returns empty for an empty input', () => {
     expect(normalizeScopes('   ')).toBe('')
+  })
+})
+
+describe('LinearConfigError — exit-code classification', () => {
+  // The CLI contract reserves exit 2 for unexpected errors; a missing env var is a
+  // user error and must be 1, matching what `crosscheck review` already returns.
+  it('flags a missing api_key as a config error', async () => {
+    const err = await resolveLinearAuth(cfg(), {}).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(true)
+  })
+
+  it('flags missing client credentials as a config error', async () => {
+    const config = cfg({ auth: { mode: 'client_credentials' } })
+    const err = await resolveLinearAuth(config, {}).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(true)
+  })
+
+  it('flags a rejected mint as a config error', async () => {
+    const fetchImpl: FetchLike = vi.fn(async () => new Response('nope', { status: 401 }))
+    const config = cfg({ auth: { mode: 'client_credentials' } })
+    const err = await resolveLinearAuth(config, { clientId: 'a', clientSecret: 'b' }, { fetchImpl })
+      .then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(true)
+  })
+
+  it('does not flag unrelated errors', () => {
+    expect(isLinearConfigError(new Error('network down'))).toBe(false)
+    expect(isLinearConfigError(undefined)).toBe(false)
   })
 })
