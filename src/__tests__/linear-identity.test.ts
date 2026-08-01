@@ -278,3 +278,40 @@ describe('rate limiting is transient, not misconfiguration', () => {
     expect(isLinearConfigError(err)).toBe(true)
   })
 })
+
+describe('a rejected mint names the variables to check', () => {
+  // A bare "HTTP 401" leaves an operator with custom env names guessing which
+  // credential to rotate. Names only — never values.
+  const rejected = (): FetchLike => vi.fn(async () => new Response('nope', { status: 401 }))
+  const creds = { clientId: 'the-id', clientSecret: 'the-secret' }
+
+  it('names the default variables', async () => {
+    const config = cfg({ auth: { mode: 'client_credentials' } })
+    const err = await resolveLinearAuth(config, creds, { fetchImpl: rejected() })
+      .then(() => null, (e: unknown) => e as Error)
+    expect(err!.message).toContain('LINEAR_CLIENT_ID')
+    expect(err!.message).toContain('LINEAR_CLIENT_SECRET')
+  })
+
+  it('names custom variables', async () => {
+    const config = cfg({
+      auth: {
+        mode: 'client_credentials',
+        client_id_env: 'LINEAR_HB_AGENT_GATEWAY_CLIENT_ID',
+        client_secret_env: 'LINEAR_HB_AGENT_GATEWAY_CLIENT_SECRET',
+      },
+    })
+    const err = await resolveLinearAuth(config, creds, { fetchImpl: rejected() })
+      .then(() => null, (e: unknown) => e as Error)
+    expect(err!.message).toContain('LINEAR_HB_AGENT_GATEWAY_CLIENT_ID')
+    expect(err!.message).toContain('LINEAR_HB_AGENT_GATEWAY_CLIENT_SECRET')
+  })
+
+  it('still never leaks the values', async () => {
+    const config = cfg({ auth: { mode: 'client_credentials' } })
+    const err = await resolveLinearAuth(config, creds, { fetchImpl: rejected() })
+      .then(() => null, (e: unknown) => e as Error)
+    expect(err!.message).not.toContain('the-secret')
+    expect(err!.message).not.toContain('the-id')
+  })
+})

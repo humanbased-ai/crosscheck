@@ -165,9 +165,13 @@ export async function resolveLinearAuth(
       // Preserve the classification the mint chose: a rejected credential stays a
       // config error (exit 1), an outage stays unexpected (exit 2). Both abort —
       // neither falls back to api_key.
+      // Name the variables to check. A bare "HTTP 401" leaves an operator with
+      // custom env names guessing which credential to rotate. Names only — never
+      // the values.
       const message =
         `Linear client_credentials token mint failed — aborting rather than falling back ` +
         `to an API key (that would attribute agent writes to a human). ` +
+        `Check ${config.auth.client_id_env} and ${config.auth.client_secret_env}. ` +
         `${err instanceof Error ? err.message : String(err)}`
       throw isLinearConfigError(err) ? new LinearConfigError(message) : new Error(message)
     }
