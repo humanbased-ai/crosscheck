@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { notifyLinear } from '../linear/notify.js'
+import { notifyLinear, issueBelongsToWorkspace } from '../linear/notify.js'
 import { LinearConfigSchema } from '../config/schema.js'
 import type { ResolvedLinearAuth, FetchLike } from '../linear/identity.js'
 
@@ -111,5 +111,76 @@ describe('notifyLinear', () => {
       { fetchImpl: scriptedFetch(FOUND) },
     )
     expect(result.status).toBe('posted')
+  })
+})
+
+describe('workspace mismatch', () => {
+  const scoped = (issueUrl: string): FetchLike => {
+    let call = 0
+    return vi.fn(async () => {
+      call++
+      if (call === 1) {
+        return new Response(JSON.stringify({
+          data: { issues: { nodes: [{ id: 'u1', identifier: 'IN-2269', url: issueUrl }] } },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        data: { commentCreate: { success: true, comment: { id: 'c1', url: 'https://linear.app/x/c1' } } },
+      }), { status: 200 })
+    })
+  }
+
+  const prWithUrl = (url: string) => ({ ...PR, branch: 'feat/none', title: 'chore', body: url })
+
+  it('posts when the resolved issue is in the URL-named workspace', async () => {
+    const fetchImpl = scoped('https://linear.app/acme/issue/IN-2269/slug')
+    const result = await notifyLinear(
+      { ...BASE, pr: prWithUrl('https://linear.app/acme/issue/IN-2269'), config: cfg({ team_keys: [] }) },
+      { fetchImpl },
+    )
+    expect(result.status).toBe('posted')
+  })
+
+  it('skips when the credentials resolve a different workspace', async () => {
+    // Same identifier, different workspace — a real issue, but not the one meant.
+    const fetchImpl = scoped('https://linear.app/other-corp/issue/IN-2269/slug')
+    const result = await notifyLinear(
+      { ...BASE, pr: prWithUrl('https://linear.app/acme/issue/IN-2269'), config: cfg({ team_keys: [] }) },
+      { fetchImpl },
+    )
+    expect(result).toEqual({ status: 'skipped', reason: 'workspace-mismatch', identifier: 'IN-2269' })
+  })
+
+  it('does not post the comment when the workspace mismatches', async () => {
+    const fetchImpl = scoped('https://linear.app/other-corp/issue/IN-2269/slug')
+    await notifyLinear(
+      { ...BASE, pr: prWithUrl('https://linear.app/acme/issue/IN-2269'), config: cfg({ team_keys: [] }) },
+      { fetchImpl },
+    )
+    expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1)
+  })
+
+  it('does not constrain a bare ref, which names no workspace', async () => {
+    const fetchImpl = scoped('https://linear.app/whatever/issue/IN-2269/slug')
+    const result = await notifyLinear({ ...BASE, config: cfg() }, { fetchImpl })
+    expect(result.status).toBe('posted')
+  })
+})
+
+describe('issueBelongsToWorkspace', () => {
+  it('matches the first path segment', () => {
+    expect(issueBelongsToWorkspace('https://linear.app/acme/issue/IN-1', 'acme')).toBe(true)
+  })
+
+  it('is case insensitive', () => {
+    expect(issueBelongsToWorkspace('https://linear.app/ACME/issue/IN-1', 'acme')).toBe(true)
+  })
+
+  it('rejects a different workspace', () => {
+    expect(issueBelongsToWorkspace('https://linear.app/other/issue/IN-1', 'acme')).toBe(false)
+  })
+
+  it('fails closed on an unparseable URL', () => {
+    expect(issueBelongsToWorkspace('not a url', 'acme')).toBe(false)
   })
 })

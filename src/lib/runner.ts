@@ -233,6 +233,9 @@ export interface WorkflowContext {
   // When true, review output is printed but the GitHub comment is not posted
   // and the fix step is skipped. Used by `crosscheck run --dry-run`.
   dryRun?: boolean
+  // Linear identity resolved once at the command-run boundary and reused across
+  // every round, so a multi-round run mints exactly one token.
+  linearAuth?: ResolvedLinearAuth | null
   // Override the steps to execute instead of loading from workflow.yml.
   // Used by `crosscheck run --steps` to run only a subset of the pipeline.
   steps?: import('./workflow.js').WorkflowStep[]
@@ -534,10 +537,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // client_credentials mint ABORTS rather than degrading, because silently
   // continuing would either drop the write or re-attribute it to a human. This
   // matches commands/review.ts; the two paths must not disagree.
-  let linearAuth: ResolvedLinearAuth | null = null
-  // A dry run posts nothing, so minting a token would spend a credential round
-  // trip and could abort a run that was never going to write anywhere.
-  if (config.linear.enabled && !ctx.dryRun) {
+  // The contract is one token per command run. runWorkflow is re-entered for every
+  // fix/recheck round under --crazy and max_rounds, so minting here would mint per
+  // round and let a late transient failure abort work already done. The caller
+  // resolves once and passes it in; resolving here is the single-round fallback.
+  // A dry run posts nothing, so it never mints.
+  let linearAuth: ResolvedLinearAuth | null = ctx.linearAuth ?? null
+  if (config.linear.enabled && !ctx.dryRun && !linearAuth) {
     linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
     fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
   }

@@ -219,3 +219,46 @@ describe('LinearConfigError — exit-code classification', () => {
     expect(isLinearConfigError(undefined)).toBe(false)
   })
 })
+
+describe('outage vs misconfiguration', () => {
+  // A 5xx is Linear's problem, not the operator's — blaming it on the config
+  // would exit 1 and send someone hunting a broken env var that is fine.
+  const t1 = () => cfg({ auth: { mode: 'client_credentials' } })
+  const creds = { clientId: 'id', clientSecret: 'secret' }
+  const status = (code: number): FetchLike => vi.fn(async () => new Response('x', { status: code }))
+
+  it('treats a rejected credential (401) as a config error', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(401) }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(true)
+  })
+
+  it('treats a bad request (400) as a config error', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(400) }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(true)
+  })
+
+  it('does NOT blame the config for a 500', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(500) }).then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(isLinearConfigError(err)).toBe(false)
+  })
+
+  it('does NOT blame the config for a 503', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(503) }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(false)
+  })
+
+  it('does NOT blame the config for a transport failure', async () => {
+    const fetchImpl: FetchLike = vi.fn(async () => { throw new Error('ECONNRESET') })
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(false)
+  })
+
+  it('aborts either way — never falls back to api_key', async () => {
+    for (const code of [401, 500]) {
+      const err = await resolveLinearAuth(t1(), { ...creds, apiKey: 'lin_api_fallback' }, { fetchImpl: status(code) })
+        .then(() => null, (e: unknown) => e as Error)
+      expect(err!.message).toMatch(/aborting rather than falling back/)
+    }
+  })
+})

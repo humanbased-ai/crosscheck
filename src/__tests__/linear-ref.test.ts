@@ -8,7 +8,7 @@ describe('extractLinearRef', () => {
         { body: 'Closes https://linear.app/inductive-network/issue/IN-2269/some-slug' },
         [],
       )
-      expect(ref).toEqual({ id: 'IN-2269', key: 'IN', number: 2269, source: 'body' })
+      expect(ref).toEqual({ id: 'IN-2269', key: 'IN', number: 2269, source: 'body', workspace: 'inductive-network' })
     })
 
     it('finds an issue URL in the PR title', () => {
@@ -165,5 +165,47 @@ describe('hostname is parsed, not pattern-matched', () => {
   it('finds a real URL after an impostor one', () => {
     const body = 'https://evil.example/linear.app/x/issue/IN-1 and https://linear.app/acme/issue/IN-42'
     expect(extractLinearRef({ body }, [])?.id).toBe('IN-42')
+  })
+})
+
+describe('workspace and issue-number boundaries', () => {
+  // Identifiers are unique only within a workspace, so an explicit URL must carry
+  // its slug — otherwise a URL for workspace A resolves against credentials for
+  // workspace B and comments on B's same-numbered issue.
+  it('carries the workspace slug from an absolute URL', () => {
+    const ref = extractLinearRef({ body: 'https://linear.app/acme/issue/IN-42' }, [])
+    expect(ref?.workspace).toBe('acme')
+  })
+
+  it('carries it from a scheme-less URL', () => {
+    expect(extractLinearRef({ body: 'see linear.app/beta-corp/issue/IN-42' }, [])?.workspace).toBe('beta-corp')
+  })
+
+  it('lower-cases the slug for comparison', () => {
+    expect(extractLinearRef({ body: 'https://linear.app/ACME/issue/IN-42' }, [])?.workspace).toBe('acme')
+  })
+
+  it('leaves a bare ref with no workspace, since it names none', () => {
+    const ref = extractLinearRef({ branch: 'feat/in-42-x' }, ['IN'])
+    expect(ref?.id).toBe('IN-42')
+    expect(ref?.workspace).toBeUndefined()
+  })
+
+  // Without a boundary after the digits, /issue/IN-123abc matched the IN-123
+  // prefix and could post to an unrelated issue while bypassing team_keys.
+  it('rejects a malformed identifier with a trailing suffix', () => {
+    expect(extractLinearRef({ body: 'https://linear.app/acme/issue/IN-123abc' }, [])).toBeNull()
+  })
+
+  it('accepts an identifier followed by a slug', () => {
+    expect(extractLinearRef({ body: 'https://linear.app/acme/issue/IN-123/some-slug' }, [])?.id).toBe('IN-123')
+  })
+
+  it('accepts an identifier at the end of the path', () => {
+    expect(extractLinearRef({ body: 'https://linear.app/acme/issue/IN-123' }, [])?.id).toBe('IN-123')
+  })
+
+  it('rejects a suffixed identifier in the scheme-less form too', () => {
+    expect(extractLinearRef({ body: 'see linear.app/acme/issue/IN-123abc' }, [])).toBeNull()
   })
 })

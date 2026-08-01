@@ -9,13 +9,13 @@ import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
 import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken, getLinearApiKey } from '../config/loader.js'
+import { loadConfig, getGithubToken, getLinearApiKey, getLinearCredentials } from '../config/loader.js'
 import { enrichIssueContext } from '../issues/enrich.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { hintForError } from '../lib/remediation.js'
 import { runWorkflow } from '../lib/runner.js'
-import { isLinearConfigError } from '../linear/identity.js'
+import { isLinearConfigError, resolveLinearAuth } from '../linear/identity.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
@@ -509,8 +509,16 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
       let activeSpinner = ora('').start()
 
+      // One token for the whole command run. runWorkflow is re-entered per
+      // fix/recheck round; resolving inside it would mint per round and let a late
+      // transient failure abort after earlier rounds had already landed.
+      const linearAuth = config.linear.enabled && !opts.dryRun
+        ? await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+        : null
+
       const sharedCtx = {
         owner, repoName: repo, prNumber: number, token, config, origin,
+        linearAuth,
         log: (msg: string) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
         onPhaseChange: (label: string) => { activeSpinner.text = label },
         crosscheckShas: new Set<string>(),
