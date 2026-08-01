@@ -23,7 +23,7 @@ import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
-import { loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
+import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
@@ -233,6 +233,9 @@ export interface WorkflowContext {
   // When true, review output is printed but the GitHub comment is not posted
   // and the fix step is skipped. Used by `crosscheck run --dry-run`.
   dryRun?: boolean
+  // Linear identity resolved once at the command-run boundary and reused across
+  // every round, so a multi-round run mints exactly one token.
+  linearAuth?: ResolvedLinearAuth | null
   // Override the steps to execute instead of loading from workflow.yml.
   // Used by `crosscheck run --steps` to run only a subset of the pipeline.
   steps?: import('./workflow.js').WorkflowStep[]
@@ -534,13 +537,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // client_credentials mint ABORTS rather than degrading, because silently
   // continuing would either drop the write or re-attribute it to a human. This
   // matches commands/review.ts; the two paths must not disagree.
-  let linearAuth: ResolvedLinearAuth | null = null
-  // A dry run posts nothing, so minting a token would spend a credential round
-  // trip and could abort a run that was never going to write anywhere.
-  if (config.linear.enabled && !ctx.dryRun) {
-    linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
-    fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
-  }
+  // The contract is one token per command run. runWorkflow is re-entered for every
+  // fix/recheck round under --crazy and max_rounds, so minting here would mint per
+  // round and let a late transient failure abort work already done. The caller
+  // resolves once and passes it in; resolving here is the single-round fallback.
+  // A dry run posts nothing, so it never mints.
+  let linearAuth: ResolvedLinearAuth | null = ctx.linearAuth ?? null
 
   let workflowFailed = false
   let workflowError: unknown = undefined
@@ -575,6 +577,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   emitPRComplexity(ctx, triggerField)
 
   try {
+  // Inside the try so a preflight failure still reaches the completion handler in
+  // the finally — resolving above it meant a failed mint skipped workflow_complete
+  // entirely and left no record of the run.
+  // canWriteVerdict here too: the caller passes null deliberately when the selected
+  // steps cannot write a verdict, and this fallback previously read that as
+  // "unresolved" and resolved anyway — defeating the gate one line upstream.
+  if (!ctx.dryRun && !linearAuth && linearWritePossible(config.linear, steps)) {
+    linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+    fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
+  }
+
   for (const step of steps) {
     currentStepName = step.name
     stepsRun.push(step.name)

@@ -14,6 +14,8 @@ import { extractTicketRefs, parseTicketId, type TicketRef } from '../issues/tick
 
 export interface LinearIssueRef extends TicketRef {
   source: 'branch' | 'title' | 'body'
+  /** Workspace slug, when the ref came from an explicit URL. Bare refs have none. */
+  workspace?: string
 }
 
 export interface PRMetadata {
@@ -22,20 +24,25 @@ export interface PRMetadata {
   body?: string | null
 }
 
-// Issue path inside a linear.app URL. Key shape matches parseTicketId.
-const ISSUE_PATH = /\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)/i
+// The identifier occupies one whole path segment. Lookaheads kept getting this
+// wrong in both directions: requiring `/` or end-of-path missed `IN-42.` at the
+// end of a sentence, and allowing any non-alphanumeric accepted `IN-123-typo` as
+// `IN-123`. Take the segment, strip trailing sentence punctuation, and require
+// parseTicketId to match it whole.
+const ISSUE_SEGMENTS = /^\/([^/]+)\/issue\/([^/]+)/i
+const BARE_URL = /(?:^|\s)linear\.app\/([^/\s]+)\/issue\/([^/\s]+)/i
 
 // Absolute URLs are parsed and their hostname compared exactly. A boundary check
 // on the text is not enough: `https://evil.example/linear.app/acme/issue/IN-1`
-// satisfies any "character before linear.app" rule while pointing somewhere else
-// entirely, and would bypass the team_keys gate.
+// satisfies any "character before linear.app" rule while pointing somewhere else.
 const ABSOLUTE_URL = /\bhttps?:\/\/[^\s<>()"'`]+/gi
 
-// Scheme-less form, e.g. "see linear.app/acme/issue/IN-7". Anchored to the start of
-// the field or whitespace so `notlinear.app/...` cannot match.
-const BARE_URL = /(?:^|\s)linear\.app\/[^/\s]+\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)/i
+/** Trailing sentence punctuation is never part of an identifier. */
+function stripTrailingPunctuation(segment: string): string {
+  return segment.replace(/[.,;:!?)\]}>'"]+$/, '')
+}
 
-function fromUrl(text: string): TicketRef | null {
+function fromUrl(text: string): LinearIssueRef | null {
   for (const match of text.matchAll(ABSOLUTE_URL)) {
     let parsed: URL
     try {
@@ -44,21 +51,33 @@ function fromUrl(text: string): TicketRef | null {
       continue
     }
     if (parsed.hostname.toLowerCase() !== 'linear.app') continue
-    const issue = parsed.pathname.match(ISSUE_PATH)
-    if (issue) return parseTicketId(issue[1])
+    const segments = parsed.pathname.match(ISSUE_SEGMENTS)
+    if (!segments) continue
+    const ref = parseTicketId(stripTrailingPunctuation(segments[2]))
+    if (ref) return withWorkspace(ref, segments[1])
   }
 
   const bare = text.match(BARE_URL)
-  return bare ? parseTicketId(bare[1]) : null
+  if (!bare) return null
+  const ref = parseTicketId(stripTrailingPunctuation(bare[2]))
+  return ref ? withWorkspace(ref, bare[1]) : null
 }
 
-function matchField(text: string, teamKeys: readonly string[]): TicketRef | null {
+// An explicit URL names a workspace. Identifiers are only unique within one, so
+// dropping the slug lets a URL for workspace A resolve against credentials for
+// workspace B and comment on B's same-numbered issue.
+function withWorkspace(ref: TicketRef, workspace: string): LinearIssueRef {
+  return { ...ref, workspace: workspace.toLowerCase(), source: 'body' }
+}
+
+function matchField(text: string, teamKeys: readonly string[]): LinearIssueRef | null {
   const url = fromUrl(text)
   if (url) return url
 
   // Bare identifiers only for configured keys — see the module header.
   if (teamKeys.length === 0) return null
-  return extractTicketRefs({ title: text }, [...teamKeys])[0] ?? null
+  const bare = extractTicketRefs({ title: text }, [...teamKeys])[0]
+  return bare ? { ...bare, source: 'body' } : null
 }
 
 export function extractLinearRef(pr: PRMetadata, teamKeys: readonly string[]): LinearIssueRef | null {

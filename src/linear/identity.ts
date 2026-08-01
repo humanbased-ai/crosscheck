@@ -156,13 +156,19 @@ export async function mintAppToken(
       body: body.toString(),
     })
   } catch (err: unknown) {
-    // Network-level failure. The message comes from fetch and carries no credential.
+    // Transport failure — Linear is unreachable. Not a configuration problem, so
+    // this stays a plain Error and classifies as an unexpected failure (exit 2).
     throw new Error(`Linear token mint failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   const text = await response.text()
   if (!response.ok) {
-    throw new Error(`Linear token mint rejected (HTTP ${response.status})`)
+    // 4xx means Linear rejected these credentials or scopes — the operator can fix
+    // that. 5xx is an outage, and 429 is rate limiting: both are transient and must
+    // not be blamed on the config.
+    const message = `Linear token mint rejected (HTTP ${response.status})`
+    const transient = response.status >= 500 || response.status === 429
+    throw transient ? new Error(message) : new LinearConfigError(message)
   }
 
   let parsed: unknown
@@ -208,11 +214,18 @@ export async function resolveLinearAuth(
         opts,
       )
     } catch (err: unknown) {
-      throw new LinearConfigError(
+      // Preserve the classification the mint chose: a rejected credential stays a
+      // config error (exit 1), an outage stays unexpected (exit 2). Both abort —
+      // neither falls back to api_key.
+      // Name the variables to check. A bare "HTTP 401" leaves an operator with
+      // custom env names guessing which credential to rotate. Names only — never
+      // the values.
+      const message =
         `Linear client_credentials token mint failed — aborting rather than falling back ` +
         `to an API key (that would attribute agent writes to a human). ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-      )
+        `Check ${config.auth.client_id_env} and ${config.auth.client_secret_env}. ` +
+        `${err instanceof Error ? err.message : String(err)}`
+      throw isLinearConfigError(err) ? new LinearConfigError(message) : new Error(message)
     }
 
     return {

@@ -22,6 +22,19 @@ export interface LinearCommentInput {
 
 const DEFAULT_SERVICE = 'crosscheck'
 
+// The visible line must agree with the annotation. Saying "review" on a recheck
+// made the human-readable text contradict the type=recheck sitting right below it.
+// Returns the whole connective phrase, including the preposition — "fix of" is
+// not English, so the label owns it rather than the template appending one.
+function stepLabel(stepType: string | undefined): string {
+  switch (stepType) {
+    case 'recheck': return 'recheck of'
+    case 'fix': return 'fix for'
+    case 'conflict-resolve': return 'conflict resolution for'
+    default: return 'review of'
+  }
+}
+
 // A `]` in the PR title would terminate the markdown link label early.
 function escapeLinkLabel(text: string): string {
   return text.replace(/([[\]])/g, '\\$1')
@@ -34,10 +47,11 @@ export function buildLinearCommentBody(input: LinearCommentInput): string {
   const sections = [
     input.signature,
     '',
-    // `default` means the vendor CLI chose the model and did not report which — naming
-    // it would be a guess, so the reviewer stands alone in that case.
+    // Both halves: the model when the vendor reported one — `default` means it
+    // chose without saying which, and naming it would be a guess — and the step
+    // label, so a recheck does not read as a review.
     `**${verdict}** — ${input.reviewer}${input.model && input.model !== 'default' ? ` (${input.model})` : ''}` +
-      ` review of [${escapeLinkLabel(input.prTitle)}](${input.prUrl})`,
+      ` ${stepLabel(input.stepType)} [${escapeLinkLabel(input.prTitle)}](${input.prUrl})`,
   ]
 
   if (input.summary) sections.push('', input.summary)

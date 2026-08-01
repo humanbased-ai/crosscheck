@@ -219,3 +219,99 @@ describe('LinearConfigError — exit-code classification', () => {
     expect(isLinearConfigError(undefined)).toBe(false)
   })
 })
+
+describe('outage vs misconfiguration', () => {
+  // A 5xx is Linear's problem, not the operator's — blaming it on the config
+  // would exit 1 and send someone hunting a broken env var that is fine.
+  const t1 = () => cfg({ auth: { mode: 'client_credentials' } })
+  const creds = { clientId: 'id', clientSecret: 'secret' }
+  const status = (code: number): FetchLike => vi.fn(async () => new Response('x', { status: code }))
+
+  it('treats a rejected credential (401) as a config error', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(401) }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(true)
+  })
+
+  it('treats a bad request (400) as a config error', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(400) }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(true)
+  })
+
+  it('does NOT blame the config for a 500', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(500) }).then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(isLinearConfigError(err)).toBe(false)
+  })
+
+  it('does NOT blame the config for a 503', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(503) }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(false)
+  })
+
+  it('does NOT blame the config for a transport failure', async () => {
+    const fetchImpl: FetchLike = vi.fn(async () => { throw new Error('ECONNRESET') })
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(false)
+  })
+
+  it('aborts either way — never falls back to api_key', async () => {
+    for (const code of [401, 500]) {
+      const err = await resolveLinearAuth(t1(), { ...creds, apiKey: 'lin_api_fallback' }, { fetchImpl: status(code) })
+        .then(() => null, (e: unknown) => e as Error)
+      expect(err!.message).toMatch(/aborting rather than falling back/)
+    }
+  })
+})
+
+describe('rate limiting is transient, not misconfiguration', () => {
+  const t1 = () => cfg({ auth: { mode: 'client_credentials' } })
+  const creds = { clientId: 'id', clientSecret: 'secret' }
+  const status = (code: number): FetchLike => vi.fn(async () => new Response('x', { status: code }))
+
+  it('does not blame the config for a 429', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(429) }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(false)
+  })
+
+  it('still blames the config for a 403', async () => {
+    const err = await resolveLinearAuth(t1(), creds, { fetchImpl: status(403) }).then(() => null, (e: unknown) => e)
+    expect(isLinearConfigError(err)).toBe(true)
+  })
+})
+
+describe('a rejected mint names the variables to check', () => {
+  // A bare "HTTP 401" leaves an operator with custom env names guessing which
+  // credential to rotate. Names only — never values.
+  const rejected = (): FetchLike => vi.fn(async () => new Response('nope', { status: 401 }))
+  const creds = { clientId: 'the-id', clientSecret: 'the-secret' }
+
+  it('names the default variables', async () => {
+    const config = cfg({ auth: { mode: 'client_credentials' } })
+    const err = await resolveLinearAuth(config, creds, { fetchImpl: rejected() })
+      .then(() => null, (e: unknown) => e as Error)
+    expect(err!.message).toContain('LINEAR_CLIENT_ID')
+    expect(err!.message).toContain('LINEAR_CLIENT_SECRET')
+  })
+
+  it('names custom variables', async () => {
+    const config = cfg({
+      auth: {
+        mode: 'client_credentials',
+        client_id_env: 'LINEAR_HB_AGENT_GATEWAY_CLIENT_ID',
+        client_secret_env: 'LINEAR_HB_AGENT_GATEWAY_CLIENT_SECRET',
+      },
+    })
+    const err = await resolveLinearAuth(config, creds, { fetchImpl: rejected() })
+      .then(() => null, (e: unknown) => e as Error)
+    expect(err!.message).toContain('LINEAR_HB_AGENT_GATEWAY_CLIENT_ID')
+    expect(err!.message).toContain('LINEAR_HB_AGENT_GATEWAY_CLIENT_SECRET')
+  })
+
+  it('still never leaks the values', async () => {
+    const config = cfg({ auth: { mode: 'client_credentials' } })
+    const err = await resolveLinearAuth(config, creds, { fetchImpl: rejected() })
+      .then(() => null, (e: unknown) => e as Error)
+    expect(err!.message).not.toContain('the-secret')
+    expect(err!.message).not.toContain('the-id')
+  })
+})

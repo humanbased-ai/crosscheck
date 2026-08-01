@@ -38,6 +38,17 @@ export interface LinearNotifyParams {
   round?: number
 }
 
+// Linear issue URLs are https://linear.app/<workspace>/issue/<ID>/<slug>.
+export function issueBelongsToWorkspace(issueUrl: string, workspace: string): boolean {
+  try {
+    const segments = new URL(issueUrl).pathname.split('/').filter(Boolean)
+    return segments[0]?.toLowerCase() === workspace.toLowerCase()
+  } catch {
+    // Unparseable URL from the API — fail closed rather than post to the wrong place.
+    return false
+  }
+}
+
 export async function notifyLinear(
   params: LinearNotifyParams,
   opts: LinearRequestOptions = {},
@@ -54,6 +65,14 @@ export async function notifyLinear(
   try {
     const issue = await findIssueByIdentifier(auth, ref.id, opts)
     if (!issue) return { status: 'skipped', reason: 'issue-not-found', identifier: ref.id }
+
+    // An explicit URL names a workspace, and identifiers repeat across workspaces.
+    // If the credentials resolve a different workspace, this is a same-numbered
+    // issue somewhere else — never the one the PR pointed at. Checked before any
+    // body is built, so a mismatch costs nothing.
+    if (ref.workspace && !issueBelongsToWorkspace(issue.url, ref.workspace)) {
+      return { status: 'skipped', reason: 'workspace-mismatch', identifier: ref.id }
+    }
 
     // Re-render here rather than reusing auth.signature: this is the first point
     // that knows the model and reviewer, which the template may reference.
