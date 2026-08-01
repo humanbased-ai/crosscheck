@@ -31,7 +31,9 @@ workspace**. If you're the only one, T0 is the right answer and the app is cerem
 If several agents and several humans all write, T0 makes them indistinguishable —
 that's the problem T1 solves.
 
-`crosscheck onboard` asks which rung you want and writes the config for you.
+`crosscheck onboard` asks which rung you want and writes the config for you:
+
+<img src="../assets/linear-onboard.svg" alt="crosscheck onboard, step 9.5 — choosing a Linear attribution rung" width="700" />
 
 ---
 
@@ -138,10 +140,17 @@ should appear authored by the app, not by you.
 
 ## What the comment looks like
 
-```
-🤖 crosscheck/review · crosscheck · claude-opus-4.5
+On the app rung, with the icon uploaded — the avatar and **APP** badge come from
+Linear, which knows the writer is an application rather than a person:
 
-**NEEDS_WORK** — codex (gpt-5.6-terra) review of [feat: add widget](https://github.com/acme/app/pull/12)
+<img src="../assets/linear-comment.svg" alt="A crosscheck review comment on a Linear issue, authored by the app actor" width="740" />
+
+The raw markdown behind that:
+
+```
+🤖 crosscheck/review · crosscheck · gpt-5.6-terra
+
+**NEEDS_WORK** — codex (gpt-5.6-terra) review of [feat: add rate limiting to the public API](https://github.com/acme/app/pull/312)
 ```
 
 The signature is a template — `linear.identity.signature`, with placeholders
@@ -165,6 +174,11 @@ before adopting it.
 `crosscheck status` shows a **Linear** section whenever `linear.enabled` is true. It
 resolves the configured identity for real — minting a T1 token if that's the mode —
 and reports what a write would render as:
+
+<img src="../assets/linear-status.svg" alt="crosscheck status showing the Linear identity section" width="620" />
+
+On the app rung the same rows read `✓ writes as crosscheck/<step> (crosscheck itself)`.
+In text form:
 
 ```
   Linear

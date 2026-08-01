@@ -364,7 +364,7 @@ export interface LinearDecision {
 // Each rung buys stronger attribution for more setup; rung 1 needs nothing but a
 // key, so a user who just wants review outcomes in Linear never has to see an
 // OAuth form. Defaults to off — writing into someone's tracker is opt-in.
-async function promptLinear(
+export async function promptLinear(
   current: { enabled?: boolean; mode?: string; teamKeys?: string[] } | undefined,
   opts: OnboardOpts,
 ): Promise<LinearDecision> {
