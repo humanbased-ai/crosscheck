@@ -91,3 +91,30 @@ describe('shouldPostToLinear', () => {
     expect(shouldPostToLinear('BLOCK', [])).toBe(false)
   })
 })
+
+describe('workflow step metadata', () => {
+  // A recheck posted by runWorkflow must not claim to be a round-1 review — the
+  // Linear annotation has to agree with the GitHub one or parsers see two truths.
+  it('defaults to a round-1 review', () => {
+    const parsed = parseAnnotation(buildLinearCommentBody(BASE))
+    expect(parsed).toMatchObject({ type: 'review', round: 1 })
+  })
+
+  it('carries an explicit step type', () => {
+    const body = buildLinearCommentBody({ ...BASE, stepType: 'recheck' })
+    expect(parseAnnotation(body)).toMatchObject({ type: 'recheck' })
+  })
+
+  it('carries an explicit round', () => {
+    const body = buildLinearCommentBody({ ...BASE, stepType: 'recheck', round: 3 })
+    expect(parseAnnotation(body)).toMatchObject({ type: 'recheck', round: 3 })
+  })
+
+  it('matches what the GitHub annotation would carry for the same step', () => {
+    const body = buildLinearCommentBody({ ...BASE, stepType: 'fix', round: 2 })
+    const parsed = parseAnnotation(body)
+    expect(parsed?.type).toBe('fix')
+    expect(parsed?.round).toBe(2)
+    expect(parsed?.sha).toBe(BASE.sha)
+  })
+})

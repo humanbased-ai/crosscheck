@@ -529,24 +529,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
 
-  // Linear write-back. Resolved once per workflow and only when a verdict actually
-  // needs posting, so a run that never reaches Linear pays nothing. A resolution
-  // failure disables write-back for the run and is logged — it must not fail a
-  // review that already succeeded and posted to GitHub.
+  // Linear write-back identity. Resolved up front — before any expensive step —
+  // and allowed to throw. The contract is that a configured-but-failing
+  // client_credentials mint ABORTS rather than degrading, because silently
+  // continuing would either drop the write or re-attribute it to a human. This
+  // matches commands/review.ts; the two paths must not disagree.
   let linearAuth: ResolvedLinearAuth | null = null
-  let linearAuthAttempted = false
-  const resolveLinearForRun = async (): Promise<ResolvedLinearAuth | null> => {
-    if (linearAuthAttempted) return linearAuth
-    linearAuthAttempted = true
-    try {
-      linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
-      fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
-    } catch (err: unknown) {
-      linearAuth = null
-      fileLog({ level: 'warn', event: 'linear_auth_failed', repo: `${owner}/${repoName}`, pr: prNumber, reason: err instanceof Error ? err.message : String(err) })
-      log(chalk.yellow(`  linear: identity unavailable — ${err instanceof Error ? err.message : String(err)}`))
-    }
-    return linearAuth
+  if (config.linear.enabled) {
+    linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+    fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
   }
 
   let workflowFailed = false
@@ -790,17 +781,18 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         // Mirror the verdict onto the PR's Linear issue. `run` and `watch` both
         // land here, so this is the path that matters — reviews posted from
         // commands/review.ts are the exception, not the rule.
-        if (config.linear.enabled && shouldPostToLinear(verdict ?? null, config.linear.comment_on)) {
-          const auth = await resolveLinearForRun()
-          if (auth) {
+        if (linearAuth && shouldPostToLinear(verdict ?? null, config.linear.comment_on)) {
+          {
             const linearResult = await notifyLinear({
-              auth,
+              auth: linearAuth,
               config: config.linear,
               pr: { branch: pr.head.ref, title: pr.title, body: pr.body ?? '', url: `https://${commentUrl}`, sha: annotationSha },
               verdict: verdict ?? null,
               reviewer,
               origin,
               model,
+              stepType: effectiveType,
+              round: ctx.round ?? 1,
               service: config.brand.service_name,
             })
             fileLog({
