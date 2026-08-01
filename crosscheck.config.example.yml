@@ -259,7 +259,14 @@ logs:
 #     scopes: "read write"
 #   identity:
 #     actor: crosscheck                 # createAsUser name in T1
-#     signature: "🤖 {actor} · {product}"   # first line of every Linear write
+#     # First line of every Linear write. Placeholders: {actor} {product} {model}
+#     # {reviewer} {icon}. Ones with no value resolve to empty and the leftover
+#     # separators are tidied, so this reads correctly either way.
+#     signature: "🤖 {actor} · {product} · {model}"
+#     # Optional logo, rendered inline where {icon} appears in the signature.
+#     # The better route is the OAuth app avatar (T1) — Linear renders it natively
+#     # beside the comment. Inline images may render block-level; test first.
+#     icon_url: ""
 #     # Suffix the actor with the step that produced the write, so a review, a fix
 #     # and a recheck are distinguishable: crosscheck/review, crosscheck/fix, ...
 #     # Set false for one flat actor name.

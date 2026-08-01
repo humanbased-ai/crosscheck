@@ -14,15 +14,24 @@ By default an agent writing to Linear uses whatever API key the operator supplie
 usually a person's personal key. Every comment then looks like that person wrote it,
 and there is no way to tell agent activity from human activity.
 
-There are two tiers you can adopt, in increasing order of strength.
+There is a ladder here. Each rung buys stronger attribution for a bit more setup —
+**start at the bottom.** Most people never need to climb it.
 
-| Tier | Mode | Setup | How writes appear |
+| Rung | Mode | Setup | How writes appear |
 |---|---|---|---|
-| **T0** | `api_key` | none beyond a key | Your account, with a `🤖 crosscheck · crosscheck` signature line |
-| **T1** | `client_credentials` | one OAuth app, ~5 min | The app itself (botActor), via `createAsUser` |
+| **T0** | `api_key` | one env var | Your account, led by a `🤖 crosscheck · crosscheck` signature line |
+| **T1** | `client_credentials` | one OAuth app, ~5 min, once per workspace | crosscheck itself, with its own icon |
 
-T0 works everywhere and is the default. T1 is recommended — it is the only tier where
-Linear itself, not just a text convention, distinguishes the writer.
+**T0 is not a broken version of T1.** Linear write-back is fully functional with just
+an API key: crosscheck finds the issue and posts the comment. What T0 lacks is
+*attribution*, not capability.
+
+So the question isn't "which is better", it's **how many things write to your
+workspace**. If you're the only one, T0 is the right answer and the app is ceremony.
+If several agents and several humans all write, T0 makes them indistinguishable —
+that's the problem T1 solves.
+
+`crosscheck onboard` asks which rung you want and writes the config for you.
 
 ---
 
@@ -54,7 +63,12 @@ as the author — the signature is a convention, not an identity.
 
 Go to **Linear → Settings → API → OAuth applications → Create new**.
 
-Fill in a name (`crosscheck`, or whatever you want to see on comments) and an icon.
+Fill in a name (`crosscheck`, or whatever you want to see on comments) and an icon —
+upload [`assets/icon-256.png`](../assets/icon-256.png) from this repo. That avatar is
+what Linear renders beside every comment crosscheck posts, and it is the *only* way to
+get the logo onto a comment: the icon comes from Linear's app settings, not from
+anything crosscheck sends. On T0 your own avatar appears, because Linear genuinely
+believes you wrote it.
 
 > **Gotcha:** the form **requires a Redirect URI** even though client credentials never
 > uses one. Any placeholder URL on a domain you control is fine —
@@ -119,6 +133,30 @@ linear:
 
 Run a review against a PR whose branch or body references a Linear issue. The comment
 should appear authored by the app, not by you.
+
+---
+
+## What the comment looks like
+
+```
+🤖 crosscheck/review · crosscheck · claude-opus-4.5
+
+**NEEDS_WORK** — codex (gpt-5.6-terra) review of [feat: add widget](https://github.com/acme/app/pull/12)
+```
+
+The signature is a template — `linear.identity.signature`, with placeholders
+`{actor}`, `{product}`, `{model}`, `{reviewer}`, and `{icon}`. Placeholders with no
+value resolve to empty and the leftover separators are tidied, so one template works
+whether or not the model is known.
+
+The model appears in two places: the signature (if your template asks for it) and the
+verdict line. When the vendor CLI picks the model without reporting which, the model
+is omitted rather than guessed.
+
+`{icon}` renders `linear.identity.icon_url` as an inline image. Before reaching for
+it, note the caveat above: the app avatar is the supported way to brand a comment, and
+inline images may render block-level rather than inline. Test it on a scratch issue
+before adopting it.
 
 ---
 

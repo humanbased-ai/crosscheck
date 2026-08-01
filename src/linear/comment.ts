@@ -31,7 +31,10 @@ export function buildLinearCommentBody(input: LinearCommentInput): string {
   const sections = [
     input.signature,
     '',
-    `**${verdict}** — ${input.reviewer} review of [${escapeLinkLabel(input.prTitle)}](${input.prUrl})`,
+    // `default` means the vendor CLI chose the model and did not report which — naming
+    // it would be a guess, so the reviewer stands alone in that case.
+    `**${verdict}** — ${input.reviewer}${input.model && input.model !== 'default' ? ` (${input.model})` : ''}` +
+      ` review of [${escapeLinkLabel(input.prTitle)}](${input.prUrl})`,
   ]
 
   if (input.summary) sections.push('', input.summary)

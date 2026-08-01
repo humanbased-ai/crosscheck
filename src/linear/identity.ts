@@ -56,8 +56,53 @@ export interface ResolveOptions extends MintOptions {
 
 const DEFAULT_PRODUCT = 'crosscheck'
 
-export function renderSignature(template: string, actor: string, product: string): string {
-  return template.replaceAll('{actor}', actor).replaceAll('{product}', product)
+export interface SignatureVars {
+  actor: string
+  product: string
+  /** Reviewer model, e.g. `claude-opus-4.5`. Absent at auth-resolution time. */
+  model?: string
+  /** Reviewing vendor, e.g. `codex`. */
+  reviewer?: string
+  /** Pre-rendered markdown image, or '' when no icon is configured. */
+  icon?: string
+}
+
+// Renders the signature template. Unknown placeholders are left alone; known ones
+// with no value resolve to empty, and the leftover punctuation is tidied so a
+// template like `🤖 {icon} {actor} · {product} · {model}` still reads correctly
+// when icon and model are unset.
+export function renderSignature(template: string, vars: SignatureVars): string {
+  const values: Record<string, string> = {
+    actor: vars.actor,
+    product: vars.product,
+    model: vars.model ?? '',
+    reviewer: vars.reviewer ?? '',
+    icon: vars.icon ?? '',
+  }
+  const substituted = template.replace(
+    /\{(actor|product|model|reviewer|icon)\}/g,
+    (_match, key: string) => values[key],
+  )
+  return tidySeparators(substituted)
+}
+
+// Collapses the gaps an empty placeholder leaves behind: doubled separators,
+// and a separator stranded at either end.
+function tidySeparators(text: string): string {
+  return text
+    .replace(/[ \t]+/g, ' ')
+    // Deliberately excludes `-`: model names like claude-opus-4.5 must survive intact.
+    .replace(/(·|—|\|)(\s*\1)+/g, '$1')
+    .replace(/\s*(·|—|\|)\s*(?=(·|—|\|))/g, '')
+    .replace(/^\s*(·|—|\||\s)+/, '')
+    .replace(/(\s*(·|—|\|))+\s*$/, '')
+    .trim()
+}
+
+/** Wraps a configured icon URL as inline markdown, or '' when unset. */
+export function renderIcon(iconUrl: string): string {
+  const trimmed = iconUrl.trim()
+  return trimmed ? `![](${trimmed})` : ''
 }
 
 export async function mintAppToken(
@@ -112,7 +157,7 @@ export async function resolveLinearAuth(
 ): Promise<ResolvedLinearAuth> {
   const product = opts.product ?? DEFAULT_PRODUCT
   const { actor, signature: template } = config.identity
-  const signature = renderSignature(template, actor, product)
+  const signature = renderSignature(template, { actor, product })
 
   if (config.auth.mode === 'client_credentials') {
     const missing: string[] = []
@@ -177,7 +222,7 @@ export function withWorker(auth: ResolvedLinearAuth, worker: string): ResolvedLi
   return {
     ...auth,
     actor,
-    signature: renderSignature(auth.signatureTemplate, actor, auth.product),
+    signature: renderSignature(auth.signatureTemplate, { actor, product: auth.product }),
     ...(auth.createAsUser !== undefined && { createAsUser: actor }),
   }
 }

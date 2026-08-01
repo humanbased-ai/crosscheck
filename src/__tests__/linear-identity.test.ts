@@ -16,15 +16,15 @@ function okMint(): FetchLike {
 
 describe('renderSignature', () => {
   it('expands {actor} and {product}', () => {
-    expect(renderSignature('🤖 {actor} · {product}', 'crosscheck', 'crosscheck')).toBe('🤖 crosscheck · crosscheck')
+    expect(renderSignature('🤖 {actor} · {product}', { actor: 'crosscheck', product: 'crosscheck' })).toBe('🤖 crosscheck · crosscheck')
   })
 
   it('expands repeated placeholders', () => {
-    expect(renderSignature('{actor}/{actor} on {product}', 'cc', 'p')).toBe('cc/cc on p')
+    expect(renderSignature('{actor}/{actor} on {product}', { actor: 'cc', product: 'p' })).toBe('cc/cc on p')
   })
 
   it('leaves unknown placeholders untouched', () => {
-    expect(renderSignature('{actor} {nope}', 'cc', 'p')).toBe('cc {nope}')
+    expect(renderSignature('{actor} {nope}', { actor: 'cc', product: 'p' })).toBe('cc {nope}')
   })
 })
 

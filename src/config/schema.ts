@@ -253,7 +253,13 @@ export const LinearAuthConfigSchema = z.object({
 export const LinearIdentityConfigSchema = z.object({
   // createAsUser base name in T1; the {actor} placeholder in the signature template.
   actor: z.string().default('crosscheck'),
-  signature: z.string().default('🤖 {actor} · {product}'),
+  // Placeholders: {actor} {product} {model} {reviewer} {icon}. Ones with no value
+  // resolve to empty and the leftover separators are tidied away.
+  signature: z.string().default('🤖 {actor} · {product} · {model}'),
+  // Optional logo shown inline in the signature via {icon}. Note the better route
+  // is the OAuth app avatar (T1), which Linear renders natively beside the comment —
+  // see docs/linear-identity.md. Inline images may render block-level.
+  icon_url: z.string().default(''),
   // Suffix the actor with the workflow step that produced the write, so a review,
   // a recheck and a fix are distinguishable rather than all reading as one bot:
   //   crosscheck/review, crosscheck/fix, crosscheck/recheck
