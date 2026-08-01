@@ -71,7 +71,9 @@ export async function runLinearTest(issueRef: string | undefined, opts: LinearTe
   const report = await verifyLinearIdentity(config.linear, getLinearCredentials(config.linear.auth))
   if (!report.ok) {
     console.error(chalk.red(`✗ identity      ${report.error}`))
-    process.exit(1)
+    // A misconfiguration is exit 1; a Linear outage is exit 2, same as everywhere
+    // else. verifyLinearIdentity never throws, so classify from the message.
+    process.exit(report.error && /HTTP 5\d\d|429|mint failed/.test(report.error) ? 2 : 1)
   }
   const writesAs = report.attribution === 'app'
     ? `${report.actor} ${chalk.dim('(crosscheck itself)')}`
@@ -92,8 +94,10 @@ export async function runLinearTest(issueRef: string | undefined, opts: LinearTe
   }
   console.log(`${chalk.green('✓')} reference     ${ref.id} ${chalk.dim(`(via ${ref.source})`)}`)
 
-  // 3 — does it exist
-  const auth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+  // 3 — does it exist. Reuses the identity the probe already resolved: minting a
+  // second token here broke the one-token-per-run contract, and a transient
+  // failure on that second mint could fail a dry run whose verification passed.
+  const auth = report.auth!
   const issue = await findIssueByIdentifier(auth, ref.id)
   if (!issue) {
     console.error(chalk.red(`✗ lookup        ${ref.id} not found in ${report.organization ?? 'this workspace'}`))

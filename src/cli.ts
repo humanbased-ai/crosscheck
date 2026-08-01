@@ -219,8 +219,12 @@ program
     // `void` on its own leaves a rejection unhandled — the process would print a
     // Node warning and exit 0 instead of reporting the failure.
     runLinearTest(issue, opts).catch((err: unknown) => {
-      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
-      process.exit(isLinearConfigError(err) ? 1 : 2)
+      const message = err instanceof Error ? err.message : String(err)
+      console.error(chalk.red(`✗ ${message}`))
+      // A malformed identifier is a typo in the argument the user just supplied,
+      // so it is a user error like a missing credential — not an unexpected one.
+      const userError = isLinearConfigError(err) || /Malformed Linear issue identifier/.test(message)
+      process.exit(userError ? 1 : 2)
     })
   })
 
