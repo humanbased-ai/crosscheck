@@ -121,11 +121,27 @@ Attribution is a ladder — **start at the bottom, climb only if you need to**:
 
 The API key rung is fully functional — it finds the issue and posts the comment. What it lacks is *attribution*, not capability. So the question isn't which is better, it's **how many things write to your workspace**. If you're the only one, the app is ceremony.
 
-`crosscheck onboard` asks which rung you want. To check a setup without waiting for a PR:
+`crosscheck onboard` asks which rung you want and writes the config:
 
-```bash
-crosscheck linear-test ENG-42     # resolves, looks up, previews the comment — posts nothing
-```
+<p align="center">
+  <img src="./assets/linear-onboard.svg" alt="crosscheck onboard — choosing a Linear attribution rung" width="700" />
+</p>
+
+To check a setup without waiting for a PR, `linear-test` runs the whole path and posts nothing:
+
+<p align="center">
+  <img src="./assets/linear-test.svg" alt="crosscheck linear-test — verifying Linear write-back end to end" width="700" />
+</p>
+
+<details>
+<summary>Confirming which rung you're on at any time</summary>
+
+`crosscheck status` resolves the configured identity for real and reports what a write would render as:
+
+<p align="center">
+  <img src="./assets/linear-status.svg" alt="crosscheck status — the Linear identity section" width="620" />
+</p>
+</details>
 
 Full walkthrough: **[docs/linear-identity.md](./docs/linear-identity.md)**.
 
@@ -260,6 +276,6 @@ Issues and PRs welcome at [github.com/humanbased-ai/crosscheck](https://github.c
 
 ## License
 
-[MIT](./LICENSE) — Copyright (c) 2025–2026 Humanbased PTE LTD.
+[MIT](./LICENSE) — Copyright (c) 2025–2026 Humanbased AI PTE LTD.
 
 <p align="center"><em>A Humanbased project, built with crosscheck.</em></p>

@@ -180,6 +180,25 @@ export LINEAR_CLIENT_SECRET=...
 A failed T1 token mint aborts the run rather than falling back to `api_key` —
 a silent downgrade would put agent writes back under a human's name.
 
+`crosscheck onboard` walks you through the choice:
+
+<p align="center">
+  <img src="./assets/linear-onboard.svg" alt="crosscheck onboard — choosing a Linear attribution rung" width="700" />
+</p>
+
+Before opening a PR, `crosscheck linear-test` exercises the whole path and posts nothing —
+identity, issue lookup, verdict filter, and the exact comment body:
+
+<p align="center">
+  <img src="./assets/linear-test.svg" alt="crosscheck linear-test — dry-run verification" width="700" />
+</p>
+
+`crosscheck status` shows which rung is active whenever `linear.enabled` is true:
+
+<p align="center">
+  <img src="./assets/linear-status.svg" alt="crosscheck status — the Linear identity section" width="620" />
+</p>
+
 Full walkthrough, including the two Linear UI gotchas that trip people up:
 [docs/linear-identity.md](docs/linear-identity.md).
 
