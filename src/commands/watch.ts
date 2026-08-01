@@ -33,13 +33,13 @@ import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
+import { loadWorkflow, canWriteVerdict, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { filterStepsByTypes, formatRepoWorkflowSteps, isRecheckWithoutFix, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
-import { resolveLinearAuth, isLinearConfigError } from '../linear/identity.js'
+import { resolveLinearAuth, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import {
   getSmartSwitch,
   isSubscriptionLimitError,
@@ -544,14 +544,25 @@ export async function runWatch(opts: WatchOpts = {}) {
         board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
         boardAdded = true
 
-        // After board.addPR on purpose: a throw before this point is caught by a
-        // handler that only calls logError — a no-op when file logging is off — so
-        // the daemon would look healthy while silently dropping every affected
-        // event. Startup already preflights credentials; this catches expiry and
-        // outages mid-run, and surfaces them on the board.
-        const linearAuth = effectiveConfig.linear.enabled
-          ? await resolveLinearAuth(effectiveConfig.linear, getLinearCredentials(effectiveConfig.linear.auth))
-          : null
+        // Registered on the board first so a failure here is visible, then resolved
+        // before any further expensive work. The failure is surfaced explicitly:
+        // the enclosing catch only calls logError, a no-op when file logging is
+        // off, so relying on it dropped events silently.
+        //
+        // Only the steps that can write a verdict need an identity — `crosscheck
+        // fix` and `crosscheck resolve` never call notifyLinear, and an outage
+        // must not abort work that was never going to write.
+        let linearAuth: ResolvedLinearAuth | null = null
+        if (effectiveConfig.linear.enabled && canWriteVerdict(resolvedSteps)) {
+          try {
+            linearAuth = await resolveLinearAuth(effectiveConfig.linear, getLinearCredentials(effectiveConfig.linear.auth))
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err)
+            board.failPR(key, `linear identity unavailable: ${message}`)
+            fileLog({ level: 'error', event: 'linear_auth_failed', repo: `${owner}/${repoName}`, pr: prNumber, reason: message })
+            throw err
+          }
+        }
 
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })

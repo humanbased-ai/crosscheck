@@ -185,3 +185,12 @@ export function evaluateWhen(expr: string, results: Record<string, StepResult>):
     default:   return true
   }
 }
+
+
+// Only review and recheck steps post a verdict, and only a verdict reaches Linear.
+// `crosscheck fix` and `crosscheck resolve` run workflows that can never write, so
+// they must not be aborted by a missing credential or a Linear outage.
+export function canWriteVerdict(steps: ReadonlyArray<{ type: string }> | undefined): boolean {
+  if (!steps) return true
+  return steps.some(s => s.type === 'review' || s.type === 'recheck')
+}

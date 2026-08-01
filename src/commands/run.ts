@@ -16,7 +16,7 @@ import { initLogger, log as fileLog, logError, classifyError } from '../lib/logg
 import { hintForError } from '../lib/remediation.js'
 import { runWorkflow } from '../lib/runner.js'
 import { isLinearConfigError, resolveLinearAuth } from '../linear/identity.js'
-import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
+import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, canWriteVerdict, type WorkflowStep } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
@@ -490,7 +490,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       // misconfiguration should fail without spending a clone, and runWorkflow is
       // re-entered per fix/recheck round so resolving inside it would mint every
       // round. Inside the try, so a failure still reaches the completion handler.
-      const linearAuth = config.linear.enabled && !opts.dryRun
+      // Only when the selected workflow can actually write a verdict — the public
+      // `fix` and `resolve` aliases run steps that never call notifyLinear, and a
+      // missing credential must not abort work that was never going to write.
+      const linearAuth = config.linear.enabled && !opts.dryRun && canWriteVerdict(filteredSteps)
         ? await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
         : null
 
