@@ -85,12 +85,12 @@ describe('resolveLinearAuth — api_key mode (T0)', () => {
     expect(auth.token).toBe('lin_api_xyz')
     expect(auth.bearer).toBe(false)
     expect(auth.createAsUser).toBeUndefined()
-    expect(auth.signature).toBe('🤖 crosscheck · crosscheck')
+    expect(auth.signature).toBe('🤖 crosscheck')
   })
 
   it('honours a configured actor in the signature', async () => {
     const auth = await resolveLinearAuth(cfg({ identity: { actor: 'crosscheck/reviewer' } }), { apiKey: 'k' })
-    expect(auth.signature).toBe('🤖 crosscheck/reviewer · crosscheck')
+    expect(auth.signature).toBe('🤖 crosscheck/reviewer')
   })
 
   it('aborts when no key is available, naming the env var to set', async () => {
@@ -120,7 +120,7 @@ describe('resolveLinearAuth — client_credentials mode (T1)', () => {
 
   it('keeps the signature line as T1 fallback text', async () => {
     const auth = await resolveLinearAuth(t1(), { clientId: CLIENT_ID, clientSecret: SECRET }, { fetchImpl: okMint() })
-    expect(auth.signature).toBe('🤖 crosscheck · crosscheck')
+    expect(auth.signature).toBe('🤖 crosscheck')
   })
 
   it('passes the configured scopes through to the mint', async () => {

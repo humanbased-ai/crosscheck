@@ -19,7 +19,7 @@ There is a ladder here. Each rung buys stronger attribution for a bit more setup
 
 | Rung | Mode | Setup | How writes appear |
 |---|---|---|---|
-| **T0** | `api_key` | one env var | Your account, led by a `🤖 crosscheck · crosscheck` signature line |
+| **T0** | `api_key` | one env var | Your account, led by a `🤖 crosscheck · <model>` signature line |
 | **T1** | `client_credentials` | one OAuth app, ~5 min, once per workspace | crosscheck itself, with its own icon |
 
 **T0 is not a broken version of T1.** Linear write-back is fully functional with just
@@ -54,7 +54,7 @@ linear:
     - IN          # your team's key prefix
 ```
 
-Every write leads with `🤖 crosscheck · crosscheck`. Linear still records your account
+Every write leads with `🤖 crosscheck · <model>`. Linear still records your account
 as the author — the signature is a convention, not an identity.
 
 ---
@@ -125,8 +125,7 @@ linear:
     scopes: "read write"
   identity:
     actor: crosscheck
-  comment_on:
-    - APPROVE
+  comment_on:            # default; add APPROVE to comment on clean reviews too
     - NEEDS_WORK
     - BLOCK
   team_keys:
@@ -148,7 +147,7 @@ Linear, which knows the writer is an application rather than a person:
 The raw markdown behind that:
 
 ```
-🤖 crosscheck/review · crosscheck · gpt-5.6-terra
+🤖 crosscheck/review · gpt-5.6-terra
 
 **NEEDS_WORK** — codex (gpt-5.6-terra) review of [feat: add rate limiting to the public API](https://github.com/acme/app/pull/312)
 ```
@@ -169,6 +168,25 @@ before adopting it.
 
 ---
 
+## Testing without waiting for a PR
+
+`crosscheck linear-test` exercises the whole path and posts nothing:
+
+```bash
+crosscheck linear-test ENG-42
+```
+
+<img src="../assets/linear-test.svg" alt="crosscheck linear-test verifying the Linear setup end to end without posting" width="700" />
+
+It resolves your identity, looks the issue up for real, checks whether the verdict
+would pass `comment_on`, and prints the exact comment body a review would post. Each
+step reports separately, so a failure names itself rather than leaving you guessing.
+
+Pass `--branch` or `--title` to test ref resolution the way a real PR would hit it,
+and `--verdict` to preview a different outcome.
+
+---
+
 ## Verifying which identity you're on
 
 `crosscheck status` shows a **Linear** section whenever `linear.enabled` is true. It
@@ -177,14 +195,13 @@ and reports what a write would render as:
 
 <img src="../assets/linear-status.svg" alt="crosscheck status showing the Linear identity section" width="620" />
 
-On the app rung the same rows read `✓ writes as crosscheck/<step> (crosscheck itself)`.
-In text form:
+On the app rung the same rows read:
 
 ```
   Linear
   ✓ auth mode             client_credentials
     organization          Inductive Network
-  ✓ writes as             crosscheck/<step> (app actor)
+  ✓ writes as             crosscheck/<step> (crosscheck itself)
 ```
 
 On T0 it names the human account instead, because that's the state worth seeing:

@@ -166,7 +166,7 @@ the config for you.
 
 **Start with `api_key`.** It reuses `LINEAR_API_KEY`, works immediately, and posts
 the comment — the feature is fully functional. Comments attribute to your Linear
-account, led by a `🤖 crosscheck · crosscheck` signature line.
+account, led by a `🤖 crosscheck · <model>` signature line.
 
 Climb to `client_credentials` when more than one thing writes to your workspace and
 you need them told apart. It uses an OAuth app — one per workspace, not per user —

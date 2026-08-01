@@ -63,12 +63,12 @@ describe('renderIcon', () => {
 
 describe('default signature template', () => {
   it('includes the model placeholder', () => {
-    expect(cfg().identity.signature).toBe('🤖 {actor} · {product} · {model}')
+    expect(cfg().identity.signature).toBe('🤖 {actor} · {model}')
   })
 
   it('renders cleanly at auth time, when no model is known yet', async () => {
     const auth = await resolveLinearAuth(cfg(), { apiKey: 'k' })
-    expect(auth.signature).toBe('🤖 crosscheck · crosscheck')
+    expect(auth.signature).toBe('🤖 crosscheck')
   })
 
   it('defaults icon_url to empty so nothing renders unless configured', () => {
@@ -133,7 +133,7 @@ describe('notifyLinear — end-to-end branding', () => {
   async function postedFirstLine(config: ReturnType<typeof cfg>, model: string): Promise<string> {
     const fetchImpl = scriptedFetch()
     await notifyLinear(
-      { auth: AUTH, config, pr: PR, verdict: 'APPROVE', reviewer: 'codex', origin: 'claude', model },
+      { auth: AUTH, config, pr: PR, verdict: 'NEEDS_WORK', reviewer: 'codex', origin: 'claude', model },
       { fetchImpl },
     )
     const calls = (fetchImpl as ReturnType<typeof vi.fn>).mock.calls

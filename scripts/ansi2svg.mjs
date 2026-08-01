@@ -10,7 +10,7 @@ const FG = {
 }
 const DEFAULT_FG = '#c8ccd4'
 const BG = '#21252b'
-const CHAR_W = 8.4
+const CHAR_W = 8.6
 const LINE_H = 20
 const PAD_X = 18
 const PAD_TOP = 52
@@ -43,13 +43,16 @@ function parseLine(line) {
   return runs
 }
 
+const WIDE_G = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u
+const cellLen = t => [...t].reduce((n, ch) => n + (WIDE_G.test(ch) ? 2 : 1), 0)
+
 export function render(ansi, { title = '', width } = {}) {
   const lines = ansi.replace(/\r/g, '').split('\n')
   while (lines.length && !lines[lines.length - 1].trim()) lines.pop()
 
-  const plainLen = l => l.replace(/\x1b\[[0-9;]*m/g, '').length
+  const plainLen = l => cellLen(l.replace(/\x1b\[[0-9;]*m/g, ''))
   const cols = Math.max(...lines.map(plainLen), title.length + 8)
-  const w = width ?? Math.ceil(cols * CHAR_W + PAD_X * 2)
+  const w = width ?? Math.ceil((cols + 2) * CHAR_W + PAD_X * 2)
   const h = Math.ceil(lines.length * LINE_H + PAD_TOP + 18)
 
   const body = lines.map((line, row) => {
@@ -65,14 +68,18 @@ export function render(ansi, { title = '', width } = {}) {
       const text = run.text.slice(lead)
       if (!text) continue
       const fill = run.fg ?? DEFAULT_FG
+      // textLength pins each run to its exact monospace width, so alignment does not
+      // depend on which font the rasteriser happens to resolve.
+      const runW = cellLen(text) * CHAR_W
       const attrs = [
         `x="${x.toFixed(1)}"`, `y="${y}"`, `fill="${fill}"`,
+        `textLength="${runW.toFixed(1)}"`, 'lengthAdjust="spacing"',
         run.bold ? 'font-weight="600"' : '',
         run.dim ? 'opacity="0.55"' : '',
         'xml:space="preserve"',
       ].filter(Boolean).join(' ')
       spans.push(`<text ${attrs}>${esc(text)}</text>`)
-      x += text.length * CHAR_W
+      x += runW
     }
     return spans.join('')
   }).join('\n')

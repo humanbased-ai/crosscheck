@@ -16,6 +16,7 @@ import { runImpact } from './commands/impact.js'
 import { runIssue } from './commands/issue.js'
 import { runRunSpec, runRecheckSpec, runFixSpec, runResolveSpec, type RunSpecOpts } from './commands/run.js'
 import { runDetectStep } from './commands/detect-step.js'
+import { runLinearTest } from './commands/linear-test.js'
 import { runScan } from './commands/scan.js'
 import { runKickass } from './commands/kickass.js'
 
@@ -204,6 +205,16 @@ program
   .option('-c, --config <path>', 'config file path')
   .option('--json', 'emit result as JSON')
   .action((prUrl: string, opts: { config?: string; json?: boolean }) => void runDetectStep(prUrl, opts))
+
+program
+  .command('linear-test [issue]')
+  .description('Dry-run Linear write-back: verify identity, resolve an issue, print the comment (posts nothing)')
+  .option('-c, --config <path>', 'config file path')
+  .option('--branch <name>', 'resolve the issue from a branch name instead of naming it')
+  .option('--title <text>', 'resolve the issue from a PR title instead of naming it')
+  .option('--verdict <verdict>', 'verdict to preview (APPROVE, NEEDS_WORK, BLOCK)')
+  .action((issue: string | undefined, opts: { config?: string; branch?: string; title?: string; verdict?: string }) =>
+    void runLinearTest(issue, opts))
 
 program
   .command('scan')

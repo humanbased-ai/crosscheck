@@ -1,23 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="549" height="350" viewBox="0 0 549 350" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.5">
-  <rect width="549" height="350" rx="8" fill="#21252b"/>
-  <rect width="549" height="34" rx="8" fill="#2c313a"/>
-  <rect y="26" width="549" height="8" fill="#2c313a"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="578" height="350" viewBox="0 0 578 350" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.5">
+  <rect width="578" height="350" rx="8" fill="#21252b"/>
+  <rect width="578" height="34" rx="8" fill="#2c313a"/>
+  <rect y="26" width="578" height="8" fill="#2c313a"/>
   <circle cx="20" cy="17" r="6" fill="#ff5f58"/>
   <circle cx="40" cy="17" r="6" fill="#ffbd2e"/>
   <circle cx="60" cy="17" r="6" fill="#18c132"/>
-  <text x="274.5" y="22" fill="#8b919b" font-size="12" text-anchor="middle">crosscheck status</text>
-<text x="34.8" y="52" fill="#c8ccd4" opacity="0.55" xml:space="preserve">Config</text>
-<text x="51.6" y="72" fill="#c8ccd4" font-weight="600" xml:space="preserve">config path           </text><text x="244.8" y="72" fill="#c8ccd4" xml:space="preserve">~/.crosscheck/config.yml</text>
-<text x="51.6" y="92" fill="#c8ccd4" font-weight="600" xml:space="preserve">mode                  </text><text x="244.8" y="92" fill="#c8ccd4" xml:space="preserve">cross-vendor</text>
-<text x="51.6" y="112" fill="#c8ccd4" font-weight="600" xml:space="preserve">quality tier          </text><text x="244.8" y="112" fill="#c8ccd4" xml:space="preserve">balanced</text>
-<text x="51.6" y="132" fill="#c8ccd4" font-weight="600" xml:space="preserve">codex auth            </text><text x="244.8" y="132" fill="#c8ccd4" xml:space="preserve">subscription</text>
-<text x="51.6" y="152" fill="#c8ccd4" font-weight="600" xml:space="preserve">codex model           </text><text x="244.8" y="152" fill="#c8ccd4" xml:space="preserve">auto (by tier)</text>
-<text x="51.6" y="172" fill="#c8ccd4" font-weight="600" xml:space="preserve">claude model          </text><text x="244.8" y="172" fill="#c8ccd4" xml:space="preserve">default</text>
-<text x="51.6" y="192" fill="#c8ccd4" font-weight="600" xml:space="preserve">per-review budget     </text><text x="244.8" y="192" fill="#c8ccd4" xml:space="preserve">subscription (unlimited)</text>
+  <text x="289" y="22" fill="#8b919b" font-size="12" text-anchor="middle">crosscheck status</text>
+<text x="35.2" y="52" fill="#c8ccd4" textLength="51.6" lengthAdjust="spacing" opacity="0.55" xml:space="preserve">Config</text>
+<text x="52.4" y="72" fill="#c8ccd4" textLength="189.2" lengthAdjust="spacing" font-weight="600" xml:space="preserve">config path           </text><text x="250.2" y="72" fill="#c8ccd4" textLength="206.4" lengthAdjust="spacing" xml:space="preserve">~/.crosscheck/config.yml</text>
+<text x="52.4" y="92" fill="#c8ccd4" textLength="189.2" lengthAdjust="spacing" font-weight="600" xml:space="preserve">mode                  </text><text x="250.2" y="92" fill="#c8ccd4" textLength="103.2" lengthAdjust="spacing" xml:space="preserve">cross-vendor</text>
+<text x="52.4" y="112" fill="#c8ccd4" textLength="189.2" lengthAdjust="spacing" font-weight="600" xml:space="preserve">quality tier          </text><text x="250.2" y="112" fill="#c8ccd4" textLength="68.8" lengthAdjust="spacing" xml:space="preserve">balanced</text>
+<text x="52.4" y="132" fill="#c8ccd4" textLength="189.2" lengthAdjust="spacing" font-weight="600" xml:space="preserve">codex auth            </text><text x="250.2" y="132" fill="#c8ccd4" textLength="103.2" lengthAdjust="spacing" xml:space="preserve">subscription</text>
+<text x="52.4" y="152" fill="#c8ccd4" textLength="189.2" lengthAdjust="spacing" font-weight="600" xml:space="preserve">codex model           </text><text x="250.2" y="152" fill="#c8ccd4" textLength="120.4" lengthAdjust="spacing" xml:space="preserve">auto (by tier)</text>
+<text x="52.4" y="172" fill="#c8ccd4" textLength="189.2" lengthAdjust="spacing" font-weight="600" xml:space="preserve">claude model          </text><text x="250.2" y="172" fill="#c8ccd4" textLength="60.2" lengthAdjust="spacing" xml:space="preserve">default</text>
+<text x="52.4" y="192" fill="#c8ccd4" textLength="189.2" lengthAdjust="spacing" font-weight="600" xml:space="preserve">per-review budget     </text><text x="250.2" y="192" fill="#c8ccd4" textLength="206.4" lengthAdjust="spacing" xml:space="preserve">subscription (unlimited)</text>
 
-<text x="34.8" y="232" fill="#c8ccd4" opacity="0.55" xml:space="preserve">Linear</text>
-<text x="34.8" y="252" fill="#98c379" xml:space="preserve">✓</text><text x="51.6" y="252" fill="#c8ccd4" font-weight="600" xml:space="preserve">auth mode             </text><text x="244.8" y="252" fill="#c8ccd4" xml:space="preserve">api_key</text>
-<text x="51.6" y="272" fill="#c8ccd4" font-weight="600" xml:space="preserve">organization          </text><text x="244.8" y="272" fill="#c8ccd4" xml:space="preserve">Inductive Network</text>
-<text x="51.6" y="292" fill="#c8ccd4" font-weight="600" xml:space="preserve">writes as             </text><text x="244.8" y="292" fill="#c8ccd4" xml:space="preserve">yi@inductive.network </text><text x="421.2" y="292" fill="#c8ccd4" opacity="0.55" xml:space="preserve">(api key)</text>
-<text x="51.6" y="312" fill="#c8ccd4" opacity="0.55" xml:space="preserve">to post as crosscheck itself, see docs/linear-identity.md</text>
+<text x="35.2" y="232" fill="#c8ccd4" textLength="51.6" lengthAdjust="spacing" opacity="0.55" xml:space="preserve">Linear</text>
+<text x="35.2" y="252" fill="#98c379" textLength="17.2" lengthAdjust="spacing" xml:space="preserve">✓</text><text x="61.0" y="252" fill="#c8ccd4" textLength="189.2" lengthAdjust="spacing" font-weight="600" xml:space="preserve">auth mode             </text><text x="258.8" y="252" fill="#c8ccd4" textLength="60.2" lengthAdjust="spacing" xml:space="preserve">api_key</text>
+<text x="52.4" y="272" fill="#c8ccd4" textLength="189.2" lengthAdjust="spacing" font-weight="600" xml:space="preserve">organization          </text><text x="250.2" y="272" fill="#c8ccd4" textLength="146.2" lengthAdjust="spacing" xml:space="preserve">Inductive Network</text>
+<text x="52.4" y="292" fill="#c8ccd4" textLength="189.2" lengthAdjust="spacing" font-weight="600" xml:space="preserve">writes as             </text><text x="250.2" y="292" fill="#c8ccd4" textLength="180.6" lengthAdjust="spacing" xml:space="preserve">yi@inductive.network </text><text x="430.8" y="292" fill="#c8ccd4" textLength="77.4" lengthAdjust="spacing" opacity="0.55" xml:space="preserve">(api key)</text>
+<text x="52.4" y="312" fill="#c8ccd4" textLength="490.2" lengthAdjust="spacing" opacity="0.55" xml:space="preserve">to post as crosscheck itself, see docs/linear-identity.md</text>
 </svg>
