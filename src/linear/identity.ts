@@ -79,23 +79,30 @@ export function renderSignature(template: string, vars: SignatureVars): string {
     reviewer: vars.reviewer ?? '',
     icon: vars.icon ?? '',
   }
+  // Mark where an empty placeholder stood so tidying can target exactly those gaps
+  // and leave separators the operator wrote deliberately alone.
+  const HOLE = '\u0000'
   const substituted = template.replace(
     /\{(actor|product|model|reviewer|icon)\}/g,
-    (_match, key: string) => values[key],
+    (_match, key: string) => values[key] === '' ? HOLE : values[key],
   )
-  return tidySeparators(substituted)
+  return tidyHoles(substituted, HOLE)
 }
 
-// Collapses the gaps an empty placeholder leaves behind: doubled separators,
-// and a separator stranded at either end.
-function tidySeparators(text: string): string {
+// Removes each empty-placeholder hole together with ONE adjacent separator, so
+// `{a} · {model} · {b}` with no model yields `a · b` rather than `a ·  · b`.
+// Separators the operator wrote between two present values are never touched.
+function tidyHoles(text: string, hole: string): string {
+  const SEP = '(?:\\s*[·—|]\\s*|\\s+)'
   return text
-    .replace(/[ \t]+/g, ' ')
-    // Deliberately excludes `-`: model names like claude-opus-4.5 must survive intact.
-    .replace(/(·|—|\|)(\s*\1)+/g, '$1')
-    .replace(/\s*(·|—|\|)\s*(?=(·|—|\|))/g, '')
-    .replace(/^\s*(·|—|\||\s)+/, '')
-    .replace(/(\s*(·|—|\|))+\s*$/, '')
+    // hole with a separator on either side — drop the hole and one separator
+    .replace(new RegExp(`${SEP}${hole}(?=${SEP})`, 'g'), '')
+    // hole at the end of the string, with its leading separator
+    .replace(new RegExp(`${SEP}${hole}\\s*$`, 'g'), '')
+    // hole at the start, with its trailing separator
+    .replace(new RegExp(`^\\s*${hole}${SEP}`, 'g'), '')
+    // any hole left over (no adjacent separator)
+    .split(hole).join('')
     .trim()
 }
 

@@ -155,3 +155,37 @@ describe('notifyLinear — end-to-end branding', () => {
     expect(await postedFirstLine(cfg(), 'default')).toBe('🤖 crosscheck/review · crosscheck')
   })
 })
+
+
+describe('separator tidying is limited to empty placeholders', () => {
+  // Regression: the tidier collapsed ANY repeated separator, including ones the
+  // operator wrote deliberately between two present values.
+  it('preserves a separator the operator wrote between present values', () => {
+    expect(renderSignature('{actor} :: {product}', VARS)).toBe('crosscheck/review :: crosscheck')
+  })
+
+  it('preserves deliberate doubled separators between present values', () => {
+    expect(renderSignature('{actor} \u00b7 \u00b7 {product}', VARS)).toBe('crosscheck/review \u00b7 \u00b7 crosscheck')
+  })
+
+  it('preserves literal text that looks like a separator', () => {
+    expect(renderSignature('{actor} \u2014 built by {product}', VARS))
+      .toBe('crosscheck/review \u2014 built by crosscheck')
+  })
+
+  it('still removes the gap an empty middle placeholder leaves', () => {
+    expect(renderSignature('{actor} \u00b7 {model} \u00b7 {product}', VARS)).toBe('crosscheck/review \u00b7 crosscheck')
+  })
+
+  it('still removes a trailing empty placeholder and its separator', () => {
+    expect(renderSignature('{actor} \u00b7 {model}', VARS)).toBe('crosscheck/review')
+  })
+
+  it('still removes a leading empty placeholder and its separator', () => {
+    expect(renderSignature('{icon} {actor}', VARS)).toBe('crosscheck/review')
+  })
+
+  it('leaves no sentinel character behind', () => {
+    expect(renderSignature('\ud83e\udd16 {icon} {actor} \u00b7 {model}', VARS)).not.toContain('\u0000')
+  })
+})

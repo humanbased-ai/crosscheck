@@ -392,10 +392,19 @@ export async function promptLinear(
   // user who skips it may see nothing happen and assume the feature is broken.
   console.log(chalk.dim('\n  Your Linear team key prefixes, so refs like ENG-42 in a branch name resolve.'))
   console.log(chalk.dim('  Comma-separated. Leave blank to only follow full linear.app links.'))
-  const keysAnswer = await ask(`  team keys${current?.teamKeys?.length ? ` [${current.teamKeys.join(',')}]` : ''}: `)
-  const teamKeys = keysAnswer.trim()
-    ? keysAnswer.split(',').map(k => k.trim().toUpperCase()).filter(Boolean)
-    : (current?.teamKeys ?? [])
+  // Blank keeps the current value on a first run (nothing to keep) and on a re-run
+  // where the user just pressed enter. `-` is the explicit clear, because silently
+  // treating blank as "clear" would wipe configured keys on every re-run.
+  const hasCurrent = (current?.teamKeys?.length ?? 0) > 0
+  const keysPrompt = hasCurrent
+    ? `  team keys [${current!.teamKeys!.join(',')}] (- to clear): `
+    : '  team keys: '
+  const keysAnswer = (await ask(keysPrompt)).trim()
+  const teamKeys = keysAnswer === '-'
+    ? []
+    : keysAnswer
+      ? keysAnswer.split(',').map(k => k.trim().toUpperCase()).filter(Boolean)
+      : (current?.teamKeys ?? [])
 
   if (mode === 'api_key') {
     console.log(chalk.dim('\n  Set LINEAR_API_KEY in your environment (Linear → Settings → API).'))
