@@ -254,9 +254,9 @@ logs:
 #     api_key_env: LINEAR_API_KEY       # used when mode: api_key
 #     client_id_env: LINEAR_CLIENT_ID
 #     client_secret_env: LINEAR_CLIENT_SECRET
-#     # NOTE: "read write" does NOT cover initiatives — initiative:read and
+#     # NOTE: "read,write" does NOT cover initiatives — initiative:read and
 #     # initiative:write are separate scopes you must request explicitly.
-#     scopes: "read write"
+#     scopes: "read,write"
 #   identity:
 #     actor: crosscheck                 # createAsUser name in T1
 #     signature: "🤖 {actor} · {product}"   # first line of every Linear write

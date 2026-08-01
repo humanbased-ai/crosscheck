@@ -245,9 +245,11 @@ export const LinearAuthConfigSchema = z.object({
   api_key_env: z.string().default('LINEAR_API_KEY'),
   client_id_env: z.string().default('LINEAR_CLIENT_ID'),
   client_secret_env: z.string().default('LINEAR_CLIENT_SECRET'),
-  // NOTE: `read write` does NOT cover initiatives — initiative:read / initiative:write
-  // are separate scopes that must be requested explicitly.
-  scopes: z.string().default('read write'),
+  // Linear documents the token request as taking a COMMA-separated list. Space
+  // separated input is normalised on the wire, so both forms work.
+  // NOTE: `read,write` does NOT cover initiatives — initiative:read /
+  // initiative:write are separate scopes that must be requested explicitly.
+  scopes: z.string().default('read,write'),
 })
 
 export const LinearIdentityConfigSchema = z.object({

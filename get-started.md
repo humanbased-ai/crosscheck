@@ -1165,6 +1165,23 @@ post_review:
 server:
   port: 7891
   webhook_path: /webhook
+
+linear:                       # write review verdicts back to a Linear issue (opt-in)
+  enabled: false
+  auth:
+    mode: api_key             # api_key | client_credentials
+    api_key_env: LINEAR_API_KEY
+    client_id_env: LINEAR_CLIENT_ID
+    client_secret_env: LINEAR_CLIENT_SECRET
+    scopes: "read,write"      # comma-separated; initiative:* are separate scopes
+  identity:
+    actor: crosscheck
+    signature: "🤖 {actor} · {model}"
+    icon_url: ""
+  comment_on:                 # verdicts that get mirrored
+    - NEEDS_WORK
+    - BLOCK
+  team_keys: []               # e.g. [IN] — required to match bare refs like IN-42
 ```
 
 ### Quality tiers
