@@ -233,6 +233,48 @@ logs:
 #     fix_fill: cyan         # filled segments on the FIX bar
 
 
+# ─── Linear ──────────────────────────────────────────────────────────────────
+# Mirror review verdicts onto the Linear issue a PR belongs to.
+# Disabled by default. See docs/linear-identity.md for the full setup guide.
+#
+# Two identity tiers:
+#   api_key            (T0) — your own Linear key. Writes carry a signature line
+#                             but Linear still attributes them to your account.
+#   client_credentials (T1) — an OAuth app in your workspace. crosscheck mints a
+#                             token per run and writes render as the app itself
+#                             (botActor), not as a human. Recommended.
+#
+# A failed T1 token mint ABORTS the run — crosscheck never silently falls back to
+# an API key, because that would re-attribute agent writes to a person.
+# linear:
+#   enabled: true
+#   auth:
+#     mode: client_credentials          # api_key | client_credentials
+#     # Env var NAMES — never put secrets in this file.
+#     api_key_env: LINEAR_API_KEY       # used when mode: api_key
+#     client_id_env: LINEAR_CLIENT_ID
+#     client_secret_env: LINEAR_CLIENT_SECRET
+#     # NOTE: "read,write" does NOT cover initiatives — initiative:read and
+#     # initiative:write are separate scopes you must request explicitly.
+#     scopes: "read,write"
+#   identity:
+#     actor: crosscheck                 # createAsUser name in T1
+#     signature: "🤖 {actor} · {product}"   # first line of every Linear write
+#     # Suffix the actor with the step that produced the write, so a review, a fix
+#     # and a recheck are distinguishable: crosscheck/review, crosscheck/fix, ...
+#     # Set false for one flat actor name.
+#     per_step_actor: true
+#   comment_on:                         # which verdicts get mirrored
+#     - APPROVE
+#     - NEEDS_WORK
+#     - BLOCK
+#   # Team key prefixes that may be matched as bare refs (IN-2269) in a branch,
+#   # title, or body. Leave empty to only follow explicit linear.app issue URLs —
+#   # without this, tokens like UTF-8 and SHA-256 have the same shape as a ref.
+#   team_keys:
+#     - IN
+
+
 # ─── Branding ────────────────────────────────────────────────────────────────
 # Customize how crosscheck identifies itself in review comments.
 # Useful for teams, shared services, or personal branding.

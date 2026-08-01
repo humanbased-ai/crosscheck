@@ -13,13 +13,17 @@ import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
+import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
+import { notifyLinear } from '../linear/notify.js'
+import { shouldPostToLinear } from '../linear/comment.js'
+import { getLinearCredentials } from '../config/loader.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
-import { loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
+import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
@@ -229,6 +233,9 @@ export interface WorkflowContext {
   // When true, review output is printed but the GitHub comment is not posted
   // and the fix step is skipped. Used by `crosscheck run --dry-run`.
   dryRun?: boolean
+  // Linear identity resolved once at the command-run boundary and reused across
+  // every round, so a multi-round run mints exactly one token.
+  linearAuth?: ResolvedLinearAuth | null
   // Override the steps to execute instead of loading from workflow.yml.
   // Used by `crosscheck run --steps` to run only a subset of the pipeline.
   steps?: import('./workflow.js').WorkflowStep[]
@@ -524,6 +531,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // can iterate the same list and release these shas if SIGINT/SIGTERM fires
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
+
+  // Linear write-back identity. Resolved up front — before any expensive step —
+  // and allowed to throw. The contract is that a configured-but-failing
+  // client_credentials mint ABORTS rather than degrading, because silently
+  // continuing would either drop the write or re-attribute it to a human. This
+  // matches commands/review.ts; the two paths must not disagree.
+  // The contract is one token per command run. runWorkflow is re-entered for every
+  // fix/recheck round under --crazy and max_rounds, so minting here would mint per
+  // round and let a late transient failure abort work already done. The caller
+  // resolves once and passes it in; resolving here is the single-round fallback.
+  // A dry run posts nothing, so it never mints.
+  let linearAuth: ResolvedLinearAuth | null = ctx.linearAuth ?? null
+
   let workflowFailed = false
   let workflowError: unknown = undefined
   let failedStep: string | undefined = undefined
@@ -557,6 +577,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   emitPRComplexity(ctx, triggerField)
 
   try {
+  // Inside the try so a preflight failure still reaches the completion handler in
+  // the finally — resolving above it meant a failed mint skipped workflow_complete
+  // entirely and left no record of the run.
+  // canWriteVerdict here too: the caller passes null deliberately when the selected
+  // steps cannot write a verdict, and this fallback previously read that as
+  // "unresolved" and resolved anyway — defeating the gate one line upstream.
+  if (!ctx.dryRun && !linearAuth && linearWritePossible(config.linear, steps)) {
+    linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+    fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
+  }
+
   for (const step of steps) {
     currentStepName = step.name
     stepsRun.push(step.name)
@@ -761,6 +792,38 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
+
+        // Mirror the verdict onto the PR's Linear issue. `run` and `watch` both
+        // land here, so this is the path that matters — reviews posted from
+        // commands/review.ts are the exception, not the rule.
+        if (linearAuth && shouldPostToLinear(verdict ?? null, config.linear.comment_on)) {
+          {
+            // Attribute to crosscheck/review, /fix, /recheck rather than a flat actor.
+            const stepAuth = config.linear.identity.per_step_actor ? withWorker(linearAuth, effectiveType) : linearAuth
+            const linearResult = await notifyLinear({
+              auth: stepAuth,
+              config: config.linear,
+              pr: { branch: pr.head.ref, title: pr.title, body: pr.body ?? '', url: `https://${commentUrl}`, sha: annotationSha },
+              verdict: verdict ?? null,
+              reviewer,
+              origin,
+              model,
+              stepType: effectiveType,
+              round: ctx.round ?? 1,
+              service: config.brand.service_name,
+            })
+            fileLog({
+              level: linearResult.status === 'failed' ? 'warn' : 'info',
+              event: 'linear_comment', repo: `${owner}/${repoName}`, pr: prNumber,
+              status: linearResult.status, reason: linearResult.reason, issue: linearResult.identifier,
+            })
+            if (linearResult.status === 'posted') {
+              log(chalk.dim(`  linear: commented on ${linearResult.identifier}`))
+            } else if (linearResult.status === 'failed') {
+              log(chalk.yellow(`  linear: write failed — ${linearResult.reason}`))
+            }
+          }
+        }
         results[step.name] = { verdict, commentBody, commentUrl, commentId, tokens_used: tokensUsed, input_tokens: inputTokens, output_tokens: outputTokens, vendor: reviewer, model }
       }
 

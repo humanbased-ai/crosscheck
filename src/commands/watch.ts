@@ -26,18 +26,20 @@ import {
   detectScopesForDeployment,
   patchDeploymentConfig,
   detectGitHubLogin,
+  getLinearCredentials,
 } from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
 import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
+import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { filterStepsByTypes, formatRepoWorkflowSteps, isRecheckWithoutFix, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
+import { resolveLinearAuth, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import {
   getSmartSwitch,
   isSubscriptionLimitError,
@@ -204,6 +206,25 @@ export async function runWatch(opts: WatchOpts = {}) {
     logError({ command: 'watch', phase: 'auth' }, err)
     console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
     process.exit(1)
+  }
+
+  // Preflight Linear identity at startup. watch is a long-running daemon: a bad
+  // credential discovered per-event would either drop events silently or spam the
+  // board. Fail loudly at boot instead, the way the run path fails before its
+  // clone. The token is discarded — per-event resolution mints a fresh one, since
+  // app tokens outlive neither a long daemon run nor a rotation.
+  // Same gate as the run and per-event paths: a daemon whose configured workflow
+  // is fix/conflict-resolve only can never call notifyLinear, so a missing
+  // credential must not stop it booting.
+  if (linearWritePossible(config.linear, loadWorkflow(process.cwd()))) {
+    try {
+      const preflight = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+      console.log(chalk.dim(`  linear: ${preflight.mode} — writes as ${preflight.actor}`))
+    } catch (err) {
+      logError({ command: 'watch', phase: 'linear-auth' }, err)
+      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+      process.exit(isLinearConfigError(err) ? 1 : 2)
+    }
   }
 
   fileLog({ level: 'info', event: 'session_start', command: 'watch' })
@@ -482,6 +503,34 @@ export async function runWatch(opts: WatchOpts = {}) {
       let boardAdded = false
 
       try {
+        // Board first, so any failure below is visible rather than swallowed by the
+        // enclosing catch (which only calls logError — a no-op when file logging is
+        // off). Then auth, then the clone: during an outage a long-running watcher
+        // would otherwise pay for a full clone on every event before rejecting it.
+        // Computed here rather than at the runWorkflow call so the auth gate below
+        // sees the workflow that will actually run. resolvedSteps alone is
+        // undefined for a plain event, and canWriteVerdict fails open on undefined
+        // — which let a fix-only daemon resolve credentials on every event.
+        const workflowStepsForRun = resolvedSteps
+          ?? (repoStepOverride ? filterStepsByTypes(loadWorkflow(process.cwd()), repoStepOverride) : loadWorkflow(process.cwd()))
+
+        board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
+        boardAdded = true
+
+        // Only workflows that can write a verdict need an identity — the fix and
+        // resolve paths never call notifyLinear.
+        let linearAuth: ResolvedLinearAuth | null = null
+        if (linearWritePossible(effectiveConfig.linear, workflowStepsForRun)) {
+          try {
+            linearAuth = await resolveLinearAuth(effectiveConfig.linear, getLinearCredentials(effectiveConfig.linear.auth))
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err)
+            board.failPR(key, `linear identity unavailable: ${message}`)
+            fileLog({ level: 'error', event: 'linear_auth_failed', repo: `${owner}/${repoName}`, pr: prNumber, reason: message })
+            throw err
+          }
+        }
+
         await clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef,
           tmpDir, token, protocol: config.clone_protocol,
@@ -520,22 +569,21 @@ export async function runWatch(opts: WatchOpts = {}) {
             logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'no_diff_comment' }, err)
           }
           await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+          // The PR is on the board from before the clone, so close its slot rather
+          // than leaving a row that never resolves.
+          board.completePR(key, { elapsedMs: Date.now() - reviewStart, url: `https://github.com/${owner}/${repoName}/pull/${prNumber}` })
           return
         }
 
-        board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
-        boardAdded = true
 
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })
         stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
-        const workflowStepsForRun = resolvedSteps
-          ?? (repoStepOverride ? filterStepsByTypes(loadWorkflow(process.cwd()), repoStepOverride) : undefined)
-
         const { verdict, fixAppliedCount } = await runWorkflow({
           owner, repoName, prNumber, pr,
           tmpDir, token, config: effectiveConfig, origin,
+          linearAuth,
           reviewStart,
           log: (msg: string) => bLog(`${chalk.dim(fmtTime())}  ${msg}`),
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),

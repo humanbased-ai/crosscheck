@@ -9,13 +9,14 @@ import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
 import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken, getLinearApiKey } from '../config/loader.js'
+import { loadConfig, getGithubToken, getLinearApiKey, getLinearCredentials } from '../config/loader.js'
 import { enrichIssueContext } from '../issues/enrich.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { hintForError } from '../lib/remediation.js'
 import { runWorkflow } from '../lib/runner.js'
-import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
+import { isLinearConfigError, resolveLinearAuth } from '../linear/identity.js'
+import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, linearWritePossible, type WorkflowStep } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
@@ -485,6 +486,23 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
     let workflowError: unknown
     try {
+      // One token for the whole command run, resolved before the clone: a
+      // misconfiguration should fail without spending a clone, and runWorkflow is
+      // re-entered per fix/recheck round so resolving inside it would mint every
+      // round. Inside the try, so a failure still reaches the completion handler.
+      // Only when the selected workflow can actually write a verdict — the public
+      // `fix` and `resolve` aliases run steps that never call notifyLinear, and a
+      // missing credential must not abort work that was never going to write.
+      // --crazy / --halfcrazy synthesise a recheck after a fix, so a fix-only
+      // selection can still reach a verdict write. Resolving once here keeps the
+      // one-token-per-run contract; leaving it null made every loop round mint its
+      // own, and a late outage could abort after fixes had already been pushed.
+      const roundModeCanWrite = opts.roundMode !== undefined
+      const linearAuth = !opts.dryRun
+        && linearWritePossible(config.linear, roundModeCanWrite ? undefined : filteredSteps)
+        ? await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+        : null
+
       await clonePRForReview({
         owner, repo, prNumber: number, baseRef: prData.base.ref,
         tmpDir, token, protocol: config.clone_protocol,
@@ -510,6 +528,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
       const sharedCtx = {
         owner, repoName: repo, prNumber: number, token, config, origin,
+        linearAuth,
         log: (msg: string) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
         onPhaseChange: (label: string) => { activeSpinner.text = label },
         crosscheckShas: new Set<string>(),
@@ -751,7 +770,9 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       releasePRLock(owner, repo, number, sha)
       if (acquiredTmpDir) rmSync(acquiredTmpDir, { force: true, recursive: true })
     }
-    if (workflowError) process.exit(2)
+    // Exit 1 for a Linear misconfiguration — a user error under the CLI contract,
+    // and what `crosscheck review` already returns for the same condition.
+    if (workflowError) process.exit(isLinearConfigError(workflowError) ? 1 : 2)
   } finally {
     process.removeListener('SIGINT', earlySignalHandler)
     process.removeListener('SIGTERM', earlySignalHandler)

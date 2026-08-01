@@ -156,6 +156,27 @@ export LINEAR_API_KEY=lin_api_...
 If it's unset while enrichment is on, crosscheck just skips enrichment and
 reviews the diff as usual — it never errors.
 
+### Linear identity — for writing back to Linear (optional)
+
+Separate from enrichment above, which only *reads*. When `linear.enabled: true`,
+crosscheck mirrors each review verdict onto the PR's Linear issue.
+
+Two tiers. `api_key` (T0) reuses `LINEAR_API_KEY` and tags writes with a
+`🤖 crosscheck · crosscheck` signature line, but Linear still attributes them to
+your account. `client_credentials` (T1) uses an OAuth app in your workspace so
+writes render as the app itself:
+
+```bash
+export LINEAR_CLIENT_ID=...
+export LINEAR_CLIENT_SECRET=...
+```
+
+A failed T1 token mint aborts the run rather than falling back to `api_key` —
+a silent downgrade would put agent writes back under a human's name.
+
+Full walkthrough, including the two Linear UI gotchas that trip people up:
+[docs/linear-identity.md](docs/linear-identity.md).
+
 ---
 
 ## Step 1 — Check your setup
@@ -1144,6 +1165,24 @@ post_review:
 server:
   port: 7891
   webhook_path: /webhook
+
+linear:                       # write review verdicts back to a Linear issue (opt-in)
+  enabled: false
+  auth:
+    mode: api_key             # api_key | client_credentials
+    api_key_env: LINEAR_API_KEY
+    client_id_env: LINEAR_CLIENT_ID
+    client_secret_env: LINEAR_CLIENT_SECRET
+    scopes: "read,write"      # comma-separated; initiative:* are separate scopes
+  identity:
+    actor: crosscheck
+    signature: "🤖 {actor} · {product}"
+    per_step_actor: true      # crosscheck/review vs crosscheck/fix in Linear
+  comment_on:                 # verdicts mirrored to the issue
+    - APPROVE
+    - NEEDS_WORK
+    - BLOCK
+  team_keys: []               # e.g. [IN] — required to match bare refs like IN-42
 ```
 
 ### Quality tiers
