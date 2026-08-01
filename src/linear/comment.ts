@@ -15,6 +15,9 @@ export interface LinearCommentInput {
   sha?: string
   summary?: string
   service?: string
+  /** Workflow step this verdict came from — a recheck must not read as a review. */
+  stepType?: string
+  round?: number
 }
 
 const DEFAULT_SERVICE = 'crosscheck'
@@ -44,8 +47,8 @@ export function buildLinearCommentBody(input: LinearCommentInput): string {
     origin: input.origin,
     reviewer: input.reviewer,
     model: input.model,
-    type: 'review',
-    round: 1,
+    type: input.stepType ?? 'review',
+    round: input.round ?? 1,
     verdict,
     service,
     ...(input.sha && { sha: input.sha }),

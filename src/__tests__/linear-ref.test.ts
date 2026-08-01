@@ -133,3 +133,37 @@ describe('hostname anchoring', () => {
     expect(ref?.id).toBe('IN-999')
   })
 })
+
+describe('hostname is parsed, not pattern-matched', () => {
+  // A path segment named linear.app is not the linear.app host. A boundary check
+  // on the surrounding character passes here; only real parsing rejects it.
+  const impostors = [
+    'https://evil.example/linear.app/acme/issue/IN-2269',
+    'https://evil.example/?u=https://linear.app/acme/issue/IN-2269',
+    'https://linear.app.evil.example/acme/issue/IN-2269',
+    'https://user@evil.example/linear.app/acme/issue/IN-1',
+  ]
+
+  for (const url of impostors) {
+    it(`rejects ${url.slice(8, 40)}...`, () => {
+      expect(extractLinearRef({ body: url }, [])).toBeNull()
+    })
+  }
+
+  it('accepts the real host over https', () => {
+    expect(extractLinearRef({ body: 'https://linear.app/acme/issue/IN-2269/slug' }, [])?.id).toBe('IN-2269')
+  })
+
+  it('accepts the real host case-insensitively', () => {
+    expect(extractLinearRef({ body: 'https://LINEAR.APP/acme/issue/IN-3' }, [])?.id).toBe('IN-3')
+  })
+
+  it('ignores a malformed URL without throwing', () => {
+    expect(extractLinearRef({ body: 'https://[not-a-url/issue/IN-9' }, [])).toBeNull()
+  })
+
+  it('finds a real URL after an impostor one', () => {
+    const body = 'https://evil.example/linear.app/x/issue/IN-1 and https://linear.app/acme/issue/IN-42'
+    expect(extractLinearRef({ body }, [])?.id).toBe('IN-42')
+  })
+})

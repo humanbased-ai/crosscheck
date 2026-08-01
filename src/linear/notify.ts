@@ -32,6 +32,10 @@ export interface LinearNotifyParams {
   model: string
   summary?: string
   service?: string
+  /** Workflow step that produced this verdict. Defaults to 'review'. */
+  stepType?: string
+  /** 1-based workflow round. Defaults to 1. */
+  round?: number
 }
 
 export async function notifyLinear(
@@ -70,6 +74,8 @@ export async function notifyLinear(
       prUrl: pr.url,
       prTitle: pr.title,
       ...(pr.sha && { sha: pr.sha }),
+      ...(params.stepType && { stepType: params.stepType }),
+      ...(params.round !== undefined && { round: params.round }),
       ...(params.summary && { summary: params.summary }),
       ...(params.service && { service: params.service }),
     })
