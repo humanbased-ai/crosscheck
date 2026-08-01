@@ -535,7 +535,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // continuing would either drop the write or re-attribute it to a human. This
   // matches commands/review.ts; the two paths must not disagree.
   let linearAuth: ResolvedLinearAuth | null = null
-  if (config.linear.enabled) {
+  // A dry run posts nothing, so minting a token would spend a credential round
+  // trip and could abort a run that was never going to write anywhere.
+  if (config.linear.enabled && !ctx.dryRun) {
     linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
     fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
   }

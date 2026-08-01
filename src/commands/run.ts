@@ -15,6 +15,7 @@ import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.j
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { hintForError } from '../lib/remediation.js'
 import { runWorkflow } from '../lib/runner.js'
+import { isLinearConfigError } from '../linear/identity.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
@@ -751,7 +752,9 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       releasePRLock(owner, repo, number, sha)
       if (acquiredTmpDir) rmSync(acquiredTmpDir, { force: true, recursive: true })
     }
-    if (workflowError) process.exit(2)
+    // Exit 1 for a Linear misconfiguration — a user error under the CLI contract,
+    // and what `crosscheck review` already returns for the same condition.
+    if (workflowError) process.exit(isLinearConfigError(workflowError) ? 1 : 2)
   } finally {
     process.removeListener('SIGINT', earlySignalHandler)
     process.removeListener('SIGTERM', earlySignalHandler)

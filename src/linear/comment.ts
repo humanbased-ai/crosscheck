@@ -57,6 +57,14 @@ export function buildLinearCommentBody(input: LinearCommentInput): string {
   return sections.join('\n')
 }
 
+// parseVerdict yields the human spelling `NEEDS WORK`, while config and the
+// annotation schema both use `NEEDS_WORK`. Comparing them raw silently dropped
+// every NEEDS WORK verdict — the most common actionable one.
+export function normalizeVerdict(verdict: string | null): string {
+  return (verdict ?? 'UNKNOWN').trim().toUpperCase().replace(/\s+/g, '_')
+}
+
 export function shouldPostToLinear(verdict: string | null, commentOn: readonly string[]): boolean {
-  return commentOn.includes(verdict ?? 'UNKNOWN')
+  const wanted = normalizeVerdict(verdict)
+  return commentOn.some(v => normalizeVerdict(v) === wanted)
 }
