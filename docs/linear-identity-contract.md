@@ -30,8 +30,10 @@ linear:
     per_step_actor: true                # suffix the actor with the unit of work
 ```
 
-Every key under `auth` names an **environment variable**, never a secret. A product
-implementing this contract must not accept an inline credential in config.
+Every key under `auth` ending in `_env` names an **environment variable**, never a
+secret. A product implementing this contract must not accept an inline credential in
+config. Non-credential fields (`mode`, `scopes`, everything under `identity`) are
+ordinary config values and are written literally.
 
 ---
 
