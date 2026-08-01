@@ -194,3 +194,18 @@ export function canWriteVerdict(steps: ReadonlyArray<{ type: string }> | undefin
   if (!steps) return true
   return steps.some(s => s.type === 'review' || s.type === 'recheck')
 }
+
+
+// The single question every Linear auth gate should ask. Three separate checks
+// drifted apart across run/watch/review/runner: enablement, whether the selected
+// workflow can produce a verdict, and whether any verdict is even configured to
+// post. `comment_on: []` is valid and means nothing ever posts, so a run with it
+// must not mint a token or abort on a missing credential.
+export function linearWritePossible(
+  linear: { enabled: boolean; comment_on: readonly string[] },
+  steps: ReadonlyArray<{ type: string }> | undefined,
+): boolean {
+  if (!linear.enabled) return false
+  if (linear.comment_on.length === 0) return false
+  return canWriteVerdict(steps)
+}

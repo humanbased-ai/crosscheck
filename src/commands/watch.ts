@@ -33,7 +33,7 @@ import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow, canWriteVerdict, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
+import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { filterStepsByTypes, formatRepoWorkflowSteps, isRecheckWithoutFix, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
@@ -216,7 +216,7 @@ export async function runWatch(opts: WatchOpts = {}) {
   // Same gate as the run and per-event paths: a daemon whose configured workflow
   // is fix/conflict-resolve only can never call notifyLinear, so a missing
   // credential must not stop it booting.
-  if (config.linear.enabled && canWriteVerdict(loadWorkflow(process.cwd()))) {
+  if (linearWritePossible(config.linear, loadWorkflow(process.cwd()))) {
     try {
       const preflight = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
       console.log(chalk.dim(`  linear: ${preflight.mode} — writes as ${preflight.actor}`))
@@ -507,13 +507,20 @@ export async function runWatch(opts: WatchOpts = {}) {
         // enclosing catch (which only calls logError — a no-op when file logging is
         // off). Then auth, then the clone: during an outage a long-running watcher
         // would otherwise pay for a full clone on every event before rejecting it.
+        // Computed here rather than at the runWorkflow call so the auth gate below
+        // sees the workflow that will actually run. resolvedSteps alone is
+        // undefined for a plain event, and canWriteVerdict fails open on undefined
+        // — which let a fix-only daemon resolve credentials on every event.
+        const workflowStepsForRun = resolvedSteps
+          ?? (repoStepOverride ? filterStepsByTypes(loadWorkflow(process.cwd()), repoStepOverride) : loadWorkflow(process.cwd()))
+
         board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
         boardAdded = true
 
         // Only workflows that can write a verdict need an identity — the fix and
         // resolve paths never call notifyLinear.
         let linearAuth: ResolvedLinearAuth | null = null
-        if (effectiveConfig.linear.enabled && canWriteVerdict(resolvedSteps)) {
+        if (linearWritePossible(effectiveConfig.linear, workflowStepsForRun)) {
           try {
             linearAuth = await resolveLinearAuth(effectiveConfig.linear, getLinearCredentials(effectiveConfig.linear.auth))
           } catch (err: unknown) {
@@ -572,9 +579,6 @@ export async function runWatch(opts: WatchOpts = {}) {
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })
         stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
-
-        const workflowStepsForRun = resolvedSteps
-          ?? (repoStepOverride ? filterStepsByTypes(loadWorkflow(process.cwd()), repoStepOverride) : undefined)
 
         const { verdict, fixAppliedCount } = await runWorkflow({
           owner, repoName, prNumber, pr,

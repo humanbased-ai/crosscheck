@@ -15,6 +15,7 @@ import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
+import { linearWritePossible } from '../lib/workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
@@ -41,23 +42,6 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   }
 
   const octokit = createGithubClient(token)
-
-  // Resolve Linear identity up front — before the expensive review — so a
-  // misconfigured T1 setup fails fast. A failed mint aborts the run; it must never
-  // silently fall back to an API key, which would re-attribute the write to a human.
-  let linearAuth: ResolvedLinearAuth | null = null
-  if (config.linear.enabled) {
-    try {
-      linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
-      fileLog({ level: 'info', event: 'linear_auth_resolved', mode: linearAuth.mode, actor: linearAuth.actor })
-    } catch (err) {
-      logError({ command: 'review', phase: 'linear-auth' }, err)
-      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
-      // A misconfiguration is the operator's to fix (exit 1); a Linear outage is
-      // not (exit 2). Matches the classification the run path uses.
-      process.exit(isLinearConfigError(err) ? 1 : 2)
-    }
-  }
 
   const parsed = parsePRUrl(prUrl)
   if (!parsed) {
@@ -107,6 +91,22 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       return
     }
     console.log(chalk.dim(`  PR origin: ${origin} (via ${method}) → assigned reviewer: ${reviewer}`))
+  }
+
+  // Deferred to here on purpose: after the closed-PR check and reviewer routing,
+  // before the clone. Resolving earlier meant a closed PR — or one routing assigns
+  // no reviewer to — exited nonzero over a Linear credential it was never going to
+  // use, replacing a clean skip with a failure.
+  let linearAuth: ResolvedLinearAuth | null = null
+  if (linearWritePossible(config.linear, [{ type: 'review' }])) {
+    try {
+      linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+      fileLog({ level: 'info', event: 'linear_auth_resolved', mode: linearAuth.mode, actor: linearAuth.actor })
+    } catch (err) {
+      logError({ command: 'review', phase: 'linear-auth' }, err)
+      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+      process.exit(isLinearConfigError(err) ? 1 : 2)
+    }
   }
 
   // Clone the repo into a temp dir

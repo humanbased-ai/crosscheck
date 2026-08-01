@@ -236,3 +236,36 @@ describe('punctuation after a URL', () => {
     expect(extractLinearRef({ body: 'https://linear.app/acme/issue/IN-12/x' }, [])?.id).toBe('IN-12')
   })
 })
+
+describe('the identifier must be a whole path segment', () => {
+  // Two lookahead attempts got this wrong in opposite directions: requiring a
+  // slash missed "IN-42." at the end of a sentence; allowing any non-alphanumeric
+  // accepted "IN-123-typo" as IN-123. The segment is now parsed whole.
+  const rejected = [
+    'https://linear.app/acme/issue/IN-123-typo',
+    'https://linear.app/acme/issue/IN-123abc',
+    'https://linear.app/acme/issue/IN-123_x',
+    'see linear.app/acme/issue/IN-123-typo',
+  ]
+
+  for (const url of rejected) {
+    it(`rejects ${url.split('/issue/')[1]}`, () => {
+      expect(extractLinearRef({ body: url }, [])).toBeNull()
+    })
+  }
+
+  const accepted: Array<[string, string]> = [
+    ['https://linear.app/acme/issue/IN-42', 'IN-42'],
+    ['https://linear.app/acme/issue/IN-42/some-slug', 'IN-42'],
+    ['Fixes https://linear.app/acme/issue/IN-42.', 'IN-42'],
+    ['See https://linear.app/acme/issue/IN-42, then merge', 'IN-42'],
+    ['(https://linear.app/acme/issue/IN-42)', 'IN-42'],
+    ['see linear.app/acme/issue/IN-42.', 'IN-42'],
+  ]
+
+  for (const [body, expected] of accepted) {
+    it(`accepts ${JSON.stringify(body.slice(0, 44))}`, () => {
+      expect(extractLinearRef({ body }, [])?.id).toBe(expected)
+    })
+  }
+})

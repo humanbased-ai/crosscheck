@@ -23,7 +23,7 @@ import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
-import { canWriteVerdict, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
+import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
@@ -583,7 +583,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // canWriteVerdict here too: the caller passes null deliberately when the selected
   // steps cannot write a verdict, and this fallback previously read that as
   // "unresolved" and resolved anyway — defeating the gate one line upstream.
-  if (config.linear.enabled && !ctx.dryRun && !linearAuth && canWriteVerdict(steps)) {
+  if (!ctx.dryRun && !linearAuth && linearWritePossible(config.linear, steps)) {
     linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
     fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
   }
