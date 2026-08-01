@@ -86,9 +86,9 @@ itself") so writes render as the app.
 
 ### 3. Choose scopes
 
-`read write` covers issues and comments — that is all crosscheck needs.
+`read,write` covers issues and comments — that is all crosscheck needs.
 
-> **Gotcha:** `read write` does **not** cover initiatives. `initiative:read` and
+> **Gotcha:** `read,write` does **not** cover initiatives. `initiative:read` and
 > `initiative:write` are separate scopes. Add them only if something else in your
 > workspace needs them. Skip the admin scope.
 
@@ -107,7 +107,7 @@ Confirm the credentials work before wiring crosscheck up. The form body goes thr
 **stdin**, so the secret never lands in your shell history or in `ps` output:
 
 ```bash
-printf 'grant_type=client_credentials&client_id=%s&client_secret=%s&scope=read+write' "$LINEAR_CLIENT_ID" "$LINEAR_CLIENT_SECRET" | curl -s -X POST https://api.linear.app/oauth/token -H 'Content-Type: application/x-www-form-urlencoded' --data @- 
+printf 'grant_type=client_credentials&client_id=%s&client_secret=%s&scope=read,write' "$LINEAR_CLIENT_ID" "$LINEAR_CLIENT_SECRET" | curl -s -X POST https://api.linear.app/oauth/token -H 'Content-Type: application/x-www-form-urlencoded' --data @- 
 ```
 
 A successful response contains `access_token`. If you get `invalid_client`, revisit
@@ -122,7 +122,7 @@ linear:
     mode: client_credentials
     client_id_env: LINEAR_CLIENT_ID
     client_secret_env: LINEAR_CLIENT_SECRET
-    scopes: "read write"
+    scopes: "read,write"
   identity:
     actor: crosscheck
   comment_on:            # default; add APPROVE to comment on clean reviews too

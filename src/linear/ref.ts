@@ -23,7 +23,11 @@ export interface PRMetadata {
 }
 
 // Key shape matches parseTicketId: 2+ leading letters, then digits.
-const URL_PATTERN = /linear\.app\/[^/\s]+\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)/i
+//
+// The leading group pins the host to exactly linear.app. Without it the fragment
+// also matches `notlinear.app/acme/issue/IN-1`, which would let an arbitrary
+// domain bypass the team_keys gate and direct a comment at any issue.
+const URL_PATTERN = /(?:^|[^A-Za-z0-9.-])linear\.app\/[^/\s]+\/issue\/([A-Za-z][A-Za-z0-9]{1,9}-\d+)/i
 
 function fromUrl(text: string): TicketRef | null {
   const match = text.match(URL_PATTERN)
