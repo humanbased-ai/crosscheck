@@ -35,13 +35,17 @@ export function stripRepoDirPaths(text: string, repoDir: string): string {
   return out
 }
 
-// Maps crosscheck's vendor effort vocabulary (shared with claude) to the codex
-// CLI's model_reasoning_effort values — codex calls its top tier "xhigh", not "max".
+// vendors.codex.effort matches the codex CLI's model_reasoning_effort values
+// 1:1 (low/medium/high/xhigh/max/ultra), so this is a whitelist rather than a
+// translation — anything outside it falls back to medium instead of reaching
+// the CLI as an arbitrary string.
 const REASONING_EFFORT_MAP: Record<string, string> = {
   low: 'low',
   medium: 'medium',
   high: 'high',
-  max: 'xhigh',
+  xhigh: 'xhigh',
+  max: 'max',
+  ultra: 'ultra',
 }
 
 export function codexReasoningEffort(effort: string): string {

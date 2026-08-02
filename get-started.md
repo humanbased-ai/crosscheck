@@ -1016,7 +1016,7 @@ vendors:
     enabled: true
     auth: subscription      # subscription | api-key
     model: gpt-5.6-terra    # only used when auth: api-key
-    effort: medium          # low | medium | high | max (max = codex xhigh reasoning)
+    effort: medium          # low | medium | high | xhigh | max | ultra (ultra: terra/sol only)
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
@@ -1277,7 +1277,7 @@ codex review --base <base-branch> --title "<pr-title>"
 
 The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. With `auth: subscription`, no model flag is passed. With `auth: api-key`, the model is selected by quality tier (`fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `thorough` → `gpt-5.6-sol`).
 
-Reasoning effort comes from `vendors.codex.effort` and is always passed as `-c model_reasoning_effort=...`: `low`/`medium`/`high` map directly, and `max` maps to the codex CLI's `xhigh` tier.
+Reasoning effort comes from `vendors.codex.effort` and is always passed through as `-c model_reasoning_effort=...`. The values match the codex CLI tiers 1:1 — `low` (Light), `medium`, `high`, `xhigh` (Extra High), `max`, `ultra`. Not every model supports every tier: `ultra` is terra/sol only, and pre-5.6 models stop at `xhigh` — the CLI rejects unsupported combinations. Higher tiers can multiply review wall-clock time; pair them with `timeout_sec`.
 
 ### How Claude reviews run
 

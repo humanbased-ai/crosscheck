@@ -16,6 +16,11 @@ export const VendorConfigSchema = z.object({
 // backwards compat but is no longer passed as --quality (removed from codex CLI).
 export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   quality: z.enum(['low', 'medium', 'high']).default('medium'),
+  // Codex exposes two tiers above the shared vocabulary: xhigh (Extra High) and
+  // ultra (Max reasoning + automatic task delegation). ultra is only available
+  // on terra/sol; pre-5.6 models stop at xhigh — the CLI rejects unsupported
+  // combinations at call time.
+  effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).default('medium'),
   // Optional per-tier model overrides. When unset, the Codex CLI picks the model.
   // Subscription auth: leave unset (CLI default). API-key auth: set explicit model IDs.
   // Example: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol' }

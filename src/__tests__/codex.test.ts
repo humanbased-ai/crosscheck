@@ -149,17 +149,16 @@ describe('.codex/instructions cleanup after review', () => {
 })
 
 describe('codexReasoningEffort', () => {
-  it('passes low/medium/high through unchanged', () => {
+  it('passes every codex CLI tier through unchanged', () => {
     expect(codexReasoningEffort('low')).toBe('low')
     expect(codexReasoningEffort('medium')).toBe('medium')
     expect(codexReasoningEffort('high')).toBe('high')
+    expect(codexReasoningEffort('xhigh')).toBe('xhigh')
+    expect(codexReasoningEffort('max')).toBe('max')
+    expect(codexReasoningEffort('ultra')).toBe('ultra')
   })
 
-  it('maps crosscheck max to the codex CLI xhigh tier', () => {
-    expect(codexReasoningEffort('max')).toBe('xhigh')
-  })
-
-  it('falls back to medium for unknown values', () => {
+  it('falls back to medium for values outside the whitelist', () => {
     expect(codexReasoningEffort('turbo')).toBe('medium')
     expect(codexReasoningEffort('')).toBe('medium')
   })
