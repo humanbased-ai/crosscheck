@@ -571,7 +571,8 @@ export function applyOnboardConfig(
 
   // ── Quality tier + per-vendor effort ────────────────────────────────────────
   // claude.ts derives the model from quality.tier at runtime (vendor.model is ignored).
-  // vendor.model is written for codex only — api-key auth uses it as an override.
+  // vendor.model is written for codex only — it pins the review model under both
+  // auth modes (subscription passes it to the CLI via -c model=).
   if (!raw.quality || typeof raw.quality !== 'object') raw.quality = {}
   ;(raw.quality as Record<string, unknown>).tier = qualityTier
   const tierCfg = QUALITY_TIERS[qualityTier]

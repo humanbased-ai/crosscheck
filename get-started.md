@@ -1036,7 +1036,7 @@ vendors:
   codex:
     enabled: true
     auth: subscription      # subscription | api-key
-    model: gpt-5.6-terra    # only used when auth: api-key
+    model: gpt-5.6-terra    # pins the review model; unset = tier model (api-key) / CLI default (subscription)
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
@@ -1313,7 +1313,7 @@ If none match, origin is `human` and the PR is skipped in cross-vendor mode.
 codex review --base <base-branch> --title "<pr-title>"
 ```
 
-The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. With `auth: subscription`, no model flag is passed. With `auth: api-key`, the model is selected by quality tier (`fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `thorough` → `gpt-5.6-sol`).
+The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. An explicit `vendors.codex.model` (or matching `model_tiers` entry) is passed as `-c model=...` under either auth mode. When unset: `auth: subscription` passes no model flag (the Codex CLI picks its default), while `auth: api-key` selects the model by quality tier (`fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `thorough` → `gpt-5.6-sol`).
 
 ### How Claude reviews run
 
