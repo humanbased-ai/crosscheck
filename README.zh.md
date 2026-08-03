@@ -176,4 +176,4 @@ post_review:
 
 ## 许可证
 
-[MIT](./LICENSE) — Copyright (c) 2025–2026 Humanbased PTE LTD.
+[MIT](./LICENSE) — Copyright (c) 2025–2026 Humanbased AI PTE LTD.

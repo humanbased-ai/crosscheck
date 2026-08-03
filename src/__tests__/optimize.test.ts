@@ -28,7 +28,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },
     backtrace: { enabled: false },
     issue_enrichment: { enabled: false, provider: 'linear', team_keys: [], max_description_chars: 4000 },
-    linear: { enabled: false, auth: { mode: 'api_key', api_key_env: 'LINEAR_API_KEY', client_id_env: 'LINEAR_CLIENT_ID', client_secret_env: 'LINEAR_CLIENT_SECRET', scopes: 'read write' }, identity: { actor: 'crosscheck', signature: '🤖 {actor} · {product}', per_step_actor: true }, comment_on: ['APPROVE', 'NEEDS_WORK', 'BLOCK'], team_keys: [] },
+    linear: { enabled: false, auth: { mode: 'api_key', api_key_env: 'LINEAR_API_KEY', client_id_env: 'LINEAR_CLIENT_ID', client_secret_env: 'LINEAR_CLIENT_SECRET', scopes: 'read write' }, identity: { actor: 'crosscheck', signature: '🤖 {actor} · {product}', icon_url: '', per_step_actor: true }, comment_on: ['APPROVE', 'NEEDS_WORK', 'BLOCK'], team_keys: [] },
     watch: { idle_issue: { enabled: true, timeout_min: 30 } },
     display: { theme: { bar_fill: 'blue', bar_empty: 'dim', cr_approve: 'green', cr_needs_work: 'yellow', cr_block: 'red', fix_fill: 'cyan' } },
     post_review: {

@@ -256,7 +256,17 @@ export const LinearAuthConfigSchema = z.object({
 export const LinearIdentityConfigSchema = z.object({
   // createAsUser base name in T1; the {actor} placeholder in the signature template.
   actor: z.string().default('crosscheck'),
-  signature: z.string().default('🤖 {actor} · {product}'),
+  // Placeholders: {actor} {product} {model} {reviewer} {icon}. Ones with no value
+  // resolve to empty and the leftover separators are tidied away.
+  //
+  // {product} is available but not in the default: actor defaults to the product
+  // name, so `{actor} · {product}` renders as `crosscheck · crosscheck`. The model
+  // carries more information in the same space.
+  signature: z.string().default('🤖 {actor} · {model}'),
+  // Optional logo shown inline in the signature via {icon}. Note the better route
+  // is the OAuth app avatar (T1), which Linear renders natively beside the comment —
+  // see docs/linear-identity.md. Inline images may render block-level.
+  icon_url: z.string().default(''),
   // Suffix the actor with the workflow step that produced the write, so a review,
   // a recheck and a fix are distinguishable rather than all reading as one bot:
   //   crosscheck/review, crosscheck/fix, crosscheck/recheck
@@ -271,8 +281,10 @@ export const LinearConfigSchema = z.object({
   enabled: z.boolean().default(false),
   auth: LinearAuthConfigSchema.default({}),
   identity: LinearIdentityConfigSchema.default({}),
-  // Which verdicts get mirrored to the linked Linear issue.
-  comment_on: z.array(LinearVerdictFilterSchema).default(['APPROVE', 'NEEDS_WORK', 'BLOCK']),
+  // Which verdicts get mirrored to the linked Linear issue. Defaults to the ones
+  // that need someone to act: a clean PR posting an APPROVE onto its issue is noise
+  // on every green review. Add 'APPROVE' (and 'UNKNOWN') to hear about those too.
+  comment_on: z.array(LinearVerdictFilterSchema).default(['NEEDS_WORK', 'BLOCK']),
   // Team key prefixes (e.g. ['IN']) that may be matched as bare identifiers in a
   // branch/title/body. Leave empty to only follow explicit linear.app issue URLs —
   // see src/linear/ref.ts for why bare matching is opt-in.

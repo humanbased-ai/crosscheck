@@ -28,13 +28,15 @@ describe('verifyLinearIdentity — T1 (client_credentials)', () => {
     )
     const report = await verifyLinearIdentity(T1(), T1_CREDS, { fetchImpl })
 
-    expect(report).toEqual({
+    expect(report).toMatchObject({
       ok: true,
       mode: 'client_credentials',
       actor: 'crosscheck',
       attribution: 'app',
       organization: 'Inductive Network',
     })
+    // The resolved identity comes back so callers reuse it instead of minting again.
+    expect(report.auth?.token).toBe('minted')
   })
 
   it('does not ask for a viewer — an app token has none', async () => {
@@ -91,7 +93,7 @@ describe('verifyLinearIdentity — T0 (api_key)', () => {
     )
     const report = await verifyLinearIdentity(cfg(), { apiKey: 'lin_api_x' }, { fetchImpl })
 
-    expect(report).toEqual({
+    expect(report).toMatchObject({
       ok: true,
       mode: 'api_key',
       actor: 'crosscheck',
@@ -99,6 +101,7 @@ describe('verifyLinearIdentity — T0 (api_key)', () => {
       organization: 'Acme',
       attributesTo: 'yi@example.com',
     })
+    expect(report.auth?.mode).toBe('api_key')
   })
 
   it('falls back to the display name when there is no email', async () => {
@@ -151,5 +154,23 @@ describe('verifyLinearIdentity — contract', () => {
   it('reports the configured actor even when resolution fails', async () => {
     const report = await verifyLinearIdentity(cfg({ identity: { actor: 'acme-bot' } }), {})
     expect(report.actor).toBe('acme-bot')
+  })
+})
+
+describe('the probe hands back its identity', () => {
+  // linear-test resolved a second time for the issue lookup, minting a second
+  // token — breaking one-token-per-run and letting a transient second mint fail a
+  // dry run whose verification had already passed.
+  it('returns the resolved auth on success', async () => {
+    const fetchImpl = sequence(json({ data: { viewer: null, organization: { name: 'Acme' } } }))
+    const report = await verifyLinearIdentity(cfg(), { apiKey: 'k' }, { fetchImpl })
+    expect(report.auth).toBeDefined()
+    expect(report.auth?.token).toBe('k')
+  })
+
+  it('omits it when resolution failed', async () => {
+    const report = await verifyLinearIdentity(cfg(), {})
+    expect(report.ok).toBe(false)
+    expect(report.auth).toBeUndefined()
   })
 })

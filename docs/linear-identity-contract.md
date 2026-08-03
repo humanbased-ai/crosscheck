@@ -1,5 +1,11 @@
 # Linear identity: the shared contract
 
+**Contract version: 1.1.** Additive changes bump the minor; removing or renaming a
+field is a major bump and a breaking change for every adopter. 1.1 added
+`identity.per_step_actor`, `identity.icon_url`, and the `{model}` / `{reviewer}` /
+`{icon}` signature placeholders — all optional, all defaulted, so a 1.0
+implementation stays conformant.
+
 crosscheck and symphony are separate open-source products that both write to Linear.
 This document is the contract they implement identically, so an operator configures
 identity once and it means the same thing in both — and so a third product can adopt

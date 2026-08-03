@@ -9,7 +9,7 @@
 // Never throws. A verification that fails is a report with ok: false, because the
 // caller is a status command that must still print the rest of its output.
 
-import { resolveLinearAuth, type LinearAuthMode, type LinearCredentials, type ResolveOptions } from './identity.js'
+import { resolveLinearAuth, type LinearAuthMode, type LinearCredentials, type ResolveOptions, type ResolvedLinearAuth } from './identity.js'
 import { linearGraphQL, type LinearRequestOptions } from './client.js'
 import type { LinearConfig } from '../config/schema.js'
 
@@ -28,6 +28,11 @@ export interface LinearIdentityReport {
   attributesTo?: string
   /** Populated when ok is false. Never contains credential material. */
   error?: string
+  /**
+   * The identity this probe resolved, so callers can reuse it instead of minting
+   * a second token. Absent when resolution failed.
+   */
+  auth?: ResolvedLinearAuth
 }
 
 const ORG_QUERY = `query { organization { name } }`
@@ -67,6 +72,7 @@ export async function verifyLinearIdentity(
         mode: auth.mode,
         actor: auth.actor,
         attribution: 'app',
+        auth,
         ...(data.organization && { organization: data.organization.name }),
       }
     }
@@ -78,6 +84,7 @@ export async function verifyLinearIdentity(
       mode: auth.mode,
       actor: auth.actor,
       attribution: 'user',
+      auth,
       ...(data.organization && { organization: data.organization.name }),
       ...(who && { attributesTo: who }),
     }

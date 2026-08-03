@@ -161,10 +161,16 @@ reviews the diff as usual — it never errors.
 Separate from enrichment above, which only *reads*. When `linear.enabled: true`,
 crosscheck mirrors each review verdict onto the PR's Linear issue.
 
-Two tiers. `api_key` (T0) reuses `LINEAR_API_KEY` and tags writes with a
-`🤖 crosscheck · crosscheck` signature line, but Linear still attributes them to
-your account. `client_credentials` (T1) uses an OAuth app in your workspace so
-writes render as the app itself:
+`crosscheck onboard` asks which rung of the attribution ladder you want and writes
+the config for you.
+
+**Start with `api_key`.** It reuses `LINEAR_API_KEY`, works immediately, and posts
+the comment — the feature is fully functional. Comments attribute to your Linear
+account, led by a `🤖 crosscheck · <model>` signature line.
+
+Climb to `client_credentials` when more than one thing writes to your workspace and
+you need them told apart. It uses an OAuth app — one per workspace, not per user —
+so comments post as crosscheck itself with its own icon:
 
 ```bash
 export LINEAR_CLIENT_ID=...
@@ -173,6 +179,25 @@ export LINEAR_CLIENT_SECRET=...
 
 A failed T1 token mint aborts the run rather than falling back to `api_key` —
 a silent downgrade would put agent writes back under a human's name.
+
+`crosscheck onboard` walks you through the choice:
+
+<p align="center">
+  <img src="./assets/linear-onboard.svg" alt="crosscheck onboard — choosing a Linear attribution rung" width="700" />
+</p>
+
+Before opening a PR, `crosscheck linear-test` exercises the whole path and posts nothing —
+identity, issue lookup, verdict filter, and the exact comment body:
+
+<p align="center">
+  <img src="./assets/linear-test.svg" alt="crosscheck linear-test — dry-run verification" width="700" />
+</p>
+
+`crosscheck status` shows which rung is active whenever `linear.enabled` is true:
+
+<p align="center">
+  <img src="./assets/linear-status.svg" alt="crosscheck status — the Linear identity section" width="620" />
+</p>
 
 Full walkthrough, including the two Linear UI gotchas that trip people up:
 [docs/linear-identity.md](docs/linear-identity.md).
@@ -1176,10 +1201,10 @@ linear:                       # write review verdicts back to a Linear issue (op
     scopes: "read,write"      # comma-separated; initiative:* are separate scopes
   identity:
     actor: crosscheck
-    signature: "🤖 {actor} · {product}"
+    signature: "🤖 {actor} · {model}"   # {actor} {product} {model} {reviewer} {icon}
+    icon_url: ""              # rendered where {icon} appears; app avatar is preferred
     per_step_actor: true      # crosscheck/review vs crosscheck/fix in Linear
-  comment_on:                 # verdicts mirrored to the issue
-    - APPROVE
+  comment_on:                 # verdicts mirrored to the issue (default omits APPROVE)
     - NEEDS_WORK
     - BLOCK
   team_keys: []               # e.g. [IN] — required to match bare refs like IN-42

@@ -22,7 +22,7 @@ const PR = {
   sha: 'abc1234',
 }
 
-const BASE = { auth: AUTH, pr: PR, verdict: 'APPROVE', reviewer: 'codex', origin: 'claude', model: 'gpt-5' }
+const BASE = { auth: AUTH, pr: PR, verdict: 'NEEDS_WORK', reviewer: 'codex', origin: 'claude', model: 'gpt-5' }
 
 function cfg(overrides: Record<string, unknown> = {}) {
   return LinearConfigSchema.parse({ enabled: true, team_keys: ['IN'], ...overrides })

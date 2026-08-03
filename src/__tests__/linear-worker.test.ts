@@ -30,7 +30,7 @@ describe('withWorker — T1', () => {
   })
 
   it('re-renders the signature for the derived actor', async () => {
-    expect(withWorker(await t1(), 'fix').signature).toBe('🤖 crosscheck/fix · crosscheck')
+    expect(withWorker(await t1(), 'fix').signature).toBe('🤖 crosscheck/fix')
   })
 
   it('keeps the token and mode untouched', async () => {
@@ -68,7 +68,7 @@ describe('withWorker — T0', () => {
     const scoped = withWorker(await t0(), 'review')
 
     expect(scoped.actor).toBe('crosscheck/review')
-    expect(scoped.signature).toBe('🤖 crosscheck/review · crosscheck')
+    expect(scoped.signature).toBe('🤖 crosscheck/review')
     // T0 has no createAsUser to re-point — the signature is its whole mechanism.
     expect(scoped.createAsUser).toBeUndefined()
   })

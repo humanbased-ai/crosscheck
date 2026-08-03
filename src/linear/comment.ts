@@ -47,7 +47,11 @@ export function buildLinearCommentBody(input: LinearCommentInput): string {
   const sections = [
     input.signature,
     '',
-    `**${verdict}** — ${input.reviewer} ${stepLabel(input.stepType)} [${escapeLinkLabel(input.prTitle)}](${input.prUrl})`,
+    // Both halves: the model when the vendor reported one — `default` means it
+    // chose without saying which, and naming it would be a guess — and the step
+    // label, so a recheck does not read as a review.
+    `**${verdict}** — ${input.reviewer}${input.model && input.model !== 'default' ? ` (${input.model})` : ''}` +
+      ` ${stepLabel(input.stepType)} [${escapeLinkLabel(input.prTitle)}](${input.prUrl})`,
   ]
 
   if (input.summary) sections.push('', input.summary)

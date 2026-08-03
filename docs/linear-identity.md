@@ -14,15 +14,26 @@ By default an agent writing to Linear uses whatever API key the operator supplie
 usually a person's personal key. Every comment then looks like that person wrote it,
 and there is no way to tell agent activity from human activity.
 
-There are two tiers you can adopt, in increasing order of strength.
+There is a ladder here. Each rung buys stronger attribution for a bit more setup —
+**start at the bottom.** Most people never need to climb it.
 
-| Tier | Mode | Setup | How writes appear |
+| Rung | Mode | Setup | How writes appear |
 |---|---|---|---|
-| **T0** | `api_key` | none beyond a key | Your account, with a `🤖 crosscheck · crosscheck` signature line |
-| **T1** | `client_credentials` | one OAuth app, ~5 min | The app itself (botActor), via `createAsUser` |
+| **T0** | `api_key` | one env var | Your account, led by a `🤖 crosscheck · <model>` signature line |
+| **T1** | `client_credentials` | one OAuth app, ~5 min, once per workspace | crosscheck itself, with its own icon |
 
-T0 works everywhere and is the default. T1 is recommended — it is the only tier where
-Linear itself, not just a text convention, distinguishes the writer.
+**T0 is not a broken version of T1.** Linear write-back is fully functional with just
+an API key: crosscheck finds the issue and posts the comment. What T0 lacks is
+*attribution*, not capability.
+
+So the question isn't "which is better", it's **how many things write to your
+workspace**. If you're the only one, T0 is the right answer and the app is ceremony.
+If several agents and several humans all write, T0 makes them indistinguishable —
+that's the problem T1 solves.
+
+`crosscheck onboard` asks which rung you want and writes the config for you:
+
+<img src="../assets/linear-onboard.svg" alt="crosscheck onboard, step 9.5 — choosing a Linear attribution rung" width="700" />
 
 ---
 
@@ -43,7 +54,7 @@ linear:
     - IN          # your team's key prefix
 ```
 
-Every write leads with `🤖 crosscheck · crosscheck`. Linear still records your account
+Every write leads with `🤖 crosscheck · <model>`. Linear still records your account
 as the author — the signature is a convention, not an identity.
 
 ---
@@ -54,7 +65,12 @@ as the author — the signature is a convention, not an identity.
 
 Go to **Linear → Settings → API → OAuth applications → Create new**.
 
-Fill in a name (`crosscheck`, or whatever you want to see on comments) and an icon.
+Fill in a name (`crosscheck`, or whatever you want to see on comments) and an icon —
+upload [`assets/icon-256.png`](../assets/icon-256.png) from this repo. That avatar is
+what Linear renders beside every comment crosscheck posts, and it is the *only* way to
+get the logo onto a comment: the icon comes from Linear's app settings, not from
+anything crosscheck sends. On T0 your own avatar appears, because Linear genuinely
+believes you wrote it.
 
 > **Gotcha:** the form **requires a Redirect URI** even though client credentials never
 > uses one. Any placeholder URL on a domain you control is fine —
@@ -109,8 +125,7 @@ linear:
     scopes: "read,write"
   identity:
     actor: crosscheck
-  comment_on:
-    - APPROVE
+  comment_on:            # default; add APPROVE to comment on clean reviews too
     - NEEDS_WORK
     - BLOCK
   team_keys:
@@ -122,17 +137,71 @@ should appear authored by the app, not by you.
 
 ---
 
+## What the comment looks like
+
+On the app rung, with the icon uploaded — the avatar and **APP** badge come from
+Linear, which knows the writer is an application rather than a person:
+
+<img src="../assets/linear-comment.svg" alt="A crosscheck review comment on a Linear issue, authored by the app actor" width="740" />
+
+The raw markdown behind that:
+
+```
+🤖 crosscheck/review · gpt-5.6-terra
+
+**NEEDS_WORK** — codex (gpt-5.6-terra) review of [feat: add rate limiting to the public API](https://github.com/acme/app/pull/312)
+```
+
+The signature is a template — `linear.identity.signature`, with placeholders
+`{actor}`, `{product}`, `{model}`, `{reviewer}`, and `{icon}`. Placeholders with no
+value resolve to empty and the leftover separators are tidied, so one template works
+whether or not the model is known.
+
+The model appears in two places: the signature (if your template asks for it) and the
+verdict line. When the vendor CLI picks the model without reporting which, the model
+is omitted rather than guessed.
+
+`{icon}` renders `linear.identity.icon_url` as an inline image. Before reaching for
+it, note the caveat above: the app avatar is the supported way to brand a comment, and
+inline images may render block-level rather than inline. Test it on a scratch issue
+before adopting it.
+
+---
+
+## Testing without waiting for a PR
+
+`crosscheck linear-test` exercises the whole path and posts nothing:
+
+```bash
+crosscheck linear-test ENG-42
+```
+
+<img src="../assets/linear-test.svg" alt="crosscheck linear-test verifying the Linear setup end to end without posting" width="700" />
+
+It resolves your identity, looks the issue up for real, checks whether the verdict
+would pass `comment_on`, and prints the exact comment body a review would post. Each
+step reports separately, so a failure names itself rather than leaving you guessing.
+
+Pass `--branch` or `--title` to test ref resolution the way a real PR would hit it,
+and `--verdict` to preview a different outcome.
+
+---
+
 ## Verifying which identity you're on
 
 `crosscheck status` shows a **Linear** section whenever `linear.enabled` is true. It
 resolves the configured identity for real — minting a T1 token if that's the mode —
 and reports what a write would render as:
 
+<img src="../assets/linear-status.svg" alt="crosscheck status showing the Linear identity section" width="620" />
+
+On the app rung the same rows read:
+
 ```
   Linear
   ✓ auth mode             client_credentials
     organization          Inductive Network
-  ✓ writes as             crosscheck/<step> (app actor)
+  ✓ writes as             crosscheck/<step> (crosscheck itself)
 ```
 
 On T0 it names the human account instead, because that's the state worth seeing:

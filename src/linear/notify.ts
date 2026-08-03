@@ -9,7 +9,7 @@
 import { buildLinearCommentBody, shouldPostToLinear } from './comment.js'
 import { findIssueByIdentifier, postLinearComment, type LinearRequestOptions } from './client.js'
 import { extractLinearRef } from './ref.js'
-import type { ResolvedLinearAuth } from './identity.js'
+import { renderIcon, renderSignature, type ResolvedLinearAuth } from './identity.js'
 import type { LinearConfig } from '../config/schema.js'
 
 export type LinearNotifyStatus = 'posted' | 'skipped' | 'failed'
@@ -68,13 +68,24 @@ export async function notifyLinear(
 
     // An explicit URL names a workspace, and identifiers repeat across workspaces.
     // If the credentials resolve a different workspace, this is a same-numbered
-    // issue somewhere else — never the one the PR pointed at.
+    // issue somewhere else — never the one the PR pointed at. Checked before any
+    // body is built, so a mismatch costs nothing.
     if (ref.workspace && !issueBelongsToWorkspace(issue.url, ref.workspace)) {
       return { status: 'skipped', reason: 'workspace-mismatch', identifier: ref.id }
     }
 
+    // Re-render here rather than reusing auth.signature: this is the first point
+    // that knows the model and reviewer, which the template may reference.
+    const signature = renderSignature(auth.signatureTemplate, {
+      actor: auth.actor,
+      product: auth.product,
+      model: params.model === 'default' ? undefined : params.model,
+      reviewer: params.reviewer,
+      icon: renderIcon(config.identity.icon_url),
+    })
+
     const body = buildLinearCommentBody({
-      signature: auth.signature,
+      signature,
       verdict: params.verdict,
       reviewer: params.reviewer,
       origin: params.origin,

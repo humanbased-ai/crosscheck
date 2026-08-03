@@ -92,10 +92,13 @@ export async function runStatus(configPath?: string) {
       row('organization', report.organization ?? 'unknown')
       if (report.attribution === 'app') {
         const actor = config.linear.identity.per_step_actor ? `${report.actor}/<step>` : report.actor
-        row('writes as', `${actor} ${chalk.dim('(app actor)')}`, true)
+        row('writes as', `${actor} ${chalk.dim('(crosscheck itself)')}`, true)
       } else {
-        // The state IN-2271 exists to eliminate: agent writes landing on a person.
-        row('writes as', `${report.attributesTo ?? 'your account'} ${chalk.dim('(human — switch to client_credentials)')}`, false)
+        // Deliberately not a failed check. Attributing to a person is the wrong
+        // state for a shared workspace, but it is a perfectly reasonable choice for
+        // a solo user with no attribution problem — so this informs, it does not nag.
+        row('writes as', `${report.attributesTo ?? 'your Linear account'} ${chalk.dim('(api key)')}`)
+        console.log(chalk.dim('    to post as crosscheck itself, see docs/linear-identity.md'))
       }
     }
   }
