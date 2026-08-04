@@ -117,7 +117,7 @@ describe('skill activation broker', () => {
       { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     ].map(request => JSON.stringify(request)).join('\n') + '\n'
 
-    const { stdout } = await execa(broker.command, broker.args, { input: requests })
+    const { stdout } = await execa(broker.command, broker.args, { input: requests, env: session.environment })
     const responses = stdout.split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
 
     expect(responses).toHaveLength(2)

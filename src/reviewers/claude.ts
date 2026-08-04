@@ -126,7 +126,7 @@ export async function runClaudeReview(
           cwd: repoDir,
           timeout: t,
           input: prompt,
-          env: { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
+          env: { ...process.env, ...skillSession?.environment, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
         }),
         {
           onRetry: (effectiveMs, delayMs) =>

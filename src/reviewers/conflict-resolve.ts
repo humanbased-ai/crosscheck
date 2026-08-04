@@ -153,7 +153,7 @@ export async function runConflictResolveStep(
     ], {
       input: prompt,
       timeout: resolvedTimeout,
-      env: { ...process.env },
+      env: { ...process.env, ...skillSession?.environment },
     })
     const raw = stdout.trim()
     try {

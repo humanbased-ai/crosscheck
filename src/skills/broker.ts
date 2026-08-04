@@ -1,9 +1,10 @@
-import { existsSync, readFileSync, rmSync, statSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'fs'
 import { join, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import { randomUUID } from 'crypto'
 import { createServer, type Server, type Socket } from 'net'
 import { createInterface } from 'readline'
+import { tmpdir } from 'os'
 import { findCompetingSkill, type SkillIdentity } from './catalog.js'
 
 export type SkillMetadata = Omit<SkillIdentity, 'path'>
@@ -36,6 +37,7 @@ export interface McpResponse {
 
 export interface SkillActivationSession {
   path: string
+  environment: Record<string, string>
   stepType: string
   enabledSkills: SkillMetadata[]
   activations(): SkillMetadata[]
@@ -53,10 +55,21 @@ function readState(sessionPath: string): SkillSessionState {
   return state
 }
 
-async function serveBrokerConnection(socket: Socket, sessionPath: string): Promise<void> {
+async function serveBrokerConnection(socket: Socket, sessionPath: string, sessionKey: string): Promise<void> {
   const lines = createInterface({ input: socket, crlfDelay: Infinity })
+  let authenticated = false
+  socket.setTimeout(5_000, () => socket.destroy())
   for await (const line of lines) {
     if (!line.trim()) continue
+    if (!authenticated) {
+      if (line !== sessionKey) {
+        socket.destroy()
+        return
+      }
+      authenticated = true
+      socket.setTimeout(0)
+      continue
+    }
     let response: McpResponse | null
     try {
       response = handleSkillBrokerRequest(sessionPath, JSON.parse(line) as McpRequest)
@@ -71,10 +84,11 @@ async function serveBrokerConnection(socket: Socket, sessionPath: string): Promi
   }
 }
 
-function createBrokerServer(sessionPath: string): Server {
+function createBrokerServer(sessionPath: string, sessionKey: string, onError: (err: Error) => void): Server {
   const server = createServer(socket => {
-    void serveBrokerConnection(socket, sessionPath).catch(() => socket.destroy())
+    void serveBrokerConnection(socket, sessionPath, sessionKey).catch(() => socket.destroy())
   })
+  server.on('error', onError)
   server.listen(sessionPath)
   return server
 }
@@ -99,17 +113,22 @@ export function createSkillActivationSession(
 ): SkillActivationSession {
   const enabledSet = new Set(enabledNames)
   const enabled = catalog.filter(skill => enabledSet.has(skill.name))
+  const sessionKey = randomUUID()
+  const sessionDir = process.platform === 'win32' ? undefined : mkdtempSync(join(tmpdir(), 'crosscheck-skill-'))
   const path = process.platform === 'win32'
     ? `\\\\.\\pipe\\crosscheck-skill-${randomUUID()}`
-    : `/tmp/crosscheck-skill-${randomUUID()}.sock`
+    : join(sessionDir!, 'broker.sock')
   sessionStates.set(path, { schemaVersion: 1, stepType, enabled, activated: [] })
-  const server = createBrokerServer(path)
+  let listenError: Error | undefined
+  const server = createBrokerServer(path, sessionKey, err => { listenError = err })
 
   return {
     path,
+    environment: { CROSSCHECK_SKILL_SESSION_KEY: sessionKey },
     stepType,
     enabledSkills: enabled.map(metadata),
     activations: () => {
+      if (listenError) throw new Error(`Skill broker failed to listen: ${listenError.message}`)
       const state = readState(path)
       const activated = new Set(state.activated)
       return state.enabled.filter(skill => activated.has(skill.name)).map(metadata)
@@ -117,7 +136,7 @@ export function createSkillActivationSession(
     close: () => {
       sessionStates.delete(path)
       server.close()
-      if (process.platform !== 'win32') rmSync(path, { force: true })
+      if (sessionDir) rmSync(sessionDir, { recursive: true, force: true })
     },
   }
 }
