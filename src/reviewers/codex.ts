@@ -8,6 +8,7 @@ import { resolveCodexModel } from '../lib/review-models.js'
 import type { ReviewResult } from './claude.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
+import { codexSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 
 // Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
 // Infer the verdict from the highest severity present and append it so parseVerdict() can
@@ -76,6 +77,7 @@ export async function runCodexReview(
   // Linked tracker issue rendered as a prompt block (issues/enrich.ts) — anchors
   // the review to the stated goal. Omitted when enrichment is off / unresolved.
   issueContext?: string,
+  skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
   const model = resolveCodexModel(quality, vendor)
   const tmpFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
@@ -90,7 +92,7 @@ export async function runCodexReview(
     : ''
   const customNote = quality.custom_prompt ?? ''
   const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
-  const instructionsNote = [issueContext ?? '', focusNote, customNote, behaviorInstructions].filter(Boolean).join('\n\n')
+  const instructionsNote = [issueContext ?? '', focusNote, customNote, behaviorInstructions, skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n')
   const instructionsPath = `${repoDir}/.codex/instructions`
   // Save original content so we can restore it after the review — prevents the
   // fix step's git add -A from committing crosscheck's instructions as a PR change.
@@ -105,13 +107,14 @@ export async function runCodexReview(
     for (let attempt = 1; attempt <= MAX_CODEX_RETRIES; attempt++) {
       try {
         const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
+        const skillArgs = codexSkillBrokerArgs(skillSession)
         onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''}`)
 
         const { result, retried } = await withTimeoutRetry(
           resolvedTimeout,
           (t) => execa(
             'codex',
-            ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
+            ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs, ...skillArgs],
             {
               cwd: repoDir,
               timeout: t,

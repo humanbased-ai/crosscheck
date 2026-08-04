@@ -108,6 +108,23 @@ export function renderSkillBrokerInstructions(session: SkillActivationSession): 
   ].join('\n')
 }
 
+export function claudeSkillBrokerArgs(session?: SkillActivationSession): string[] {
+  if (!session) return []
+  const broker = skillBrokerCommand(session.path)
+  return ['--mcp-config', JSON.stringify({
+    mcpServers: { crosscheck: { command: broker.command, args: broker.args } },
+  })]
+}
+
+export function codexSkillBrokerArgs(session?: SkillActivationSession): string[] {
+  if (!session) return []
+  const broker = skillBrokerCommand(session.path)
+  return [
+    '-c', `mcp_servers.crosscheck.command=${JSON.stringify(broker.command)}`,
+    '-c', `mcp_servers.crosscheck.args=${JSON.stringify(broker.args)}`,
+  ]
+}
+
 export function callSkillBrokerTool(
   sessionPath: string,
   toolName: string,

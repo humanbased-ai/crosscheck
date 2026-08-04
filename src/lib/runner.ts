@@ -27,6 +27,8 @@ import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, ty
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
+import { loadSkillCatalog } from '../skills/catalog.js'
+import { createSkillActivationSession, type SkillActivationSession } from '../skills/broker.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
@@ -545,6 +547,16 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // can iterate the same list and release these shas if SIGINT/SIGTERM fires
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
+  const skillCatalog = config.skills.enabled.length > 0 ? loadSkillCatalog() : []
+  const skillSessions = new Map<string, SkillActivationSession>()
+  const skillSessionFor = (stepName: string, stepType: string): SkillActivationSession | undefined => {
+    if (skillCatalog.length === 0) return undefined
+    const existing = skillSessions.get(stepName)
+    if (existing) return existing
+    const session = createSkillActivationSession(stepType, config.skills.enabled, skillCatalog)
+    skillSessions.set(stepName, session)
+    return session
+  }
 
   // Linear write-back identity. Resolved up front — before any expensive step —
   // and allowed to throw. The contract is that a configured-but-failing
@@ -665,13 +677,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let outputTokens: number | undefined
       let model = 'default'
       let retried: { timeoutMs: number; delayMs: number } | undefined
+      const skillSession = skillSessionFor(step.name, effectiveType)
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext))
+          ;({ review: rawReview, tokensUsed, model, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext, skillSession))
           inputTokens = undefined
           outputTokens = undefined
         } else {
-          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, ctx.issueContext))
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, ctx.issueContext, skillSession))
         }
       }
 
@@ -922,16 +935,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let activeVendor = vendor
 
       const tierMs = tierTimeoutMs(config.quality.tier)
+      const skillSession = skillSessionFor(step.name, effectiveType)
       const runFix = async (v: 'claude' | 'codex') => {
         if (v === 'codex') {
           return runCodexFixStep(
             tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs,
+            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs, skillSession,
           )
         }
         return runFixStep(
           tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-          config, claudeFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs,
+          config, claudeFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs, skillSession,
         )
       }
 
@@ -1210,8 +1224,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let resolveTokensUsed: number | undefined
 
       try {
+        const skillSession = skillSessionFor(step.name, effectiveType)
         ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
-          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
+          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), skillSession,
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
@@ -1362,6 +1377,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     failedStep = currentStepName
     throw err
   } finally {
+    for (const session of skillSessions.values()) session.close()
+    skillSessions.clear()
     if (pushedShasNeedingRelease.length > 0 || fixPushedShaRequiresRecheck !== null) {
       const lockOctokit = createGithubClient(token)
       const outcome: 'success' | 'failure' = workflowFailed ? 'failure' : 'success'

@@ -20,6 +20,8 @@ import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
+import { loadSkillCatalog } from '../skills/catalog.js'
+import { createSkillActivationSession } from '../skills/broker.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -111,6 +113,9 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
   // Clone the repo into a temp dir
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+  const skillSession = config.skills.enabled.length > 0
+    ? createSkillActivationSession('review', config.skills.enabled, loadSkillCatalog())
+    : undefined
   const spinner2 = ora('Cloning repo for review...').start()
   let reviewSpinner: ReturnType<typeof ora> | undefined
 
@@ -147,6 +152,9 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           undefined,
           msg => { reviewSpinner!.text = msg },
           codexTimeoutMs,
+          undefined,
+          undefined,
+          skillSession,
         ))
       } else {
         ;({ review: reviewText, tokensUsed, model } = await runClaudeReview(
@@ -159,6 +167,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           undefined,
           msg => { reviewSpinner!.text = msg },
           claudeTimeoutMs,
+          undefined,
+          undefined,
+          undefined,
+          skillSession,
         ))
       }
     } finally {
@@ -223,6 +235,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     console.error(chalk.red(`\n✗ ${message}`))
     process.exit(2)
   } finally {
+    skillSession?.close()
     rmSync(tmpDir, { force: true, recursive: true })
   }
 }

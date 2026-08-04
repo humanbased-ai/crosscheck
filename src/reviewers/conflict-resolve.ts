@@ -3,6 +3,7 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import { execa } from 'execa'
 import { applyEdit } from './fix.js'
+import { claudeSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 
 interface ClaudeJsonOutput {
   result?: unknown
@@ -125,6 +126,7 @@ export async function runConflictResolveStep(
   instructions: string,
   model = 'default',
   timeoutMs?: number,
+  skillSession?: SkillActivationSession,
 ): Promise<{ appliedCount: number; resolvedPaths: string[]; tokensUsed?: number }> {
   const conflictedFiles = findConflictedFiles(tmpDir)
   if (conflictedFiles.length === 0) return { appliedCount: 0, resolvedPaths: [] }
@@ -133,14 +135,14 @@ export async function runConflictResolveStep(
   const prompt = PROMPT_TEMPLATE
     .replace('{PR_TITLE}', prTitle)
     .replace('{CONFLICTED_FILES}', filesBlock)
-    .replace('{EXTRA_INSTRUCTIONS}', instructions ? `Additional instructions: ${instructions}` : '')
+    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
 
   let output = ''
   let tokensUsed: number | undefined
   try {
     const modelArgs = model !== 'default' ? ['--model', model] : []
     const resolvedTimeout = timeoutMs === undefined ? 180_000 : timeoutMs === 0 ? undefined : timeoutMs
-    const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs], {
+    const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs, ...claudeSkillBrokerArgs(skillSession)], {
       input: prompt,
       timeout: resolvedTimeout,
       env: { ...process.env },

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { existsSync } from 'fs'
 import {
   callSkillBrokerTool,
+  claudeSkillBrokerArgs,
+  codexSkillBrokerArgs,
   createSkillActivationSession,
   handleSkillBrokerRequest,
   skillBrokerCommand,
@@ -92,6 +94,18 @@ describe('skill activation broker', () => {
 
     expect(responses).toHaveLength(2)
     expect(responses[1]).toMatchObject({ id: 2, result: { tools: expect.any(Array) } })
+  })
+
+  it('builds session-scoped Claude and Codex MCP arguments', () => {
+    session = createSkillActivationSession('fix', ['code-review-skill'], loadBundledSkills())
+
+    expect(claudeSkillBrokerArgs(session)).toEqual([
+      '--mcp-config', expect.stringContaining('crosscheck'),
+    ])
+    expect(codexSkillBrokerArgs(session)).toEqual([
+      '-c', expect.stringContaining('mcp_servers.crosscheck.command='),
+      '-c', expect.stringContaining('mcp_servers.crosscheck.args='),
+    ])
   })
 
   it('removes the session directory on close', () => {
