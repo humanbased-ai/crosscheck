@@ -194,6 +194,8 @@ skills:
 Agents decide whether an enabled skill applies to each review, fix, recheck, or conflict-resolution step. PR comments attribute only skills actually activated for that step.
 Existing configs keep skills disabled on upgrade; use `crosscheck onboard` to opt in. Installed packages are integrity-checked before agents can load them.
 
+For review and recheck, Crosscheck also applies repository-defined review practices from `AGENTS.md` and `CLAUDE.md`. In monorepos it combines root guidance with the files scoped to changed paths, using the trusted base-branch versions so a PR cannot rewrite its own review rules.
+
 | Tier | Claude | Codex | Latency |
 |---|---|---|---|
 | `fast` | Haiku 4.5 | GPT-5.6 Luna | ~10s |

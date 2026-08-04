@@ -814,6 +814,8 @@ At runtime, Crosscheck distinguishes three states: **installed** skills are in t
 
 Upgrading from an earlier Crosscheck release is opt-in: existing configs default to `skills.enabled: []`. Re-run `crosscheck onboard` to choose the recommended bundle or any additional installed skills.
 
+Review and recheck also honor repository practices in `AGENTS.md` and `CLAUDE.md`. Crosscheck reads the root files plus any nested files whose directory contains a changed path, orders them from broadest to most specific, and lets nested guidance override root guidance. It reads these files from the PR's base branch and disables vendor-native discovery for the run, so guidance added or modified by the PR cannot influence its own review.
+
 ---
 
 ### `crosscheck diagnose`

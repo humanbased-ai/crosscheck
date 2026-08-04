@@ -5,6 +5,7 @@ import { primaryModelFromUsage, resolveClaudeModel } from '../lib/review-models.
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
+import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
 
 const EFFORT_MAP: Record<string, string> = {
   low: 'low',
@@ -75,6 +76,7 @@ export async function runClaudeReview(
   const customLine = quality.custom_prompt ?? ''
 
   const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
+  const repositoryGuidance = loadRepositoryReviewGuidance(repoDir, baseBranch)
 
   const prompt = [
     `You are reviewing a pull request titled: "${prTitle}".`,
@@ -83,6 +85,7 @@ export async function runClaudeReview(
     focusLine,
     customLine,
     behaviorInstructions,
+    repositoryGuidance,
     skillSession ? renderSkillBrokerInstructions(skillSession) : '',
   ].filter(Boolean).join('\n')
 
@@ -119,7 +122,12 @@ export async function runClaudeReview(
     try {
       const { result: { stdout }, retried } = await withTimeoutRetry(
         resolvedTimeout,
-        (t) => execa('claude', args, { cwd: repoDir, timeout: t, input: prompt, env: { ...process.env } }),
+        (t) => execa('claude', args, {
+          cwd: repoDir,
+          timeout: t,
+          input: prompt,
+          env: { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
+        }),
         {
           onRetry: (effectiveMs, delayMs) =>
             (onRetry ?? onLog)?.(`  ⏱ claude timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),

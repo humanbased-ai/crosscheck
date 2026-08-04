@@ -9,6 +9,7 @@ import type { ReviewResult } from './claude.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { codexSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
+import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
 
 // Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
 // Infer the verdict from the highest severity present and append it so parseVerdict() can
@@ -92,7 +93,8 @@ export async function runCodexReview(
     : ''
   const customNote = quality.custom_prompt ?? ''
   const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
-  const instructionsNote = [issueContext ?? '', focusNote, customNote, behaviorInstructions, skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n')
+  const repositoryGuidance = loadRepositoryReviewGuidance(repoDir, baseBranch)
+  const instructionsNote = [issueContext ?? '', focusNote, customNote, behaviorInstructions, repositoryGuidance, skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n')
   const instructionsPath = `${repoDir}/.codex/instructions`
   // Save original content so we can restore it after the review — prevents the
   // fix step's git add -A from committing crosscheck's instructions as a PR change.
@@ -114,10 +116,11 @@ export async function runCodexReview(
           resolvedTimeout,
           (t) => execa(
             'codex',
-            ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs, ...skillArgs],
+            ['review', '--base', baseBranch, '--title', prTitle, '-c', 'project_doc_max_bytes=0', ...modelArgs, ...skillArgs, '-'],
             {
               cwd: repoDir,
               timeout: t,
+              input: instructionsNote,
               env: {
                 ...process.env,
                 // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
