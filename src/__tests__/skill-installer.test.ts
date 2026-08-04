@@ -76,4 +76,23 @@ describe('installSkill', () => {
     symlinkSync(join(sourceDir, 'LICENSE'), join(sourceDir, 'linked-license'))
     await expect(installSkill(sourceDir, { installDir })).rejects.toThrow('symbolic links')
   })
+
+  it('does not load an installed skill after its contents are modified', async () => {
+    await installSkill(sourceDir, { installDir })
+    writeFileSync(join(installDir, 'test-skill', 'SKILL.md'), '\nTampered\n', { flag: 'a' })
+
+    expect(loadInstalledSkills(installDir)).toEqual([])
+  })
+
+  it('rejects oversized skill packages', async () => {
+    writeFileSync(join(sourceDir, 'large.bin'), Buffer.alloc(10 * 1024 * 1024 + 1))
+
+    await expect(installSkill(sourceDir, { installDir })).rejects.toThrow('cannot exceed 10 MiB')
+  })
+
+  it('rejects attribution fields that could inject terminal or Markdown output', async () => {
+    writeFileSync(join(sourceDir, 'SKILL.md'), '---\nname: test-skill\ndescription: Test guidance\nauthor: "acme\\nspoof"\n---\n')
+
+    await expect(installSkill(sourceDir, { installDir })).rejects.toThrow('Invalid skill author')
+  })
 })

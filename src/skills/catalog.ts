@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, readdirSync } from 'fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { homedir } from 'os'
 import yaml from 'js-yaml'
+import { computeSkillIntegrity } from './integrity.js'
 
 export interface SkillIdentity {
   name: string
@@ -34,37 +35,72 @@ export const INSTALLED_SKILLS_DIR = join(homedir(), '.crosscheck', 'skills')
 export function readSkillFrontmatter(skillPath: string): SkillFrontmatter {
   const content = readFileSync(join(skillPath, 'SKILL.md'), 'utf8')
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
-  return match ? (yaml.load(match[1]) as SkillFrontmatter) : {}
+  if (!match) return {}
+  const parsed: unknown = yaml.load(match[1])
+  return typeof parsed === 'object' && parsed !== null ? parsed as SkillFrontmatter : {}
 }
 
-function loadSkills(rootDir: string): SkillIdentity[] {
+export function isValidSkillAuthor(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/.test(value)
+}
+
+export function isValidSkillLicense(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9.+() -]{0,99}$/.test(value)
+}
+
+function isSkillReceipt(value: unknown): value is SkillReceipt {
+  if (typeof value !== 'object' || value === null) return false
+  const receipt = value as Record<string, unknown>
+  return receipt.schemaVersion === 1
+    && typeof receipt.name === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(receipt.name)
+    && isValidSkillAuthor(receipt.author)
+    && isValidSkillLicense(receipt.license)
+    && typeof receipt.source === 'string' && receipt.source.length > 0
+    && typeof receipt.revision === 'string' && receipt.revision.length > 0
+    && typeof receipt.integrity === 'string' && /^sha256:[0-9a-f]{64}$/.test(receipt.integrity)
+}
+
+function loadSkills(rootDir: string, skipInvalid: boolean): SkillIdentity[] {
   if (!existsSync(rootDir)) return []
   return readdirSync(rootDir, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
-    .map(entry => {
+    .flatMap(entry => {
       const path = join(rootDir, entry.name)
-      const receipt = JSON.parse(readFileSync(join(path, '.crosscheck-skill.json'), 'utf8')) as SkillReceipt
-      const frontmatter = readSkillFrontmatter(path)
-      return {
-        name: receipt.name,
-        description: frontmatter.description?.trim() ?? '',
-        author: receipt.author,
-        license: receipt.license,
-        source: receipt.source,
-        revision: receipt.revision,
-        integrity: receipt.integrity,
-        path,
+      try {
+        const receiptPath = join(path, '.crosscheck-skill.json')
+        if (statSync(receiptPath).size > 64 * 1024) throw new Error(`Invalid skill receipt: ${entry.name}`)
+        const integrity = computeSkillIntegrity(path)
+        const receipt: unknown = JSON.parse(readFileSync(receiptPath, 'utf8'))
+        const frontmatter = readSkillFrontmatter(path)
+        if (!isSkillReceipt(receipt) || receipt.name !== entry.name || frontmatter.name !== receipt.name
+          || typeof frontmatter.description !== 'string' || !frontmatter.description.trim()
+          || integrity !== receipt.integrity) {
+          throw new Error(`Invalid skill package: ${entry.name}`)
+        }
+        return [{
+          name: receipt.name,
+          description: frontmatter.description.trim(),
+          author: receipt.author,
+          license: receipt.license,
+          source: receipt.source,
+          revision: receipt.revision,
+          integrity: receipt.integrity,
+          path,
+        }]
+      } catch (err: unknown) {
+        if (skipInvalid) return []
+        throw err
       }
     })
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export function loadBundledSkills(rootDir = BUNDLED_SKILLS_DIR): SkillIdentity[] {
-  return loadSkills(rootDir)
+  return loadSkills(rootDir, false)
 }
 
 export function loadInstalledSkills(rootDir = INSTALLED_SKILLS_DIR): SkillIdentity[] {
-  return loadSkills(rootDir)
+  return loadSkills(rootDir, true)
 }
 
 export function loadSkillCatalog(installedRoot = INSTALLED_SKILLS_DIR): SkillIdentity[] {

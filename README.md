@@ -192,6 +192,7 @@ skills:
 ```
 
 Agents decide whether an enabled skill applies to each review, fix, recheck, or conflict-resolution step. PR comments attribute only skills actually activated for that step.
+Existing configs keep skills disabled on upgrade; use `crosscheck onboard` to opt in. Installed packages are integrity-checked before agents can load them.
 
 | Tier | Claude | Codex | Latency |
 |---|---|---|---|

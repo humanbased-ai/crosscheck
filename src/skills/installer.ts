@@ -1,38 +1,17 @@
-import { createHash } from 'crypto'
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
-import { basename, join, relative, resolve, sep } from 'path'
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+import { basename, join, resolve } from 'path'
 import { tmpdir } from 'os'
 import { execa } from 'execa'
-import { INSTALLED_SKILLS_DIR, loadInstalledSkills, readSkillFrontmatter, type SkillIdentity } from './catalog.js'
+import { INSTALLED_SKILLS_DIR, isValidSkillAuthor, isValidSkillLicense, loadInstalledSkills, readSkillFrontmatter, type SkillIdentity } from './catalog.js'
+import { computeSkillIntegrity } from './integrity.js'
+
+export { computeSkillIntegrity } from './integrity.js'
 
 export interface InstallSkillOptions {
   installDir?: string
 }
 
 export class SkillInstallError extends Error {}
-
-function packageFiles(rootDir: string, currentDir = rootDir): string[] {
-  const files: string[] = []
-  for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
-    if (entry.name === '.git' || entry.name === '.crosscheck-skill.json') continue
-    const path = join(currentDir, entry.name)
-    if (lstatSync(path).isSymbolicLink()) {
-      throw new SkillInstallError('Skill packages cannot contain symbolic links')
-    }
-    if (entry.isDirectory()) files.push(...packageFiles(rootDir, path))
-    else if (entry.isFile()) files.push(path)
-  }
-  return files.sort((a, b) => relative(rootDir, a).localeCompare(relative(rootDir, b)))
-}
-
-export function computeSkillIntegrity(rootDir: string): string {
-  const hash = createHash('sha256')
-  for (const path of packageFiles(rootDir)) {
-    hash.update(relative(rootDir, path).split(sep).join('/')).update('\0')
-    hash.update(readFileSync(path)).update('\0')
-  }
-  return `sha256:${hash.digest('hex')}`
-}
 
 function detectLicense(rootDir: string, declared?: unknown): string {
   if (typeof declared === 'string' && declared.trim()) return declared.trim()
@@ -78,6 +57,11 @@ export async function installSkill(source: string, opts: InstallSkillOptions = {
     if (!existsSync(join(checkout.path, 'SKILL.md'))) {
       throw new SkillInstallError('Skill package must contain SKILL.md')
     }
+    try {
+      computeSkillIntegrity(checkout.path)
+    } catch (err: unknown) {
+      throw new SkillInstallError(err instanceof Error ? err.message : String(err))
+    }
     const frontmatter = readSkillFrontmatter(checkout.path)
     const name = typeof frontmatter.name === 'string' ? frontmatter.name : ''
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
@@ -86,7 +70,6 @@ export async function installSkill(source: string, opts: InstallSkillOptions = {
     if (typeof frontmatter.description !== 'string' || !frontmatter.description.trim()) {
       throw new SkillInstallError('Skill frontmatter must include a description')
     }
-    packageFiles(checkout.path)
 
     mkdirSync(installDir, { recursive: true })
     const target = join(installDir, name)
@@ -100,11 +83,15 @@ export async function installSkill(source: string, opts: InstallSkillOptions = {
         recursive: true,
         filter: path => basename(path) !== '.git' && basename(path) !== '.crosscheck-skill.json',
       })
+      const author = detectAuthor(source, frontmatter.author)
+      const license = detectLicense(checkout.path, frontmatter.license)
+      if (!isValidSkillAuthor(author)) throw new SkillInstallError(`Invalid skill author: ${author}`)
+      if (!isValidSkillLicense(license)) throw new SkillInstallError(`Invalid skill license: ${license}`)
       const receipt = {
         schemaVersion: 1,
         name,
-        author: detectAuthor(source, frontmatter.author),
-        license: detectLicense(checkout.path, frontmatter.license),
+        author,
+        license,
         source: existsSync(source) ? resolve(source) : source,
         revision: checkout.revision,
         integrity: computeSkillIntegrity(pendingTarget),

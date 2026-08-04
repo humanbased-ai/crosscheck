@@ -72,7 +72,7 @@ export async function runStatus(configPath?: string) {
   row('enabled skills', config.skills.enabled.length > 0
     ? config.skills.enabled.map(name => {
         const skill = bundledSkills.get(name)
-        return skill ? formatSkillIdentity(skill) : name
+        return skill ? formatSkillIdentity(skill) : `${name} (not installed or failed integrity check)`
       }).join(', ')
     : 'none')
   row('codex auth', config.vendors.codex.auth)

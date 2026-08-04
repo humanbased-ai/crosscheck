@@ -812,6 +812,8 @@ crosscheck onboard  # enable installed skills
 
 At runtime, Crosscheck distinguishes three states: **installed** skills are in the catalog, **enabled** skills are available to agents, and **activated** skills were actually loaded for one workflow step. The terminal and each PR comment attribute only that step's activated skills, for example: `code-review-skill (by @awesome-skills, MIT)`.
 
+Upgrading from an earlier Crosscheck release is opt-in: existing configs default to `skills.enabled: []`. Re-run `crosscheck onboard` to choose the recommended bundle or any additional installed skills.
+
 ---
 
 ### `crosscheck diagnose`
@@ -1404,6 +1406,9 @@ The fix (file lock for same-machine + GitHub commit status for cross-machine) is
 - **Temp isolation** — each PR cloned into a fresh temp dir, deleted after review
 - **Read-only tools** — Claude restricted to `git diff` and `git log` only
 - **Temp credential isolation** — with `clone_protocol: ssh` (default) no tokens touch disk; with `clone_protocol: https` a short-lived token is embedded in the temp clone's remote URL and removed when the temp dir is deleted after review
+- **Skill package validation** — installs reject unsafe names, attribution injection, symbolic links, packages over 1,000 files or 10 MiB, and collisions; Git sources record their checked-out commit
+- **Skill integrity** — Crosscheck verifies every installed package against its SHA-256 receipt before exposing it to agents; modified or malformed packages fail closed and appear as unavailable in `crosscheck status`
+- **Skill execution boundary** — the activation broker exposes instructions and referenced files but never executes bundled scripts itself. Skills are third-party instructions: inspect their source and license before enabling them; the selected coding agent still operates under its normal sandbox and permissions
 
 ---
 
