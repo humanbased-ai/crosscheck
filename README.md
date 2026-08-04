@@ -209,7 +209,7 @@ skills:
     - diagnosing-bugs    # recommended · @mattpocock, MIT
 ```
 
-Agents decide whether an enabled skill applies to each review, fix, recheck, or conflict-resolution step. PR comments attribute only skills actually activated for that step.
+Agents decide whether an enabled skill applies to each review, fix, recheck, or conflict-resolution step. A skill is activated only after the agent successfully loads it through the broker; activation lasts for that step session, including retries, and does not carry into later steps or runs. PR comments preserve only that completed step's activated-skill attribution.
 Existing configs keep skills disabled on upgrade; use `crosscheck onboard` to opt in. Installed packages are integrity-checked before agents can load them.
 
 For review and recheck, Crosscheck also applies repository-defined review practices from `AGENTS.md` and `CLAUDE.md`. In monorepos it combines root guidance with the files scoped to changed paths, using the trusted base-branch versions so a PR cannot rewrite its own review rules.

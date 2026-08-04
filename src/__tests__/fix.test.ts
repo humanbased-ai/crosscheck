@@ -3,8 +3,6 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { applyEdit } from '../reviewers/fix.js'
-import { createSkillActivationSession } from '../skills/broker.js'
-import { loadBundledSkills } from '../skills/catalog.js'
 
 describe('applyEdit', () => {
   it('replaces exact match at start of file', () => {
@@ -212,6 +210,8 @@ describe('runCodexFixStep', () => {
 
   it('attaches the skill broker and decision prompt to Codex fix', async () => {
     const { runCodexFixStep } = await import('../reviewers/fix.js')
+    const { createSkillActivationSession } = await import('../skills/broker.js')
+    const { loadBundledSkills } = await import('../skills/catalog.js')
     const session = createSkillActivationSession('fix', ['code-review-skill'], loadBundledSkills())
     try {
       await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '', 'default', undefined, session)
@@ -294,6 +294,8 @@ describe('runFixStep timeout defaults', () => {
 
   it('attaches the skill broker and decision prompt to Claude fix', async () => {
     const { runFixStep } = await import('../reviewers/fix.js')
+    const { createSkillActivationSession } = await import('../skills/broker.js')
+    const { loadBundledSkills } = await import('../skills/catalog.js')
     const session = createSkillActivationSession('fix', ['code-review-skill'], loadBundledSkills())
     try {
       await runFixStep('/tmp/repo', 'main', 'My PR', 'Review', '', minimalConfig('balanced'), 'default', undefined, session)

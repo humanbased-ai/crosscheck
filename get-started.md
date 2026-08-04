@@ -826,7 +826,9 @@ The Git repository or local directory must have `SKILL.md` at its root. For a sk
 
 `crosscheck status` distinguishes the full installed catalog from the enabled selection and renders attributed identities as `skill-name (by @author, license)`.
 
-At runtime, Crosscheck distinguishes three states: **installed** skills are in the catalog, **enabled** skills are available to agents, and **activated** skills were actually loaded for one workflow step. The terminal and each PR comment attribute only that step's activated skills, for example: `code-review-skill (by @awesome-skills, MIT)`.
+At runtime, Crosscheck distinguishes three states: **installed** skills are in the catalog, **enabled** skills are available to agents, and **activated** skills were actually loaded for one workflow step. A skill becomes activated only when the agent successfully calls the Crosscheck broker's `activate_skill` tool for an enabled skill and receives its `SKILL.md` instructions. Listing enabled skills, seeing a skill description, or merely enabling a skill does not count.
+
+Activation is scoped to one step session, such as review, fix, recheck, or conflict resolution. Repeated activation in that session is idempotent, and the receipt survives retries or a reviewer fallback within the same step. Every later step gets a separate empty session, and Crosscheck deletes all step sessions when the workflow run ends. The terminal, logs, and PR comment preserve the completed step's attribution as historical evidence; they do not pre-activate future sessions. For example: `code-review-skill (by @awesome-skills, MIT)`.
 
 Upgrading from an earlier Crosscheck release is opt-in: existing configs default to `skills.enabled: []`. Re-run `crosscheck onboard` to choose the recommended bundle or any additional installed skills.
 

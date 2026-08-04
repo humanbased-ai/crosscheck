@@ -149,7 +149,7 @@ export function createSkillActivationSession(
     }
     const socketPath = process.platform === 'win32'
       ? `\\\\.\\pipe\\crosscheck-skill-${randomUUID()}`
-      : join(sessionDir!, `${randomUUID()}.sock`)
+      : join(sessionDir!, `${randomUUID().slice(0, 8)}.sock`)
     const server: Server = createBrokerServer(
       socketPath,
       path,
@@ -251,11 +251,21 @@ export function callSkillBrokerTool(
   return error(`Unknown skill broker tool: ${toolName}`)
 }
 
+// Broker tools never mutate the repository or external systems; activation only
+// records an idempotent receipt in the current step's temporary session.
+const READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const
+
 const TOOLS = [
   {
     name: 'list_enabled_skills',
     description: 'List Agent Skills enabled for the current Crosscheck operation. Metadata only; this does not activate a skill.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
   },
   {
     name: 'activate_skill',
@@ -266,6 +276,7 @@ const TOOLS = [
       required: ['name'],
       additionalProperties: false,
     },
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
   },
   {
     name: 'read_skill_file',
@@ -276,6 +287,7 @@ const TOOLS = [
       required: ['name', 'path'],
       additionalProperties: false,
     },
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
   },
 ]
 
