@@ -22,6 +22,7 @@
   - [Multi-PR syntax](#multi-pr-syntax)
   - [watch](#crosscheck-watch)
   - [status](#crosscheck-status)
+  - [skill install](#crosscheck-skill-install-source)
   - [diagnose](#crosscheck-diagnose)
   - [optimize](#crosscheck-optimize)
   - [impact](#crosscheck-impact)
@@ -772,6 +773,7 @@ crosscheck status
   Config
     mode                   cross-vendor
     quality tier           balanced
+    installed skills       code-review-skill (by @awesome-skills, MIT)
     enabled skills         code-review-skill (by @awesome-skills, MIT)
     codex auth             subscription
     claude model           sonnet
@@ -793,6 +795,20 @@ crosscheck status
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Check status against a specific config file |
+
+---
+
+### `crosscheck skill install <source>`
+
+Installs an Agent Skill from a Git URL or local directory into `~/.crosscheck/skills`. Crosscheck validates `SKILL.md`, rejects unsafe names and symbolic links, and records source, revision, author, license, and package integrity. Installation does not enable a skill automatically.
+
+```bash
+crosscheck skill install https://github.com/owner/my-skill.git
+crosscheck skill install /path/to/my-skill
+crosscheck onboard  # enable installed skills
+```
+
+`crosscheck status` distinguishes the full installed catalog from the enabled selection and renders attributed identities as `skill-name (by @author, license)`.
 
 ---
 

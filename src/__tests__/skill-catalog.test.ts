@@ -13,6 +13,7 @@ describe('bundled skill catalog', () => {
     })
     expect(skill?.description).not.toBe('')
     expect(skill?.revision).toMatch(/^[0-9a-f]{40}$/)
+    expect(skill?.integrity).toMatch(/^sha256:[0-9a-f]{64}$/)
     expect(formatSkillIdentity(skill!)).toBe('code-review-skill (by @awesome-skills, MIT)')
   })
 

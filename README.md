@@ -153,6 +153,7 @@ Full walkthrough: **[docs/linear-identity.md](./docs/linear-identity.md)**.
 |---|---|
 | `crosscheck onboard` | Guided setup — repos, routing, pipeline depth, connection |
 | `crosscheck status` | Auth, config, Linear identity, logs, impact summary |
+| `crosscheck skill install <source>` | Install an Agent Skill from Git or a local directory |
 | `crosscheck review <pr>` | One-shot review, posts a comment |
 | `crosscheck run <pr>` | Full pipeline for a PR — review, fix, recheck |
 | `crosscheck recheck` / `fix` / `resolve` | Run one step in isolation |

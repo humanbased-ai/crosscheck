@@ -17,7 +17,7 @@ import { execSync } from 'child_process'
 import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/repo-picker.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
-import { loadBundledSkills, RECOMMENDED_SKILL_NAMES } from '../skills/catalog.js'
+import { loadSkillCatalog, RECOMMENDED_SKILL_NAMES } from '../skills/catalog.js'
 
 export interface OnboardOpts {
   config?: string
@@ -979,7 +979,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
 
   // ── Step 6.5: Agent skills ────────────────────────────────────────────────
   console.log(chalk.bold('Step 6.5 — agent skills'))
-  const bundledSkills = loadBundledSkills()
+  const bundledSkills = loadSkillCatalog()
   const initialSkills = existingConfig
     ? existingConfig.skills.enabled
     : [...RECOMMENDED_SKILL_NAMES]
