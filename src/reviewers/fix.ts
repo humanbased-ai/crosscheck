@@ -105,7 +105,15 @@ export async function runFixStep(
     const modelArgs = model !== 'default' ? ['--model', model] : []
     const effort = config.vendors?.claude?.effort ?? 'medium'
     const resolvedTimeout = timeoutMs === undefined ? tierTimeoutMs(config.quality.tier) : timeoutMs === 0 ? undefined : timeoutMs
-    const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs, '--effort', effort, ...claudeSkillBrokerArgs(skillSession)], {
+    const { stdout } = await execa('claude', [
+      '--print', '--output-format', 'json', ...modelArgs, '--effort', effort,
+      ...claudeSkillBrokerArgs(skillSession),
+      ...(skillSession ? ['--allowedTools', [
+        'mcp__crosscheck__list_enabled_skills',
+        'mcp__crosscheck__activate_skill',
+        'mcp__crosscheck__read_skill_file',
+      ].join(',')] : []),
+    ], {
       input: prompt,
       timeout: resolvedTimeout,
       env: { ...process.env },

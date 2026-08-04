@@ -1,5 +1,16 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import { extractConflictWindows, parseResolverEdits, PROMPT_TEMPLATE } from '../reviewers/conflict-resolve.js'
+import { createSkillActivationSession } from '../skills/broker.js'
+import { loadBundledSkills } from '../skills/catalog.js'
+
+vi.mock('execa', () => ({ execa: vi.fn() }))
+vi.mock('child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('child_process')>()
+  return { ...actual, execSync: vi.fn() }
+})
 
 describe('extractConflictWindows', () => {
   it('returns empty string when no markers are present', () => {
@@ -49,6 +60,42 @@ describe('extractConflictWindows', () => {
     expect(startCount).toBe(2)
     // mid section between adjacent conflicts should appear exactly once (merged window)
     expect((out.match(/mid 1/g) ?? []).length).toBe(1)
+  })
+})
+
+describe('Claude conflict skill broker permissions', () => {
+  let execaMock: ReturnType<typeof vi.fn>
+  let execSyncMock: ReturnType<typeof vi.fn>
+  let repoDir: string
+
+  beforeEach(async () => {
+    repoDir = mkdtempSync(join(tmpdir(), 'crosscheck-conflict-test-'))
+    mkdirSync(join(repoDir, 'src'))
+    writeFileSync(join(repoDir, 'src/conflicted.ts'), '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> staging\n')
+    const execa = await import('execa')
+    execaMock = vi.mocked(execa.execa) as ReturnType<typeof vi.fn>
+    const childProcess = await import('child_process')
+    execSyncMock = vi.mocked(childProcess.execSync) as ReturnType<typeof vi.fn>
+    execSyncMock.mockReturnValue('src/conflicted.ts\n')
+    execaMock.mockResolvedValue({ stdout: JSON.stringify({ result: '' }) } as never)
+  })
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true })
+    vi.clearAllMocks()
+  })
+
+  it('pre-authorizes Crosscheck MCP tools for headless conflict resolution', async () => {
+    const { runConflictResolveStep } = await import('../reviewers/conflict-resolve.js')
+    const session = createSkillActivationSession('conflict-resolve', ['code-review-skill'], loadBundledSkills())
+    try {
+      await runConflictResolveStep(repoDir, 'My PR', '', 'default', undefined, session)
+      const args = execaMock.mock.calls[0][1] as string[]
+      expect(args).toContain('--allowedTools')
+      expect(args.join(' ')).toContain('mcp__crosscheck__activate_skill')
+    } finally {
+      session.close()
+    }
   })
 })
 

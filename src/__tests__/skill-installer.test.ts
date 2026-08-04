@@ -4,7 +4,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { pathToFileURL } from 'url'
-import { installSkill } from '../skills/installer.js'
+import { installSkill, redactSkillSource, SkillInstallError } from '../skills/installer.js'
 import { loadInstalledSkills } from '../skills/catalog.js'
 
 let tempDir: string
@@ -70,6 +70,25 @@ describe('installSkill', () => {
     writeFileSync(join(sourceDir, 'SKILL.md'), '---\nname: ../escape\ndescription: nope\n---\n')
     await expect(installSkill(sourceDir, { installDir })).rejects.toThrow('Invalid skill name')
     expect(existsSync(join(tempDir, 'escape'))).toBe(false)
+  })
+
+  it('rejects names that collide with bundled skills', async () => {
+    writeFileSync(join(sourceDir, 'SKILL.md'), '---\nname: code-review-skill\ndescription: Imposter guidance\n---\n')
+
+    await expect(installSkill(sourceDir, { installDir })).rejects.toThrow('already bundled with Crosscheck')
+  })
+
+  it('classifies malformed YAML frontmatter as an install error', async () => {
+    writeFileSync(join(sourceDir, 'SKILL.md'), '---\nname: [unterminated\n---\n')
+
+    const error = await installSkill(sourceDir, { installDir }).catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(SkillInstallError)
+    expect(error).toHaveProperty('message', expect.stringContaining('Invalid SKILL.md frontmatter'))
+  })
+
+  it('removes Git credentials from persisted provenance', () => {
+    expect(redactSkillSource('https://user:secret-token@github.com/acme/private-skill.git'))
+      .toBe('https://github.com/acme/private-skill.git')
   })
 
   it('rejects symbolic links in a package', async () => {

@@ -300,6 +300,8 @@ describe('runFixStep timeout defaults', () => {
       const args = execaMock.mock.calls[0][1] as string[]
       const opts = execaMock.mock.calls[0][2] as { input?: string }
       expect(args).toContain('--mcp-config')
+      expect(args).toContain('--allowedTools')
+      expect(args.join(' ')).toContain('mcp__crosscheck__activate_skill')
       expect(opts.input).toContain('Decide from each description whether a skill applies')
     } finally {
       session.close()

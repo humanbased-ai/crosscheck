@@ -2,7 +2,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, re
 import { basename, join, resolve } from 'path'
 import { tmpdir } from 'os'
 import { execa } from 'execa'
-import { INSTALLED_SKILLS_DIR, isValidSkillAuthor, isValidSkillLicense, loadInstalledSkills, readSkillFrontmatter, type SkillIdentity } from './catalog.js'
+import { INSTALLED_SKILLS_DIR, isValidSkillAuthor, isValidSkillLicense, loadBundledSkills, loadInstalledSkills, readSkillFrontmatter, type SkillIdentity } from './catalog.js'
 import { computeSkillIntegrity } from './integrity.js'
 
 export { computeSkillIntegrity } from './integrity.js'
@@ -12,6 +12,18 @@ export interface InstallSkillOptions {
 }
 
 export class SkillInstallError extends Error {}
+
+export function redactSkillSource(source: string): string {
+  if (existsSync(source)) return resolve(source)
+  try {
+    const url = new URL(source)
+    url.username = ''
+    url.password = ''
+    return url.toString()
+  } catch {
+    return source
+  }
+}
 
 function detectLicense(rootDir: string, declared?: unknown): string {
   if (typeof declared === 'string' && declared.trim()) return declared.trim()
@@ -62,13 +74,21 @@ export async function installSkill(source: string, opts: InstallSkillOptions = {
     } catch (err: unknown) {
       throw new SkillInstallError(err instanceof Error ? err.message : String(err))
     }
-    const frontmatter = readSkillFrontmatter(checkout.path)
+    let frontmatter
+    try {
+      frontmatter = readSkillFrontmatter(checkout.path)
+    } catch (err: unknown) {
+      throw new SkillInstallError(`Invalid SKILL.md frontmatter: ${err instanceof Error ? err.message : String(err)}`)
+    }
     const name = typeof frontmatter.name === 'string' ? frontmatter.name : ''
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
       throw new SkillInstallError(`Invalid skill name: ${name || '(missing)'}`)
     }
     if (typeof frontmatter.description !== 'string' || !frontmatter.description.trim()) {
       throw new SkillInstallError('Skill frontmatter must include a description')
+    }
+    if (loadBundledSkills().some(skill => skill.name === name)) {
+      throw new SkillInstallError(`Skill ${name} is already bundled with Crosscheck`)
     }
 
     mkdirSync(installDir, { recursive: true })
@@ -92,7 +112,7 @@ export async function installSkill(source: string, opts: InstallSkillOptions = {
         name,
         author,
         license,
-        source: existsSync(source) ? resolve(source) : source,
+        source: redactSkillSource(source),
         revision: checkout.revision,
         integrity: computeSkillIntegrity(pendingTarget),
       }
