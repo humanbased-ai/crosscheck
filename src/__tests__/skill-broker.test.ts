@@ -93,7 +93,23 @@ describe('skill activation broker', () => {
     })).toMatchObject({ jsonrpc: '2.0', id: 1, result: { capabilities: { tools: {} } } })
     expect(handleSkillBrokerRequest(session.path, {
       jsonrpc: '2.0', id: 2, method: 'tools/list', params: {},
-    })).toMatchObject({ jsonrpc: '2.0', id: 2, result: { tools: expect.any(Array) } })
+    })).toMatchObject({
+      jsonrpc: '2.0',
+      id: 2,
+      result: {
+        tools: expect.arrayContaining([
+          expect.objectContaining({
+            name: 'activate_skill',
+            annotations: {
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+              openWorldHint: false,
+            },
+          }),
+        ]),
+      },
+    })
   })
 
   it('serves newline-delimited MCP over stdio', async () => {

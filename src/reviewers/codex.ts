@@ -1,6 +1,7 @@
 import { execa } from 'execa'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'fs'
-import { tmpdir } from 'os'
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from 'fs'
+import { randomUUID } from 'crypto'
+import { homedir } from 'os'
 import { join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
@@ -98,13 +99,12 @@ export async function runCodexReview(
   skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
   const model = resolveCodexModel(quality, vendor)
-  const tmpFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
   const tierTimeout = tierTimeoutMs(quality.tier)
   // timeoutMs: 0 → no cap (crazy/halfcrazy); undefined → tier-based default; positive → user-specified
   const resolvedTimeout = timeoutMs === undefined ? tierTimeout : timeoutMs === 0 ? undefined : timeoutMs
 
-  // --base and [PROMPT] are mutually exclusive in codex review;
-  // inject focus instructions via a .codex/instructions file instead
+  // --base and [PROMPT] are mutually exclusive in codex review, so deliver
+  // Crosscheck's trusted guidance through a temporary Codex profile.
   const focusNote = quality.focus.length > 0
     ? `Focus areas: ${quality.focus.join(', ')}. `
     : ''
@@ -112,30 +112,28 @@ export async function runCodexReview(
   const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
   const repositoryGuidance = loadRepositoryReviewGuidance(repoDir, baseBranch)
   const instructionsNote = [issueContext ?? '', focusNote, customNote, behaviorInstructions, repositoryGuidance, skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n')
-  const instructionsPath = `${repoDir}/.codex/instructions`
-  // Save original content so we can restore it after the review — prevents the
-  // fix step's git add -A from committing crosscheck's instructions as a PR change.
-  let originalInstructions: string | undefined
-  try { originalInstructions = readFileSync(instructionsPath, 'utf8') } catch { /* didn't exist */ }
-  mkdirSync(`${repoDir}/.codex`, { recursive: true })
-  writeFileSync(instructionsPath, instructionsNote)
+  const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex')
+  const profileName = `crosscheck-${randomUUID()}`
+  const profilePath = join(codexHome, `${profileName}.config.toml`)
+  mkdirSync(codexHome, { recursive: true })
 
-  try {
-    // Retry loop for transient Codex API errors (socket disconnects, rate limits)
-    let lastErr: unknown = undefined
-    for (let attempt = 1; attempt <= MAX_CODEX_RETRIES; attempt++) {
+  // Retry loop for transient Codex API errors (socket disconnects, rate limits)
+  let lastErr: unknown = undefined
+  for (let attempt = 1; attempt <= MAX_CODEX_RETRIES; attempt++) {
+    try {
+      const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
+      const skillArgs = codexSkillBrokerArgs(skillSession)
+      const reasoningEffort = codexReasoningEffort(vendor.effort)
+      const effortArgs = ['-c', `model_reasoning_effort="${reasoningEffort}"`]
+      onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''} -c model_reasoning_effort="${reasoningEffort}"`)
+
+      writeFileSync(profilePath, `developer_instructions = ${JSON.stringify(instructionsNote)}\n`, { mode: 0o600 })
       try {
-        const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
-        const skillArgs = codexSkillBrokerArgs(skillSession)
-        const reasoningEffort = codexReasoningEffort(vendor.effort)
-        const effortArgs = ['-c', `model_reasoning_effort="${reasoningEffort}"`]
-        onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''} -c model_reasoning_effort="${reasoningEffort}"`)
-
         const { result, retried } = await withTimeoutRetry(
           resolvedTimeout,
           (t) => execa(
             'codex',
-            ['review', '--base', baseBranch, '--title', prTitle, '-c', 'project_doc_max_bytes=0', ...modelArgs, ...effortArgs, ...skillArgs],
+            ['-p', profileName, 'review', '--base', baseBranch, '--title', prTitle, '-c', 'project_doc_max_bytes=0', ...modelArgs, ...effortArgs, ...skillArgs],
             {
               cwd: repoDir,
               timeout: t,
@@ -161,52 +159,43 @@ export async function runCodexReview(
           ? rawReview
           : `${rawReview}\n\nVERDICT: ${inferVerdictFromCodexOutput(rawReview)}`
         return { review, tokensUsed, model, retried }
-      } catch (err: unknown) {
-        const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
-        const rawStderr = execa.stderr ?? ''
-        const fullMessage = rawStderr || execa.message || ''
-        
-        // Check if this is a retryable error
-        if (isRetryableCodexError(fullMessage) && attempt < MAX_CODEX_RETRIES) {
-          const delay = CODEX_RETRY_DELAY_MS * attempt // 5s, 10s
-          onLog?.(`  codex: transient error (${fullMessage.slice(0, 80)}), retrying in ${delay / 1000}s (attempt ${attempt}/${MAX_CODEX_RETRIES})...`)
-          await new Promise<void>(resolve => setTimeout(resolve, delay))
-          lastErr = err
-          continue
-        }
-        
-        // Non-retryable error or final attempt — format and throw
-        const effectiveMs = execa.effectiveTimeoutMs ?? resolvedTimeout
-        const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
-        const summary = execa.timedOut
-          ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large (tier: ${quality.tier})`
-          : (extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error')
-        const thrown = Object.assign(new Error(`codex: ${summary}`), {
-          exitCode: execa.exitCode,
-          timedOut: execa.timedOut,
-          stderr: rawStderr,
-          effectiveTimeoutMs: effectiveMs,
-          retryDelayMs: execa.retryDelayMs,
-        })
-        throw thrown
+      } finally {
+        rmSync(profilePath, { force: true })
       }
+    } catch (err: unknown) {
+      const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
+      const rawStderr = execa.stderr ?? ''
+      const fullMessage = rawStderr || execa.message || ''
+
+      // Check if this is a retryable error
+      if (isRetryableCodexError(fullMessage) && attempt < MAX_CODEX_RETRIES) {
+        const delay = CODEX_RETRY_DELAY_MS * attempt // 5s, 10s
+        onLog?.(`  codex: transient error (${fullMessage.slice(0, 80)}), retrying in ${delay / 1000}s (attempt ${attempt}/${MAX_CODEX_RETRIES})...`)
+        await new Promise<void>(resolve => setTimeout(resolve, delay))
+        lastErr = err
+        continue
+      }
+
+      // Non-retryable error or final attempt — format and throw
+      const effectiveMs = execa.effectiveTimeoutMs ?? resolvedTimeout
+      const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
+      const summary = execa.timedOut
+        ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large (tier: ${quality.tier})`
+        : (extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error')
+      const thrown = Object.assign(new Error(`codex: ${summary}`), {
+        exitCode: execa.exitCode,
+        timedOut: execa.timedOut,
+        stderr: rawStderr,
+        effectiveTimeoutMs: effectiveMs,
+        retryDelayMs: execa.retryDelayMs,
+      })
+      throw thrown
     }
-    
-    // Should not reach here, but handle the case where all retries were consumed
-    if (lastErr) throw lastErr
-    throw new Error('codex: unexpected retry loop exit')
-  } finally {
-    // Restore .codex/instructions to its pre-review state so the fix step's
-    // git add -A doesn't commit crosscheck's instructions as a PR file change.
-    try {
-      if (originalInstructions !== undefined) {
-        writeFileSync(instructionsPath, originalInstructions)
-      } else {
-        rmSync(instructionsPath, { force: true })
-      }
-    } catch { /* ignore */ }
-    try { rmSync(tmpFile, { force: true, recursive: true }) } catch { /* ignore */ }
   }
+
+  // Should not reach here, but handle the case where all retries were consumed
+  if (lastErr) throw lastErr
+  throw new Error('codex: unexpected retry loop exit')
 }
 
 export async function checkCodexAuth(): Promise<{ ok: boolean; detail: string }> {

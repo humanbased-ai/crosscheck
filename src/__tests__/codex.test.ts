@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, realpathSync } from 'fs'
+import { mkdtempSync, rmSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { codexReasoningEffort, inferVerdictFromCodexOutput, stripRepoDirPaths } from '../reviewers/codex.js'
@@ -113,38 +113,6 @@ describe('stripRepoDirPaths', () => {
   it('does not throw when the repo dir no longer exists', () => {
     const gone = join(repoDir, 'deleted-subdir')
     expect(stripRepoDirPaths(`${gone}/x.ts:1`, gone)).toBe('x.ts:1')
-  })
-})
-
-describe('.codex/instructions cleanup after review', () => {
-  let repoDir: string
-
-  beforeEach(() => {
-    repoDir = mkdtempSync(join(tmpdir(), 'crosscheck-test-'))
-    mkdirSync(join(repoDir, '.codex'), { recursive: true })
-  })
-
-  afterEach(() => {
-    rmSync(repoDir, { force: true, recursive: true })
-  })
-
-  it('deletes .codex/instructions when it did not exist before the review', () => {
-    const instructionsPath = join(repoDir, '.codex', 'instructions')
-    // Simulate what runCodexReview does: write the file
-    writeFileSync(instructionsPath, 'crosscheck review instructions')
-    // Simulate cleanup (originalInstructions was undefined)
-    rmSync(instructionsPath, { force: true })
-    expect(existsSync(instructionsPath)).toBe(false)
-  })
-
-  it('restores original .codex/instructions content after review', () => {
-    const instructionsPath = join(repoDir, '.codex', 'instructions')
-    const original = 'user-defined codex instructions'
-    writeFileSync(instructionsPath, original)
-    // Simulate: crosscheck overwrites, then restores
-    writeFileSync(instructionsPath, 'crosscheck review instructions')
-    writeFileSync(instructionsPath, original)
-    expect(readFileSync(instructionsPath, 'utf8')).toBe(original)
   })
 })
 
