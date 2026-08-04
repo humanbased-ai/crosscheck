@@ -133,8 +133,8 @@ describe('skill activation broker', () => {
     expect(codexSkillBrokerArgs(session)).toEqual([
       '-c', expect.stringContaining('mcp_servers.crosscheck.command='),
       '-c', expect.stringContaining('mcp_servers.crosscheck.args='),
+      '-c', expect.stringContaining('mcp_servers.crosscheck.env.CROSSCHECK_SKILL_SESSION_KEY='),
     ])
-    expect(codexSkillBrokerArgs(session).join(' ')).not.toContain('CROSSCHECK_SKILL_SESSION_KEY')
   })
 
   it('removes the session endpoint on close', () => {

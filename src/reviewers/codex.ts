@@ -141,7 +141,6 @@ export async function runCodexReview(
               timeout: t,
               env: {
                 ...process.env,
-                ...skillSession?.environment,
                 // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
                 PATH: `${repoDir}/node_modules/.bin:${process.env.PATH ?? ''}`,
               },

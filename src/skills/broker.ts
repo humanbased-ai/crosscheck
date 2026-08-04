@@ -84,8 +84,15 @@ async function serveBrokerConnection(socket: Socket, sessionPath: string, sessio
   }
 }
 
-function createBrokerServer(sessionPath: string, sessionKey: string, onError: (err: Error) => void): Server {
+function createBrokerServer(
+  sessionPath: string,
+  sessionKey: string,
+  sockets: Set<Socket>,
+  onError: (err: Error) => void,
+): Server {
   const server = createServer(socket => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
     void serveBrokerConnection(socket, sessionPath, sessionKey).catch(() => socket.destroy())
   })
   server.on('error', onError)
@@ -120,7 +127,8 @@ export function createSkillActivationSession(
     : join(sessionDir!, 'broker.sock')
   sessionStates.set(path, { schemaVersion: 1, stepType, enabled, activated: [] })
   let listenError: Error | undefined
-  const server = createBrokerServer(path, sessionKey, err => { listenError = err })
+  const sockets = new Set<Socket>()
+  const server = createBrokerServer(path, sessionKey, sockets, err => { listenError = err })
 
   return {
     path,
@@ -135,6 +143,7 @@ export function createSkillActivationSession(
     },
     close: () => {
       sessionStates.delete(path)
+      for (const socket of sockets) socket.destroy()
       server.close()
       if (sessionDir) rmSync(sessionDir, { recursive: true, force: true })
     },
@@ -167,7 +176,7 @@ export function claudeSkillBrokerArgs(session?: SkillActivationSession): string[
   if (!session) return []
   const broker = skillBrokerCommand(session)
   return ['--mcp-config', JSON.stringify({
-    mcpServers: { crosscheck: { command: broker.command, args: broker.args } },
+    mcpServers: { crosscheck: { command: broker.command, args: broker.args, env: session.environment } },
   })]
 }
 
@@ -177,6 +186,7 @@ export function codexSkillBrokerArgs(session?: SkillActivationSession): string[]
   return [
     '-c', `mcp_servers.crosscheck.command=${JSON.stringify(broker.command)}`,
     '-c', `mcp_servers.crosscheck.args=${JSON.stringify(broker.args)}`,
+    '-c', `mcp_servers.crosscheck.env.CROSSCHECK_SKILL_SESSION_KEY=${JSON.stringify(session.environment.CROSSCHECK_SKILL_SESSION_KEY)}`,
   ]
 }
 

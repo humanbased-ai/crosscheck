@@ -116,7 +116,7 @@ export async function runFixStep(
     ], {
       input: prompt,
       timeout: resolvedTimeout,
-      env: { ...process.env, ...skillSession?.environment },
+      env: { ...process.env },
     })
     const raw = stdout.trim()
     try {
@@ -288,7 +288,7 @@ export async function runCodexFixStep(
       {
         cwd: tmpDir,
         timeout: resolvedTimeout,
-        env: { ...process.env, ...skillSession?.environment, CODEX_QUIET_MODE: '1', HOME: process.env.HOME ?? '' },
+        env: { ...process.env, CODEX_QUIET_MODE: '1', HOME: process.env.HOME ?? '' },
       },
     )
   } catch (err) {
