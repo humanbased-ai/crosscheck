@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
 import {
   callSkillBrokerTool,
   claudeSkillBrokerArgs,
@@ -55,6 +55,17 @@ describe('skill activation broker', () => {
     expect(callSkillBrokerTool(session.path, 'activate_skill', { name: 'missing' }).isError).toBe(true)
   })
 
+  it('rejects agent-written changes to broker authority and attribution', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    const state = JSON.parse(readFileSync(session.path, 'utf8')) as Record<string, unknown>
+    state.activated = ['code-review-skill']
+    writeFileSync(session.path, JSON.stringify(state))
+
+    expect(() => session!.activations()).toThrow('authentication failed')
+    expect(() => callSkillBrokerTool(session!.path, 'list_enabled_skills', {}))
+      .toThrow('authentication failed')
+  })
+
   it('rejects activation of a competing review baseline', () => {
     session = createSkillActivationSession(
       'review',
@@ -98,13 +109,13 @@ describe('skill activation broker', () => {
 
   it('serves newline-delimited MCP over stdio', async () => {
     session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
-    const broker = skillBrokerCommand(session.path)
+    const broker = skillBrokerCommand(session)
     const requests = [
       { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
       { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     ].map(request => JSON.stringify(request)).join('\n') + '\n'
 
-    const { stdout } = await execa(broker.command, broker.args, { input: requests })
+    const { stdout } = await execa(broker.command, broker.args, { input: requests, env: broker.env })
     const responses = stdout.split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
 
     expect(responses).toHaveLength(2)
@@ -120,6 +131,7 @@ describe('skill activation broker', () => {
     expect(codexSkillBrokerArgs(session)).toEqual([
       '-c', expect.stringContaining('mcp_servers.crosscheck.command='),
       '-c', expect.stringContaining('mcp_servers.crosscheck.args='),
+      '-c', expect.stringContaining('mcp_servers.crosscheck.env='),
     ])
   })
 

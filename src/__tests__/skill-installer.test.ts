@@ -87,7 +87,7 @@ describe('installSkill', () => {
   })
 
   it('removes Git credentials from persisted provenance', () => {
-    expect(redactSkillSource('https://user:secret-token@github.com/acme/private-skill.git'))
+    expect(redactSkillSource('https://user:secret-token@github.com/acme/private-skill.git?token=query-secret#fragment-secret'))
       .toBe('https://github.com/acme/private-skill.git')
   })
 
