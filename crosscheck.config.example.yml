@@ -28,6 +28,7 @@ vendors:
     enabled: true
     model: gpt-5.6-terra    # gpt-5.6-luna | gpt-5.6-terra | gpt-5.6-sol; unset = tier model (api-key) / CLI default (subscription)
     auth: subscription      # subscription (device-auth OAuth) | api-key
+    effort: medium          # low | medium | high | xhigh | max | ultra (ultra: terra/sol only)
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
