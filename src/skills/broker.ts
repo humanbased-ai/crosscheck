@@ -37,7 +37,6 @@ export interface McpResponse {
 
 export interface SkillActivationSession {
   path: string
-  environment: Record<string, string>
   stepType: string
   enabledSkills: SkillMetadata[]
   activations(): SkillMetadata[]
@@ -48,6 +47,7 @@ const BROKER_SERVER_PATH = fileURLToPath(new URL('./broker-server.js', import.me
 const BROKER_SERVER_TS_PATH = fileURLToPath(new URL('./broker-server.ts', import.meta.url))
 const MAX_SKILL_FILE_BYTES = 512_000
 const sessionStates = new Map<string, SkillSessionState>()
+const brokerCommands = new WeakMap<SkillActivationSession, () => { command: string; args: string[] }>()
 
 function readState(sessionPath: string): SkillSessionState {
   const state = sessionStates.get(sessionPath)
@@ -55,21 +55,10 @@ function readState(sessionPath: string): SkillSessionState {
   return state
 }
 
-async function serveBrokerConnection(socket: Socket, sessionPath: string, sessionKey: string): Promise<void> {
+async function serveBrokerConnection(socket: Socket, sessionPath: string): Promise<void> {
   const lines = createInterface({ input: socket, crlfDelay: Infinity })
-  let authenticated = false
-  socket.setTimeout(5_000, () => socket.destroy())
   for await (const line of lines) {
     if (!line.trim()) continue
-    if (!authenticated) {
-      if (line !== sessionKey) {
-        socket.destroy()
-        return
-      }
-      authenticated = true
-      socket.setTimeout(0)
-      continue
-    }
     let response: McpResponse | null
     try {
       response = handleSkillBrokerRequest(sessionPath, JSON.parse(line) as McpRequest)
@@ -85,18 +74,22 @@ async function serveBrokerConnection(socket: Socket, sessionPath: string, sessio
 }
 
 function createBrokerServer(
+  socketPath: string,
   sessionPath: string,
-  sessionKey: string,
   sockets: Set<Socket>,
   onError: (err: Error) => void,
+  onConnection: () => void,
 ): Server {
   const server = createServer(socket => {
+    onConnection()
+    // The agent starts MCP before repository code; make its argv-visible endpoint single-use.
+    server.close()
     sockets.add(socket)
     socket.once('close', () => sockets.delete(socket))
-    void serveBrokerConnection(socket, sessionPath, sessionKey).catch(() => socket.destroy())
+    void serveBrokerConnection(socket, sessionPath).catch(() => socket.destroy())
   })
   server.on('error', onError)
-  server.listen(sessionPath)
+  server.listen(socketPath)
   return server
 }
 
@@ -120,19 +113,18 @@ export function createSkillActivationSession(
 ): SkillActivationSession {
   const enabledSet = new Set(enabledNames)
   const enabled = catalog.filter(skill => enabledSet.has(skill.name))
-  const sessionKey = randomUUID()
   const sessionDir = process.platform === 'win32' ? undefined : mkdtempSync(join(tmpdir(), 'crosscheck-skill-'))
   const path = process.platform === 'win32'
     ? `\\\\.\\pipe\\crosscheck-skill-${randomUUID()}`
-    : join(sessionDir!, 'broker.sock')
+    : sessionDir!
   sessionStates.set(path, { schemaVersion: 1, stepType, enabled, activated: [] })
   let listenError: Error | undefined
   const sockets = new Set<Socket>()
-  const server = createBrokerServer(path, sessionKey, sockets, err => { listenError = err })
+  const servers = new Set<Server>()
+  let pendingServer: Server | undefined
 
-  return {
+  const session: SkillActivationSession = {
     path,
-    environment: { CROSSCHECK_SKILL_SESSION_KEY: sessionKey },
     stepType,
     enabledSkills: enabled.map(metadata),
     activations: () => {
@@ -144,20 +136,43 @@ export function createSkillActivationSession(
     close: () => {
       sessionStates.delete(path)
       for (const socket of sockets) socket.destroy()
-      server.close()
+      for (const server of servers) server.close()
       if (sessionDir) rmSync(sessionDir, { recursive: true, force: true })
     },
   }
+
+  brokerCommands.set(session, () => {
+    if (pendingServer) {
+      const staleServer = pendingServer
+      if (staleServer.listening) staleServer.close()
+      else staleServer.once('listening', () => staleServer.close())
+    }
+    const socketPath = process.platform === 'win32'
+      ? `\\\\.\\pipe\\crosscheck-skill-${randomUUID()}`
+      : join(sessionDir!, `${randomUUID()}.sock`)
+    const server: Server = createBrokerServer(
+      socketPath,
+      path,
+      sockets,
+      err => { if (pendingServer === server) listenError = err },
+      () => { if (pendingServer === server) pendingServer = undefined },
+    )
+    pendingServer = server
+    servers.add(server)
+    server.once('close', () => servers.delete(server))
+    return { command: process.execPath, args: [
+      ...(existsSync(BROKER_SERVER_PATH) ? [BROKER_SERVER_PATH] : ['--import', 'tsx', BROKER_SERVER_TS_PATH]),
+      '--socket', socketPath,
+    ] }
+  })
+
+  return session
 }
 
 export function skillBrokerCommand(session: SkillActivationSession): { command: string; args: string[] } {
-  const serverArgs = existsSync(BROKER_SERVER_PATH)
-    ? [BROKER_SERVER_PATH]
-    : ['--import', 'tsx', BROKER_SERVER_TS_PATH]
-  return {
-    command: process.execPath,
-    args: [...serverArgs, '--socket', session.path],
-  }
+  const command = brokerCommands.get(session)
+  if (!command) throw new Error('Skill session not found')
+  return command()
 }
 
 export function renderSkillBrokerInstructions(session: SkillActivationSession): string {
@@ -176,7 +191,7 @@ export function claudeSkillBrokerArgs(session?: SkillActivationSession): string[
   if (!session) return []
   const broker = skillBrokerCommand(session)
   return ['--mcp-config', JSON.stringify({
-    mcpServers: { crosscheck: { command: broker.command, args: broker.args, env: session.environment } },
+    mcpServers: { crosscheck: { command: broker.command, args: broker.args } },
   })]
 }
 
@@ -186,7 +201,6 @@ export function codexSkillBrokerArgs(session?: SkillActivationSession): string[]
   return [
     '-c', `mcp_servers.crosscheck.command=${JSON.stringify(broker.command)}`,
     '-c', `mcp_servers.crosscheck.args=${JSON.stringify(broker.args)}`,
-    '-c', `mcp_servers.crosscheck.env.CROSSCHECK_SKILL_SESSION_KEY=${JSON.stringify(session.environment.CROSSCHECK_SKILL_SESSION_KEY)}`,
   ]
 }
 

@@ -126,7 +126,6 @@ export async function runCodexReview(
     for (let attempt = 1; attempt <= MAX_CODEX_RETRIES; attempt++) {
       try {
         const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
-        const skillArgs = codexSkillBrokerArgs(skillSession)
         const reasoningEffort = codexReasoningEffort(vendor.effort)
         const effortArgs = ['-c', `model_reasoning_effort="${reasoningEffort}"`]
         onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''} -c model_reasoning_effort="${reasoningEffort}"`)
@@ -135,7 +134,7 @@ export async function runCodexReview(
           resolvedTimeout,
           (t) => execa(
             'codex',
-            ['review', '--base', baseBranch, '--title', prTitle, '-c', 'project_doc_max_bytes=0', ...modelArgs, ...effortArgs, ...skillArgs],
+            ['review', '--base', baseBranch, '--title', prTitle, '-c', 'project_doc_max_bytes=0', ...modelArgs, ...effortArgs, ...codexSkillBrokerArgs(skillSession)],
             {
               cwd: repoDir,
               timeout: t,
