@@ -66,6 +66,10 @@ export function truncate(s: string, maxWidth: number): string {
   return s.slice(0, maxWidth - 1) + '…'
 }
 
+export function formatPickerHint(kind: 'tip' | 'warning', hint: string, maxWidth: number): string {
+  return truncate(`  ${kind === 'warning' ? 'Warning' : 'Tip'}: ${hint}`, maxWidth)
+}
+
 // New windowStart after a PageDown / PageUp jump. The viewport advances by
 // exactly one page so the visible window changes, not just the cursor — without
 // this, PgDn would set cursorPos one viewport ahead but `adjustWindowStart`
@@ -136,7 +140,8 @@ export async function promptSinglePicker(
         process.stdout.write(`${ERASE_LINE}  ${arrow} ${labelStr}${descStr}\n`)
       }
 
-      process.stdout.write(`${ERASE_LINE}${hint ? `${DIM}  💡 ${hint}${RESET}` : ''}\n`)
+      const hintLine = hint ? formatPickerHint('tip', hint, process.stdout.columns || 80) : ''
+      process.stdout.write(`${ERASE_LINE}${hintLine ? `${DIM}${hintLine}${RESET}` : ''}\n`)
       if (showStatus) {
         process.stdout.write(`${ERASE_LINE}${DIM}  ${cursor + 1}/${items.length}${RESET}\n`)
       }
@@ -344,8 +349,9 @@ export async function promptRepoPicker(
         const focusedIndex = displayed[cursorPos]
         const focusedItem = focusedIndex === undefined || focusedIndex === allRow ? '' : items[focusedIndex]
         const hint = selectionWarning || (focusedItem ? opts.getHint?.(focusedItem, selectedItems()) ?? '' : '')
-        const prefix = selectionWarning ? `${YELLOW}  ⚠ ` : `${DIM}  💡 `
-        process.stdout.write(`${ERASE_LINE}${hint ? `${prefix}${truncate(hint, Math.max(1, cols - 4))}${RESET}` : ''}\n`)
+        const color = selectionWarning ? YELLOW : DIM
+        const hintLine = hint ? formatPickerHint(selectionWarning ? 'warning' : 'tip', hint, cols) : ''
+        process.stdout.write(`${ERASE_LINE}${hintLine ? `${color}${hintLine}${RESET}` : ''}\n`)
       }
 
       const total = filtered.length
