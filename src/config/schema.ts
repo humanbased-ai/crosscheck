@@ -38,6 +38,10 @@ export const QualityConfigSchema = z.object({
   custom_prompt: z.string().optional(),
 })
 
+export const SkillsConfigSchema = z.object({
+  enabled: z.array(z.string()).default([]),
+})
+
 export const BudgetConfigSchema = z.object({
   codex_monthly_usd: z.number().nullable().default(null),
   per_review_usd: z.number().default(2.0),
@@ -306,6 +310,7 @@ export const ConfigSchema = z.object({
     claude: VendorConfigSchema.default({}),
   }).default({}),
   quality: QualityConfigSchema.default({}),
+  skills: SkillsConfigSchema.default({}),
   budget: BudgetConfigSchema.default({}),
   orgs: z.array(z.string()).default([]),
   users: z.array(z.string()).default([]),
@@ -329,6 +334,7 @@ export type BrandConfig = z.infer<typeof BrandConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
 export type CodexVendorConfig = z.infer<typeof CodexVendorConfigSchema>
 export type QualityConfig = z.infer<typeof QualityConfigSchema>
+export type SkillsConfig = z.infer<typeof SkillsConfigSchema>
 export type LogsConfig = z.infer<typeof LogsConfigSchema>
 export type TunnelConfig = z.infer<typeof TunnelConfigSchema>
 export type ImpactConfig = z.infer<typeof ImpactConfigSchema>

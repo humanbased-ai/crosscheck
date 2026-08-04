@@ -184,6 +184,10 @@ Config lives at `~/.crosscheck/config.yml`. A `./crosscheck.config.yml` in the w
 ```yaml
 quality:
   tier: balanced    # fast | balanced | thorough
+
+skills:
+  enabled:
+    - code-review-skill  # bundled by @awesome-skills, MIT
 ```
 
 | Tier | Claude | Codex | Latency |

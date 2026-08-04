@@ -17,6 +17,7 @@ import { execSync } from 'child_process'
 import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/repo-picker.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
+import { loadBundledSkills, RECOMMENDED_SKILL_NAMES } from '../skills/catalog.js'
 
 export interface OnboardOpts {
   config?: string
@@ -494,6 +495,7 @@ export interface OnboardDecisions {
   vendorConfig: VendorModeConfig
   authorVendor: 'claude' | 'codex' | 'both'
   qualityTier: QualityTier
+  enabledSkills: string[]
   pipelinePreset: WorkflowPreset
   maxRounds?: number  // only relevant for review-fix-recheck; defaults to 1
   conflictResolve: boolean  // opt-in; prepends a conflict-resolve step before review
@@ -562,7 +564,7 @@ export function applyOnboardConfig(
   decisions: OnboardDecisions,
   workflowDir = join(homedir(), '.crosscheck'),
 ): void {
-  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, pipelinePreset, maxRounds, conflictResolve, tunnelBackend, smeeChannel, cloneProtocol, linear } = decisions
+  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, enabledSkills, pipelinePreset, maxRounds, conflictResolve, tunnelBackend, smeeChannel, cloneProtocol, linear } = decisions
 
   mkdirSync(dirname(configPath), { recursive: true })
 
@@ -576,6 +578,8 @@ export function applyOnboardConfig(
   raw.orgs = selectedOrgs
   raw.mode = vendorConfig.mode
   raw.clone_protocol = cloneProtocol
+  if (!raw.skills || typeof raw.skills !== 'object') raw.skills = {}
+  ;(raw.skills as Record<string, unknown>).enabled = enabledSkills
 
   // Repos. Per-repo workflow depth is NOT stored here — it lives in standalone
   // files under ~/.crosscheck/workflows/ (written by `crosscheck alter`).
@@ -973,6 +977,25 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   )
   console.log()
 
+  // ── Step 6.5: Agent skills ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 6.5 — agent skills'))
+  const bundledSkills = loadBundledSkills()
+  const initialSkills = existingConfig
+    ? existingConfig.skills.enabled
+    : [...RECOMMENDED_SKILL_NAMES]
+  const enabledSkills = opts.yes
+    ? initialSkills
+    : await promptRepoPicker(bundledSkills.map(skill => skill.name), {
+        title: 'Enable skills for coding agents:',
+        initialSelected: initialSkills,
+        getDescription: name => {
+          const skill = bundledSkills.find(candidate => candidate.name === name)
+          return skill ? `(by @${skill.author}, ${skill.license})` : ''
+        },
+      })
+  console.log(`  Enabled: ${enabledSkills.length > 0 ? enabledSkills.map(name => chalk.cyan(name)).join(', ') : chalk.dim('none')}`)
+  console.log()
+
   // ── Step 7: Workflow pipeline ──────────────────────────────────────────────
   console.log(chalk.bold('Step 7 — workflow pipeline'))
   const pipelinePreset = await promptWorkflowPipeline(opts)
@@ -1068,6 +1091,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     console.log(`  routing      ${chalk.cyan(routingLabel)}`)
   }
   console.log(`  quality      ${chalk.cyan(qualityTier)}${chalk.dim(`  — ${QUALITY_TIERS[qualityTier].description.split('  ')[0]}`)}`)
+  console.log(`  skills       ${enabledSkills.length > 0 ? enabledSkills.map(name => chalk.cyan(name)).join(', ') : chalk.dim('none')}`)
   console.log(`  pipeline     ${chalk.cyan(pipelinePreset)}`)
   if (pipelinePreset === 'review-fix-recheck') {
     console.log(`  max rounds   ${chalk.cyan(String(maxRounds ?? 1))}`)
@@ -1108,6 +1132,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     vendorConfig,
     authorVendor,
     qualityTier,
+    enabledSkills,
     pipelinePreset,
     maxRounds,
     conflictResolve,

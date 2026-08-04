@@ -391,6 +391,8 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 **Step 6 — Review quality.** Choose the speed/thoroughness tier for review prompts and reviewer timeouts.
 
+**Step 6.5 — Agent skills.** Choose which installed skills are enabled for coding agents. New setups start with the bundled `code-review-skill` recommendation selected; re-running onboard preserves your selection. Skills are made available across workflow operations, and each skill's description plus the coding agent decides when it applies.
+
 **Step 7 — Workflow pipeline.** Choose what happens after a review:
 
 ```
@@ -443,6 +445,9 @@ crosscheck onboard
   Step 6 — review quality
   [1] fast  [2] balanced  [3] thorough
   Choice [2]: 2
+
+  Step 6.5 — agent skills
+  [x] code-review-skill (by @awesome-skills, MIT)
 
   Step 7 — workflow pipeline
   [1] review only  [2] review → fix  [3] review → fix → re-check
@@ -767,6 +772,7 @@ crosscheck status
   Config
     mode                   cross-vendor
     quality tier           balanced
+    enabled skills         code-review-skill (by @awesome-skills, MIT)
     codex auth             subscription
     claude model           sonnet
     per-review budget      $2.00/review
@@ -1011,7 +1017,7 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 
 On re-runs, `onboard` updates only the fields it collected answers for. Everything else survives unchanged.
 
-**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
+**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `skills.enabled`, `tunnel.*`, `post_review.auto_fix.*`
 
 **Never touched by onboard:** per-repo overrides in `~/.crosscheck/workflows/` (owned by `crosscheck alter`), and `~/.crosscheck/workflow.yml` after its first write
 
@@ -1079,6 +1085,13 @@ quality:
     - performance
   custom_prompt: |          # appended to every review prompt
     Be concise. Flag only issues that would block a merge.
+
+# ── Agent skills ──────────────────────────────────────────────────────────────
+# Enabled means available to every coding-agent operation. The skill description
+# and agent decide whether to activate it for a particular step.
+skills:
+  enabled:
+    - code-review-skill     # bundled by @awesome-skills, MIT
 
 # ── Budget ────────────────────────────────────────────────────────────────────
 budget:

@@ -7,6 +7,7 @@ import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
 import { getLogDir, getTodayLogPath } from '../lib/logger.js'
 import { buildImpactReport } from './impact.js'
+import { formatSkillIdentity, loadBundledSkills } from '../skills/catalog.js'
 
 function row(label: string, value: string, ok?: boolean) {
   const indicator = ok === undefined ? ' ' : ok ? chalk.green('✓') : chalk.red('✗')
@@ -65,6 +66,13 @@ export async function runStatus(configPath?: string) {
   row('config path', activeConfigPath ?? 'defaults only')
   row('mode', config.mode)
   row('quality tier', config.quality.tier)
+  const bundledSkills = new Map(loadBundledSkills().map(skill => [skill.name, skill]))
+  row('enabled skills', config.skills.enabled.length > 0
+    ? config.skills.enabled.map(name => {
+        const skill = bundledSkills.get(name)
+        return skill ? formatSkillIdentity(skill) : name
+      }).join(', ')
+    : 'none')
   row('codex auth', config.vendors.codex.auth)
   row('codex model', config.vendors.codex.model ?? 'auto (by tier)')
   row('claude model', config.vendors.claude.model ?? 'default')
