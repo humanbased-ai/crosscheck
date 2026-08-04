@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { formatSkillIdentity, loadBundledSkills, RECOMMENDED_SKILL_NAMES } from '../skills/catalog.js'
+import {
+  BUNDLED_SKILL_RECOMMENDATIONS,
+  findCompetingSkill,
+  formatSkillIdentity,
+  loadBundledSkills,
+  RECOMMENDED_SKILL_NAMES,
+} from '../skills/catalog.js'
 
 describe('bundled skill catalog', () => {
   it('loads the pinned recommended code-review skill with attribution', () => {
@@ -33,9 +39,17 @@ describe('bundled skill catalog', () => {
     ))).toBe(true)
   })
 
-  it('preselects the review baseline and debugging discipline during onboarding', () => {
-    expect(RECOMMENDED_SKILL_NAMES).toEqual(['code-review-skill', 'diagnosing-bugs'])
+  it('preselects the general review, design, and debugging bundle during onboarding', () => {
+    expect(RECOMMENDED_SKILL_NAMES).toEqual(['code-review-skill', 'codebase-design', 'diagnosing-bugs'])
     expect(RECOMMENDED_SKILL_NAMES).not.toContain('code-review')
-    expect(RECOMMENDED_SKILL_NAMES).not.toContain('codebase-design')
+  })
+
+  it('recommends every bundled skill and identifies competing review baselines', () => {
+    expect(Object.keys(BUNDLED_SKILL_RECOMMENDATIONS).sort()).toEqual(
+      loadBundledSkills().map(skill => skill.name),
+    )
+    expect(findCompetingSkill('code-review', ['code-review-skill'])).toBe('code-review-skill')
+    expect(findCompetingSkill('code-review-skill', ['code-review'])).toBe('code-review')
+    expect(findCompetingSkill('diagnosing-bugs', ['code-review'])).toBeUndefined()
   })
 })

@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { join, resolve, sep } from 'path'
 import { tmpdir } from 'os'
 import { fileURLToPath } from 'url'
-import type { SkillIdentity } from './catalog.js'
+import { findCompetingSkill, type SkillIdentity } from './catalog.js'
 
 export type SkillMetadata = Omit<SkillIdentity, 'path'>
 
@@ -143,6 +143,8 @@ export function callSkillBrokerTool(
   if (!skill) return error(`Skill ${name} is not enabled for this operation`)
 
   if (toolName === 'activate_skill') {
+    const competitor = findCompetingSkill(name, state.activated)
+    if (competitor) return error(`Skill ${name} competes with activated ${competitor}; activate only one review baseline`)
     const instructions = readFileSync(join(skill.path, 'SKILL.md'), 'utf8')
     if (!state.activated.includes(name)) {
       state.activated.push(name)

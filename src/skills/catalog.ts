@@ -27,7 +27,23 @@ export interface SkillFrontmatter {
   license?: string
 }
 
-export const RECOMMENDED_SKILL_NAMES = ['code-review-skill', 'diagnosing-bugs'] as const
+export const RECOMMENDED_SKILL_NAMES = ['code-review-skill', 'codebase-design', 'diagnosing-bugs'] as const
+
+export const BUNDLED_SKILL_RECOMMENDATIONS: Readonly<Record<string, string>> = {
+  'code-review': 'Best for evidence-rich repositories with documented standards and a clear issue or PRD; checks Standards and Spec separately.',
+  'code-review-skill': 'Best general default for broad language, correctness, security, performance, and architecture coverage.',
+  'codebase-design': 'Best for architecture-heavy changes: deep modules, small interfaces, clean seams, and testability.',
+  'diagnosing-bugs': 'Best for hard bugs and regressions: requires a reproducible signal, ranked hypotheses, and regression evidence.',
+}
+
+const COMPETING_SKILLS: Readonly<Record<string, readonly string[]>> = {
+  'code-review': ['code-review-skill'],
+  'code-review-skill': ['code-review'],
+}
+
+export function findCompetingSkill(skillName: string, selectedNames: readonly string[]): string | undefined {
+  return COMPETING_SKILLS[skillName]?.find(name => selectedNames.includes(name))
+}
 
 const BUNDLED_SKILLS_DIR = fileURLToPath(new URL('../../assets/skills/', import.meta.url))
 export const INSTALLED_SKILLS_DIR = join(homedir(), '.crosscheck', 'skills')

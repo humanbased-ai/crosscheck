@@ -448,7 +448,10 @@ crosscheck onboard
   Choice [2]: 2
 
   Step 6.5 — agent skills
+  [ ] code-review       (by @mattpocock, MIT)
   [x] code-review-skill (by @awesome-skills, MIT)
+  [x] codebase-design   (by @mattpocock, MIT)
+  [x] diagnosing-bugs   (by @mattpocock, MIT)
 
   Step 7 — workflow pipeline
   [1] review only  [2] review → fix  [3] review → fix → re-check
@@ -806,12 +809,12 @@ Crosscheck itself ships with this preloaded catalog:
 
 | Skill | Onboarding default | Best fit |
 |---|---:|---|
-| [`code-review-skill`](https://github.com/awesome-skills/code-review-skill) (by `@awesome-skills`, MIT) | On | Broad code review |
-| [`diagnosing-bugs`](https://github.com/mattpocock/skills/tree/main/skills/engineering/diagnosing-bugs) (by `@mattpocock`, MIT) | On | Bug diagnosis and repair |
-| [`code-review`](https://github.com/mattpocock/skills/tree/main/skills/engineering/code-review) (by `@mattpocock`, MIT) | Off | Standards-versus-spec review |
-| [`codebase-design`](https://github.com/mattpocock/skills/tree/main/skills/engineering/codebase-design) (by `@mattpocock`, MIT) | Off | Architectural review and substantial fixes |
+| [`code-review-skill`](https://github.com/awesome-skills/code-review-skill) (by `@awesome-skills`, MIT) | On | General default: broad language, correctness, security, performance, and architecture coverage |
+| [`codebase-design`](https://github.com/mattpocock/skills/tree/main/skills/engineering/codebase-design) (by `@mattpocock`, MIT) | On | Architecture-heavy changes: deep modules, small interfaces, clean seams, and testability |
+| [`diagnosing-bugs`](https://github.com/mattpocock/skills/tree/main/skills/engineering/diagnosing-bugs) (by `@mattpocock`, MIT) | On | Hard bugs and regressions: reproducible signals, ranked hypotheses, and regression evidence |
+| [`code-review`](https://github.com/mattpocock/skills/tree/main/skills/engineering/code-review) (by `@mattpocock`, MIT) | Off | Evidence-rich repositories: separately checks documented standards and issue/PRD fidelity |
 
-The two Matt Pocock opt-ins are deliberately available without being imposed on every repository. Choose them during onboarding when their practice matches your workflow.
+`code-review` and `code-review-skill` are competing review baselines. The onboarding picker highlights the conflict and will not enable one until the selected counterpart is deselected; the runtime broker also rejects activation of a second baseline. The other bundled skills are complementary.
 
 ```bash
 crosscheck skill install https://github.com/owner/my-skill.git
@@ -827,7 +830,7 @@ At runtime, Crosscheck distinguishes three states: **installed** skills are in t
 
 Upgrading from an earlier Crosscheck release is opt-in: existing configs default to `skills.enabled: []`. Re-run `crosscheck onboard` to choose the recommended bundle or any additional installed skills.
 
-Review and recheck also honor repository practices in `AGENTS.md` and `CLAUDE.md`. Crosscheck reads the root files plus any nested files whose directory contains a changed path, orders them from broadest to most specific, and lets nested guidance override root guidance. It reads these files from the PR's base branch and disables vendor-native discovery for the run, so guidance added or modified by the PR cannot influence its own review.
+Review and recheck also honor repository practices in `AGENTS.md` and `CLAUDE.md`. These repository-defined practices take precedence over bundled skill advice. Crosscheck reads the root files plus any nested files whose directory contains a changed path, orders them from broadest to most specific, and lets nested guidance override root guidance. It reads these files from the PR's base branch and disables vendor-native discovery for the run, so guidance added or modified by the PR cannot influence its own review.
 
 ---
 

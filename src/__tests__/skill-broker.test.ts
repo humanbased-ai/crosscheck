@@ -55,6 +55,21 @@ describe('skill activation broker', () => {
     expect(callSkillBrokerTool(session.path, 'activate_skill', { name: 'missing' }).isError).toBe(true)
   })
 
+  it('rejects activation of a competing review baseline', () => {
+    session = createSkillActivationSession(
+      'review',
+      ['code-review', 'code-review-skill'],
+      loadBundledSkills(),
+    )
+    callSkillBrokerTool(session.path, 'activate_skill', { name: 'code-review-skill' })
+
+    const result = callSkillBrokerTool(session.path, 'activate_skill', { name: 'code-review' })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('competes with activated code-review-skill')
+    expect(session.activations().map(skill => skill.name)).toEqual(['code-review-skill'])
+  })
+
   it('allows activated references but blocks path traversal', () => {
     session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
     callSkillBrokerTool(session.path, 'activate_skill', { name: 'code-review-skill' })
