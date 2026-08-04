@@ -17,7 +17,12 @@ import { execSync } from 'child_process'
 import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/repo-picker.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
-import { loadSkillCatalog, RECOMMENDED_SKILL_NAMES } from '../skills/catalog.js'
+import {
+  BUNDLED_SKILL_RECOMMENDATIONS,
+  findCompetingSkill,
+  loadSkillCatalog,
+  RECOMMENDED_SKILL_NAMES,
+} from '../skills/catalog.js'
 
 export interface OnboardOpts {
   config?: string
@@ -983,6 +988,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   const initialSkills = existingConfig
     ? existingConfig.skills.enabled
     : [...RECOMMENDED_SKILL_NAMES]
+  console.log(chalk.dim('  Base-branch AGENTS.md and CLAUDE.md practices take precedence over Crosscheck skill advice.'))
   const enabledSkills = opts.yes
     ? initialSkills
     : await promptRepoPicker(bundledSkills.map(skill => skill.name), {
@@ -991,6 +997,16 @@ export async function runOnboard(opts: OnboardOpts = {}) {
         getDescription: name => {
           const skill = bundledSkills.find(candidate => candidate.name === name)
           return skill ? `(by @${skill.author}, ${skill.license})` : ''
+        },
+        getHint: (name, selected) => {
+          const skill = bundledSkills.find(candidate => candidate.name === name)
+          const recommendation = BUNDLED_SKILL_RECOMMENDATIONS[name] ?? skill?.description ?? ''
+          const competitor = findCompetingSkill(name, selected)
+          return competitor ? `${recommendation} Competes with selected ${competitor}.` : recommendation
+        },
+        getSelectionWarning: (name, selected) => {
+          const competitor = findCompetingSkill(name, selected)
+          return competitor ? `${name} competes with selected ${competitor}; deselect it first.` : undefined
         },
       })
   console.log(`  Enabled: ${enabledSkills.length > 0 ? enabledSkills.map(name => chalk.cyan(name)).join(', ') : chalk.dim('none')}`)

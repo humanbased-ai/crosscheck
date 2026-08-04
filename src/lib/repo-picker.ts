@@ -11,6 +11,7 @@ const ERASE_DOWN = '\x1b[0J'
 const BOLD = '\x1b[1m'
 const DIM = '\x1b[2m'
 const CYAN = '\x1b[36m'
+const YELLOW = '\x1b[33m'
 const RESET = '\x1b[0m'
 
 const DEFAULT_PAGE_SIZE = 12
@@ -212,6 +213,10 @@ export interface PickerOptions {
   selectAllLabel?: string
   // Optional: return dim metadata shown after each item label
   getDescription?: (item: string) => string
+  // Optional: show guidance for the focused item below the list.
+  getHint?: (item: string, selectedItems: string[]) => string
+  // Optional: prevent an incompatible item from being selected.
+  getSelectionWarning?: (item: string, selectedItems: string[]) => string | undefined
 }
 
 // Arrow-key + space multi-select with a fixed-height viewport and `/` filter.
@@ -242,14 +247,24 @@ export async function promptRepoPicker(
     let cursorPos = opts.selectAllLabel && items.length > 0 ? 1 : 0       // index into `filtered`
     let windowStart = 0     // index into `filtered`
     let lastLineCount = 0
+    let selectionWarning = ''
 
     const viewport = () => resolveViewport(opts.pageSize, process.stdout.rows)
     const displayIndices = () => (opts.selectAllLabel && filtered.length > 0 ? [allRow, ...filtered] : filtered)
-    const allVisibleSelected = () => filtered.length > 0 && filtered.every(i => selected.has(i))
+    const selectedItems = () => Array.from(selected).sort((a, b) => a - b).map(i => items[i])
+    const selectableVisible = () => filtered.filter(i => !opts.getSelectionWarning?.(items[i], selectedItems()))
+    const allVisibleSelected = () => {
+      const selectable = selectableVisible()
+      return selectable.length > 0 && selectable.every(i => selected.has(i))
+    }
     const toggleAllVisible = () => {
       const allOn = allVisibleSelected()
-      if (allOn) for (const i of filtered) selected.delete(i)
-      else for (const i of filtered) selected.add(i)
+      if (allOn) for (const i of selectableVisible()) selected.delete(i)
+      else for (const i of filtered) {
+        const warning = opts.getSelectionWarning?.(items[i], selectedItems())
+        if (warning) selectionWarning ||= warning
+        else selected.add(i)
+      }
     }
 
     function recomputeFiltered() {
@@ -277,7 +292,8 @@ export async function promptRepoPicker(
       const emptyHint = displayed.length === 0
       const itemRows = emptyHint ? 1 : visibleRows
 
-      lastLineCount = (opts.title ? 1 : 0) + 1 + itemRows + 1 + 1
+      const showHint = Boolean(opts.getHint || opts.getSelectionWarning)
+      lastLineCount = (opts.title ? 1 : 0) + 1 + itemRows + (showHint ? 1 : 0) + 1 + 1
 
       if (opts.title) {
         process.stdout.write(`${ERASE_LINE}${BOLD}${opts.title}${RESET}\n`)
@@ -322,6 +338,14 @@ export async function promptRepoPicker(
           const labelStr = isFocused ? `${BOLD}${itemDisplay}${RESET}` : `${DIM}${itemDisplay}${RESET}`
           process.stdout.write(`${ERASE_LINE}  ${checkStr} ${labelStr}${descStr}\n`)
         }
+      }
+
+      if (showHint) {
+        const focusedIndex = displayed[cursorPos]
+        const focusedItem = focusedIndex === undefined || focusedIndex === allRow ? '' : items[focusedIndex]
+        const hint = selectionWarning || (focusedItem ? opts.getHint?.(focusedItem, selectedItems()) ?? '' : '')
+        const prefix = selectionWarning ? `${YELLOW}  ⚠ ` : `${DIM}  💡 `
+        process.stdout.write(`${ERASE_LINE}${hint ? `${prefix}${truncate(hint, Math.max(1, cols - 4))}${RESET}` : ''}\n`)
       }
 
       const total = filtered.length
@@ -370,6 +394,7 @@ export async function promptRepoPicker(
         cleanup([])
         process.exit(130)
       }
+      if (key !== ' ') selectionWarning = ''
 
       // Navigation keys work in both modes — let the user scroll while filtering.
       if (key === '\x1b[A') {
@@ -451,8 +476,17 @@ export async function promptRepoPicker(
         if (displayed.length === 0) return
         const origIdx = displayed[cursorPos]
         if (origIdx === allRow) toggleAllVisible()
-        else if (selected.has(origIdx)) selected.delete(origIdx)
-        else selected.add(origIdx)
+        else if (selected.has(origIdx)) {
+          selected.delete(origIdx)
+          selectionWarning = ''
+        } else {
+          const warning = opts.getSelectionWarning?.(items[origIdx], selectedItems())
+          if (warning) selectionWarning = warning
+          else {
+            selected.add(origIdx)
+            selectionWarning = ''
+          }
+        }
         render()
       } else if (key === 'a') {
         // Toggle every item in the current filtered view.

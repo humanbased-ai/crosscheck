@@ -47,14 +47,15 @@ Three properties make that practical:
 
 Crosscheck stays focused on one job: making agent-authored PRs trustworthy. It now ships supercharged with preloaded, coding-specialized skills that every invoked coding agent can use during review, diagnosis, repair, recheck, and conflict resolution.
 
-The recommended onboarding bundle combines a broad review baseline with rigorous bug diagnosis:
+The recommended onboarding bundle combines a broad review baseline, architecture vocabulary, and rigorous bug diagnosis:
 
 - `code-review-skill (by @awesome-skills, MIT)` — comprehensive review guidance across languages, architecture, security, and performance.
+- `codebase-design (by @mattpocock, MIT)` — evaluates deep modules, small interfaces, clean seams, and testability.
 - `diagnosing-bugs (by @mattpocock, MIT)` — requires a reproducible signal, tested hypotheses, and regression evidence before declaring a fix complete.
 
-Matt Pocock's `code-review` and `codebase-design` skills are also preloaded and available in `crosscheck onboard`, but remain off by default. Enable only the practices your team wants, or install your own skill with `crosscheck skill install <source>`.
+Matt Pocock's `code-review` is also preloaded as an alternative for evidence-rich repositories with documented standards and a clear issue or PRD. It remains off by default because it competes with the broad `code-review-skill`; onboarding warns instead of loading both. Enable only the practices your team wants, or install your own skill with `crosscheck skill install <source>`.
 
-Enabled skills are available, not blindly forced: the coding agent decides which are relevant to each operation. The terminal and PR comment then attribute only the skills actually activated for that step. Crosscheck also honors the target repository's `AGENTS.md` and `CLAUDE.md` guidance, so shared practices complement the codebase's own rules.
+Enabled skills are available, not blindly forced: the coding agent decides which are relevant to each operation. The terminal and PR comment then attribute only the skills actually activated for that step. Crosscheck also honors the target repository's base-branch `AGENTS.md` and `CLAUDE.md` guidance; those local practices take precedence over bundled skill advice.
 
 Setup and trust model: **[Agent skills](./get-started.md#crosscheck-skill-install-source)**.
 
@@ -204,6 +205,7 @@ quality:
 skills:
   enabled:
     - code-review-skill  # recommended · @awesome-skills, MIT
+    - codebase-design    # recommended · @mattpocock, MIT
     - diagnosing-bugs    # recommended · @mattpocock, MIT
 ```
 

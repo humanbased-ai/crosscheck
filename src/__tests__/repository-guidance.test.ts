@@ -51,6 +51,7 @@ describe('loadRepositoryReviewGuidance', () => {
 
     const guidance = loadRepositoryReviewGuidance(repoDir, 'main')
 
+    expect(guidance).toContain('repository practices override conflicting advice from Crosscheck-provided skills')
     expect(guidance).toContain('Root: require regression tests.')
     expect(guidance).toContain('Root: verify public behavior.')
     expect(guidance).toContain('API: check backward compatibility.')

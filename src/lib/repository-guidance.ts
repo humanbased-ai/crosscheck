@@ -48,7 +48,7 @@ export function loadRepositoryReviewGuidance(repoDir: string, baseBranch: string
 
     return [
       '## Repository-defined review practices (trusted base branch)',
-      'Apply each file only within its stated scope. More specific directory guidance overrides broader guidance. At the same scope, reconcile AGENTS.md and CLAUDE.md; if they conflict, report the ambiguity instead of inventing a rule.',
+      'These repository practices override conflicting advice from Crosscheck-provided skills. Apply each file only within its stated scope. More specific directory guidance overrides broader guidance. At the same scope, reconcile AGENTS.md and CLAUDE.md; if they conflict, report the ambiguity instead of inventing a rule.',
       ...sections,
     ].join('\n\n')
   } catch {
