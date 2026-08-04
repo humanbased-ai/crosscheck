@@ -67,7 +67,10 @@ quality:
 # and the agent decide when it is activated for a workflow step.
 skills:
   enabled:
-    - code-review-skill     # bundled starter skill by @awesome-skills (MIT)
+    - code-review-skill     # recommended · @awesome-skills (MIT)
+    - diagnosing-bugs       # recommended · @mattpocock (MIT)
+    # - code-review         # preloaded, opt-in · @mattpocock (MIT)
+    # - codebase-design     # preloaded, opt-in · @mattpocock (MIT)
 
 # ─── Budget ──────────────────────────────────────────────────────────────────
 budget:

@@ -27,7 +27,7 @@ export interface SkillFrontmatter {
   license?: string
 }
 
-export const RECOMMENDED_SKILL_NAMES = ['code-review-skill'] as const
+export const RECOMMENDED_SKILL_NAMES = ['code-review-skill', 'diagnosing-bugs'] as const
 
 const BUNDLED_SKILLS_DIR = fileURLToPath(new URL('../../assets/skills/', import.meta.url))
 export const INSTALLED_SKILLS_DIR = join(homedir(), '.crosscheck', 'skills')

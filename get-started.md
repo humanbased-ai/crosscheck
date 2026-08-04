@@ -392,7 +392,7 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 **Step 6 — Review quality.** Choose the speed/thoroughness tier for review prompts and reviewer timeouts.
 
-**Step 6.5 — Agent skills.** Choose which installed skills are enabled for coding agents. New setups start with the bundled `code-review-skill` recommendation selected; re-running onboard preserves your selection. Skills are made available across workflow operations, and each skill's description plus the coding agent decides when it applies.
+**Step 6.5 — Agent skills.** Choose which preloaded or custom-installed skills are enabled for coding agents. New setups preselect `code-review-skill (by @awesome-skills, MIT)` and `diagnosing-bugs (by @mattpocock, MIT)`. Matt Pocock's `code-review` and `codebase-design` are available but off by default. Re-running onboard preserves your selection. Skills are made available across workflow operations, and each skill's description plus the coding agent decides when it applies.
 
 **Step 7 — Workflow pipeline.** Choose what happens after a review:
 
@@ -773,8 +773,8 @@ crosscheck status
   Config
     mode                   cross-vendor
     quality tier           balanced
-    installed skills       code-review-skill (by @awesome-skills, MIT)
-    enabled skills         code-review-skill (by @awesome-skills, MIT)
+    installed skills       code-review (by @mattpocock, MIT), code-review-skill (by @awesome-skills, MIT), codebase-design (by @mattpocock, MIT), diagnosing-bugs (by @mattpocock, MIT)
+    enabled skills         code-review-skill (by @awesome-skills, MIT), diagnosing-bugs (by @mattpocock, MIT)
     codex auth             subscription
     claude model           sonnet
     per-review budget      $2.00/review
@@ -802,11 +802,24 @@ crosscheck status
 
 Installs an Agent Skill from a Git URL or local directory into `~/.crosscheck/skills`. Crosscheck validates `SKILL.md`, rejects unsafe names and symbolic links, and records source, revision, author, license, and package integrity. Installation does not enable a skill automatically.
 
+Crosscheck itself ships with this preloaded catalog:
+
+| Skill | Onboarding default | Best fit |
+|---|---:|---|
+| [`code-review-skill`](https://github.com/awesome-skills/code-review-skill) (by `@awesome-skills`, MIT) | On | Broad code review |
+| [`diagnosing-bugs`](https://github.com/mattpocock/skills/tree/main/skills/engineering/diagnosing-bugs) (by `@mattpocock`, MIT) | On | Bug diagnosis and repair |
+| [`code-review`](https://github.com/mattpocock/skills/tree/main/skills/engineering/code-review) (by `@mattpocock`, MIT) | Off | Standards-versus-spec review |
+| [`codebase-design`](https://github.com/mattpocock/skills/tree/main/skills/engineering/codebase-design) (by `@mattpocock`, MIT) | Off | Architectural review and substantial fixes |
+
+The two Matt Pocock opt-ins are deliberately available without being imposed on every repository. Choose them during onboarding when their practice matches your workflow.
+
 ```bash
 crosscheck skill install https://github.com/owner/my-skill.git
 crosscheck skill install /path/to/my-skill
 crosscheck onboard  # enable installed skills
 ```
+
+The Git repository or local directory must have `SKILL.md` at its root. For a skill nested in a monorepo, clone it and pass the nested local directory.
 
 `crosscheck status` distinguishes the full installed catalog from the enabled selection and renders attributed identities as `skill-name (by @author, license)`.
 
@@ -1113,7 +1126,10 @@ quality:
 # and agent decide whether to activate it for a particular step.
 skills:
   enabled:
-    - code-review-skill     # bundled by @awesome-skills, MIT
+    - code-review-skill     # recommended · @awesome-skills, MIT
+    - diagnosing-bugs       # recommended · @mattpocock, MIT
+    # - code-review         # preloaded, opt-in · @mattpocock, MIT
+    # - codebase-design     # preloaded, opt-in · @mattpocock, MIT
 
 # ── Budget ────────────────────────────────────────────────────────────────────
 budget:

@@ -17,7 +17,25 @@ describe('bundled skill catalog', () => {
     expect(formatSkillIdentity(skill!)).toBe('code-review-skill (by @awesome-skills, MIT)')
   })
 
-  it('recommends the bundled starter skill', () => {
-    expect(RECOMMENDED_SKILL_NAMES).toEqual(['code-review-skill'])
+  it('ships Matt Pocock engineering skills with attribution', () => {
+    const skills = loadBundledSkills()
+
+    expect(skills.filter(skill => skill.author === 'mattpocock').map(skill => skill.name)).toEqual([
+      'code-review',
+      'codebase-design',
+      'diagnosing-bugs',
+    ])
+    expect(skills.filter(skill => skill.author === 'mattpocock').every(skill => (
+      skill.license === 'MIT'
+      && skill.source === 'https://github.com/mattpocock/skills'
+      && /^[0-9a-f]{40}$/.test(skill.revision)
+      && /^sha256:[0-9a-f]{64}$/.test(skill.integrity)
+    ))).toBe(true)
+  })
+
+  it('preselects the review baseline and debugging discipline during onboarding', () => {
+    expect(RECOMMENDED_SKILL_NAMES).toEqual(['code-review-skill', 'diagnosing-bugs'])
+    expect(RECOMMENDED_SKILL_NAMES).not.toContain('code-review')
+    expect(RECOMMENDED_SKILL_NAMES).not.toContain('codebase-design')
   })
 })
