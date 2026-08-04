@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { existsSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import {
   callSkillBrokerTool,
   claudeSkillBrokerArgs,
@@ -53,6 +55,17 @@ describe('skill activation broker', () => {
 
     expect(session.activations()).toHaveLength(1)
     expect(callSkillBrokerTool(session.path, 'activate_skill', { name: 'missing' }).isError).toBe(true)
+  })
+
+  it('ignores attacker-created state files', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    const attackerDir = mkdtempSync(join(tmpdir(), 'crosscheck-forged-session-'))
+    const attackerPath = join(attackerDir, 'session.json')
+    writeFileSync(attackerPath, JSON.stringify({ enabled: loadBundledSkills(), activated: ['code-review-skill'] }))
+
+    expect(() => callSkillBrokerTool(attackerPath, 'list_enabled_skills', {})).toThrow('not found')
+    expect(session.activations()).toEqual([])
+    rmSync(attackerDir, { recursive: true, force: true })
   })
 
   it('rejects activation of a competing review baseline', () => {
@@ -114,7 +127,7 @@ describe('skill activation broker', () => {
 
   it('serves newline-delimited MCP over stdio', async () => {
     session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
-    const broker = skillBrokerCommand(session.path)
+    const broker = skillBrokerCommand(session)
     const requests = [
       { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
       { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
@@ -139,7 +152,7 @@ describe('skill activation broker', () => {
     ])
   })
 
-  it('removes the session directory on close', () => {
+  it('removes the session endpoint on close', () => {
     session = createSkillActivationSession('review', [], loadBundledSkills())
     const path = session.path
     session.close()

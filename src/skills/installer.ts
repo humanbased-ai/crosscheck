@@ -19,6 +19,8 @@ export function redactSkillSource(source: string): string {
     const url = new URL(source)
     url.username = ''
     url.password = ''
+    url.search = ''
+    url.hash = ''
     return url.toString()
   } catch {
     return source

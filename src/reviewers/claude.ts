@@ -100,7 +100,6 @@ export async function runClaudeReview(
     '--model', model,
     '--effort', effort,
     ...(applyBudgetCap ? ['--max-budget-usd', String(perReviewBudget)] : []),
-    ...claudeSkillBrokerArgs(skillSession),
     '--allowedTools', [
       'Bash(git diff)', 'Bash(git log)',
       ...(skillSession ? [
@@ -122,7 +121,7 @@ export async function runClaudeReview(
     try {
       const { result: { stdout }, retried } = await withTimeoutRetry(
         resolvedTimeout,
-        (t) => execa('claude', args, {
+        (t) => execa('claude', [...args, ...claudeSkillBrokerArgs(skillSession)], {
           cwd: repoDir,
           timeout: t,
           input: prompt,
