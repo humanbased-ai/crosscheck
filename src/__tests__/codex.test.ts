@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { inferVerdictFromCodexOutput, stripRepoDirPaths } from '../reviewers/codex.js'
+import { codexReasoningEffort, inferVerdictFromCodexOutput, stripRepoDirPaths } from '../reviewers/codex.js'
 
 const CODEX_FOOTER = '\n\n---\n_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
 
@@ -145,5 +145,21 @@ describe('.codex/instructions cleanup after review', () => {
     writeFileSync(instructionsPath, 'crosscheck review instructions')
     writeFileSync(instructionsPath, original)
     expect(readFileSync(instructionsPath, 'utf8')).toBe(original)
+  })
+})
+
+describe('codexReasoningEffort', () => {
+  it('passes every codex CLI tier through unchanged', () => {
+    expect(codexReasoningEffort('low')).toBe('low')
+    expect(codexReasoningEffort('medium')).toBe('medium')
+    expect(codexReasoningEffort('high')).toBe('high')
+    expect(codexReasoningEffort('xhigh')).toBe('xhigh')
+    expect(codexReasoningEffort('max')).toBe('max')
+    expect(codexReasoningEffort('ultra')).toBe('ultra')
+  })
+
+  it('falls back to medium for values outside the whitelist', () => {
+    expect(codexReasoningEffort('turbo')).toBe('medium')
+    expect(codexReasoningEffort('')).toBe('medium')
   })
 })
