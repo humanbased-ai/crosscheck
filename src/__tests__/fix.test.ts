@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { applyEdit } from '../reviewers/fix.js'
+import { createSkillActivationSession } from '../skills/broker.js'
+import { loadBundledSkills } from '../skills/catalog.js'
 
 describe('applyEdit', () => {
   it('replaces exact match at start of file', () => {
@@ -207,6 +209,19 @@ describe('runCodexFixStep', () => {
       runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', ''),
     ).rejects.toThrow('network timeout')
   })
+
+  it('attaches the skill broker and decision prompt to Codex fix', async () => {
+    const { runCodexFixStep } = await import('../reviewers/fix.js')
+    const session = createSkillActivationSession('fix', ['code-review-skill'], loadBundledSkills())
+    try {
+      await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '', 'default', undefined, session)
+      const args = execaMock.mock.calls[0][1] as string[]
+      expect(args).toContainEqual(expect.stringContaining('mcp_servers.crosscheck.command='))
+      expect(args.at(-1)).toContain('Decide from each description whether a skill applies')
+    } finally {
+      session.close()
+    }
+  })
 })
 
 describe('runFixStep timeout defaults', () => {
@@ -275,5 +290,21 @@ describe('runFixStep timeout defaults', () => {
     await runFixStep('/tmp/repo', 'main', 'My PR', 'Review', '', minimalConfig('balanced'), 'default', 0)
     const opts = execaMock.mock.calls[0][2] as { timeout?: number }
     expect(opts.timeout).toBeUndefined()
+  })
+
+  it('attaches the skill broker and decision prompt to Claude fix', async () => {
+    const { runFixStep } = await import('../reviewers/fix.js')
+    const session = createSkillActivationSession('fix', ['code-review-skill'], loadBundledSkills())
+    try {
+      await runFixStep('/tmp/repo', 'main', 'My PR', 'Review', '', minimalConfig('balanced'), 'default', undefined, session)
+      const args = execaMock.mock.calls[0][1] as string[]
+      const opts = execaMock.mock.calls[0][2] as { input?: string }
+      expect(args).toContain('--mcp-config')
+      expect(args).toContain('--allowedTools')
+      expect(args.join(' ')).toContain('mcp__crosscheck__activate_skill')
+      expect(opts.input).toContain('Decide from each description whether a skill applies')
+    } finally {
+      session.close()
+    }
   })
 })

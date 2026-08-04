@@ -63,6 +63,16 @@ quality:
   custom_prompt: |          # optional — appended to every review
     Focus on correctness and security. Be concise.
 
+# ─── Agent skills ────────────────────────────────────────────────────────────
+# Enabled skills are available to coding agents. Each skill's own description
+# and the agent decide when it is activated for a workflow step.
+skills:
+  enabled:
+    - code-review-skill     # recommended · @awesome-skills (MIT)
+    - diagnosing-bugs       # recommended · @mattpocock (MIT)
+    # - code-review         # preloaded, opt-in · @mattpocock (MIT)
+    # - codebase-design     # preloaded, opt-in · @mattpocock (MIT)
+
 # ─── Budget ──────────────────────────────────────────────────────────────────
 budget:
   codex_monthly_usd: 20     # null = unlimited (use if on subscription)

@@ -27,6 +27,9 @@ import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, ty
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
+import { loadSkillCatalog } from '../skills/catalog.js'
+import { createSkillActivationSession, type SkillActivationSession } from '../skills/broker.js'
+import { appendSkillAttribution, formatSkillAttribution } from '../skills/attribution.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
@@ -545,6 +548,16 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // can iterate the same list and release these shas if SIGINT/SIGTERM fires
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
+  const skillCatalog = config.skills.enabled.length > 0 ? loadSkillCatalog() : []
+  const skillSessions = new Map<string, SkillActivationSession>()
+  const skillSessionFor = (stepName: string, stepType: string): SkillActivationSession | undefined => {
+    if (skillCatalog.length === 0) return undefined
+    const existing = skillSessions.get(stepName)
+    if (existing) return existing
+    const session = createSkillActivationSession(stepType, config.skills.enabled, skillCatalog)
+    skillSessions.set(stepName, session)
+    return session
+  }
 
   // Linear write-back identity. Resolved up front — before any expensive step —
   // and allowed to throw. The contract is that a configured-but-failing
@@ -665,13 +678,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let outputTokens: number | undefined
       let model = 'default'
       let retried: { timeoutMs: number; delayMs: number } | undefined
+      const skillSession = skillSessionFor(step.name, effectiveType)
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext))
+          ;({ review: rawReview, tokensUsed, model, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext, skillSession))
           inputTokens = undefined
           outputTokens = undefined
         } else {
-          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, ctx.issueContext))
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, ctx.issueContext, skillSession))
         }
       }
 
@@ -729,6 +743,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
       }
 
+      const activatedSkills = skillSession?.activations() ?? []
+      if (activatedSkills.length > 0) log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
+
       // First attempt timed out but the delayed retry succeeded — surface a
       // soft notice on the review comment so the author knows it was a transient blip.
       if (retried) {
@@ -751,11 +768,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const baseBody = verdict === null
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(gate.downgraded ? `${SEVERITY_GATE_NOTE}\n\n${clean}` : clean, verdict)
-      const commentBody = retried
+      const reviewBody = retried
         ? `${buildRetriedReviewBanner(retried.timeoutMs, retried.delayMs)}\n\n${baseBody}`
         : baseBody
+      const commentBody = appendSkillAttribution(reviewBody, activatedSkills, effectiveType)
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, skills_activated: activatedSkills.map(skill => skill.name), ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
@@ -922,16 +940,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let activeVendor = vendor
 
       const tierMs = tierTimeoutMs(config.quality.tier)
+      const skillSession = skillSessionFor(step.name, effectiveType)
       const runFix = async (v: 'claude' | 'codex') => {
         if (v === 'codex') {
           return runCodexFixStep(
             tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs,
+            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs, skillSession,
           )
         }
         return runFixStep(
           tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-          config, claudeFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs,
+          config, claudeFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs, skillSession,
         )
       }
 
@@ -976,6 +995,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
       }
 
+      const activatedSkills = skillSession?.activations() ?? []
+      if (activatedSkills.length > 0) log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
+
       if (fixErr !== undefined) {
         skipFix(isSubscriptionLimitError(fixErr) ? 'vendor_limit' : 'fix_error')
         // Only notify for transient failures — auth errors are operator issues, not PR author issues
@@ -984,7 +1006,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             const octokit = createGithubClient(token)
             await octokit.rest.issues.createComment({
               owner, repo: repoName, issue_number: prNumber,
-              body: `⚠️ **Auto-fix failed**\n\nThe fix step timed out after retrying. Push a new commit or run \`crosscheck run ${pr.html_url}\` to retry manually.\n\n<!-- crosscheck: fix_failed -->`,
+              body: appendSkillAttribution(`⚠️ **Auto-fix failed**\n\nThe fix step timed out after retrying. Push a new commit or run \`crosscheck run ${pr.html_url}\` to retry manually.\n\n<!-- crosscheck: fix_failed -->`, activatedSkills, effectiveType),
             })
             fileLog({ level: 'info', event: 'fix_failed_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber })
           } catch { /* best-effort notification */ }
@@ -1003,7 +1025,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         // event — NOT `fix_complete` — so status consumers (WORKFLOW_ACTIVITY_EVENTS,
         // the legacy status fold) don't misread a no-op as real workflow progress and
         // mark the PR NEEDS_RECHECK or hide it from `scan --tidy` with no fix applied.
-        fileLog({ level: 'info', event: 'fix_noop', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: 0, no_changes: true, tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
+        fileLog({ level: 'info', event: 'fix_noop', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: 0, no_changes: true, tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
         results[step.name] = { applied_count: 0, ...(fixTokensUsed !== undefined && { tokens_used: fixTokensUsed }), vendor }
         continue
       }
@@ -1058,19 +1080,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           }
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
 
         // Post a summary comment so the silent commit push is visible on the timeline
         // as a comment card. Best-effort — a failure here must not fail the run.
         try {
           const octokit = createGithubClient(token)
-          const body = buildFixAppliedCommentBody({
+          const body = appendSkillAttribution(buildFixAppliedCommentBody({
             owner, repo: repoName, sha: newSha, appliedCount,
             reviewCommentId,
             changedFiles: fixChangedFiles,
             vendor: activeVendor,
             reviewCommentBody,
-          })
+          }), activatedSkills, effectiveType)
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
           fileLog({ level: 'info', event: 'fix_applied_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })
         } catch (err) {
@@ -1111,7 +1133,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           head: fixBranch,
           base: pr.head.ref,
           title: fixPrTitle,
-          body: `Auto-fix by crosscheck for CR issues found in #${prNumber}.\n\nReview: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
+          body: appendSkillAttribution(`Auto-fix by crosscheck for CR issues found in #${prNumber}.\n\nReview: https://github.com/${owner}/${repoName}/pull/${prNumber}`, activatedSkills, effectiveType),
         })
         if (config.post_review.auto_fix.delivery.label) {
           try {
@@ -1121,7 +1143,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           } catch { /* label may not exist in this repo — skip */ }
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
         results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
 
       } else {
@@ -1130,11 +1152,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         try { patch = execSync('git diff', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* ignore */ }
         if (patch) {
           const octokit = createGithubClient(token)
-          const body = `### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\``
+          const body = appendSkillAttribution(`### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\``, activatedSkills, effectiveType)
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
         results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
       }
 
@@ -1208,10 +1230,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let appliedCount = 0
       let resolvedPaths: string[] = []
       let resolveTokensUsed: number | undefined
+      const skillSession = skillSessionFor(step.name, effectiveType)
 
       try {
         ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
-          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
+          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), skillSession,
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
@@ -1219,6 +1242,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         skipConflictResolve(isSubscriptionLimitError(err) ? 'vendor_limit' : 'resolve_error')
         continue
       }
+
+      const activatedSkills = skillSession?.activations() ?? []
+      if (activatedSkills.length > 0) log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
 
       if (appliedCount === 0) {
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
@@ -1316,7 +1342,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
       }
       onPhaseChange('conflicts resolved ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: resolveTokensUsed })
-      fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed, duration_ms: Date.now() - conflictResolveStepStart, ...triggerField })
+      fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - conflictResolveStepStart, ...triggerField })
 
       // Post a summary comment so the silent merge-commit push is visible on the
       // timeline as a comment card. Best-effort — a failure here must not fail the run.
@@ -1324,11 +1350,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // list if the resolver didn't surface paths.
       try {
         const octokit = createGithubClient(token)
-        const body = buildConflictResolvedCommentBody({
+        const body = appendSkillAttribution(buildConflictResolvedCommentBody({
           owner, repo: repoName, sha: newSha,
           conflictCount: conflictedFiles.length,
           files: resolvedPaths.length > 0 ? resolvedPaths : conflictedFiles,
-        })
+        }), activatedSkills, effectiveType)
         await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         fileLog({ level: 'info', event: 'conflict_resolved_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })
       } catch (err) {
@@ -1362,6 +1388,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     failedStep = currentStepName
     throw err
   } finally {
+    for (const session of skillSessions.values()) session.close()
+    skillSessions.clear()
     if (pushedShasNeedingRelease.length > 0 || fixPushedShaRequiresRecheck !== null) {
       const lockOctokit = createGithubClient(token)
       const outcome: 'success' | 'failure' = workflowFailed ? 'failure' : 'success'

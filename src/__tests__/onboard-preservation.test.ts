@@ -14,6 +14,7 @@ const BASE_DECISIONS: OnboardDecisions = {
   vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true },
   authorVendor: 'claude',
   qualityTier: 'balanced',
+  enabledSkills: ['code-review-skill'],
   pipelinePreset: 'review-only',
   conflictResolve: false,
   tunnelBackend: 'localhost.run',
@@ -60,6 +61,12 @@ describe('applyOnboardConfig — first run', () => {
     expect(vendors.claude.model).toBeUndefined()
     expect(vendors.claude.effort).toBe('max')
     expect(vendors.codex.model).toBe('gpt-5.6-sol')
+  })
+
+  it('writes the enabled skill selection', () => {
+    applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
+
+    expect((readConfig().skills as Record<string, unknown>).enabled).toEqual(['code-review-skill'])
   })
 
   it('writes workflow.yml for all three presets', () => {

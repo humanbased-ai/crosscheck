@@ -22,6 +22,7 @@
   - [Multi-PR syntax](#multi-pr-syntax)
   - [watch](#crosscheck-watch)
   - [status](#crosscheck-status)
+  - [skill install](#crosscheck-skill-install-source)
   - [diagnose](#crosscheck-diagnose)
   - [optimize](#crosscheck-optimize)
   - [impact](#crosscheck-impact)
@@ -391,6 +392,8 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 **Step 6 — Review quality.** Choose the speed/thoroughness tier for review prompts and reviewer timeouts.
 
+**Step 6.5 — Agent skills.** Choose which preloaded or custom-installed skills are enabled for coding agents. New setups preselect `code-review-skill (by @awesome-skills, MIT)` and `diagnosing-bugs (by @mattpocock, MIT)`. Matt Pocock's `code-review` and `codebase-design` are available but off by default. Re-running onboard preserves your selection. Skills are made available across workflow operations, and each skill's description plus the coding agent decides when it applies.
+
 **Step 7 — Workflow pipeline.** Choose what happens after a review:
 
 ```
@@ -443,6 +446,9 @@ crosscheck onboard
   Step 6 — review quality
   [1] fast  [2] balanced  [3] thorough
   Choice [2]: 2
+
+  Step 6.5 — agent skills
+  [x] code-review-skill (by @awesome-skills, MIT)
 
   Step 7 — workflow pipeline
   [1] review only  [2] review → fix  [3] review → fix → re-check
@@ -767,6 +773,8 @@ crosscheck status
   Config
     mode                   cross-vendor
     quality tier           balanced
+    installed skills       code-review (by @mattpocock, MIT), code-review-skill (by @awesome-skills, MIT), codebase-design (by @mattpocock, MIT), diagnosing-bugs (by @mattpocock, MIT)
+    enabled skills         code-review-skill (by @awesome-skills, MIT), diagnosing-bugs (by @mattpocock, MIT)
     codex auth             subscription
     claude model           sonnet
     per-review budget      $2.00/review
@@ -787,6 +795,39 @@ crosscheck status
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Check status against a specific config file |
+
+---
+
+### `crosscheck skill install <source>`
+
+Installs an Agent Skill from a Git URL or local directory into `~/.crosscheck/skills`. Crosscheck validates `SKILL.md`, rejects unsafe names and symbolic links, and records source, revision, author, license, and package integrity. Installation does not enable a skill automatically.
+
+Crosscheck itself ships with this preloaded catalog:
+
+| Skill | Onboarding default | Best fit |
+|---|---:|---|
+| [`code-review-skill`](https://github.com/awesome-skills/code-review-skill) (by `@awesome-skills`, MIT) | On | Broad code review |
+| [`diagnosing-bugs`](https://github.com/mattpocock/skills/tree/main/skills/engineering/diagnosing-bugs) (by `@mattpocock`, MIT) | On | Bug diagnosis and repair |
+| [`code-review`](https://github.com/mattpocock/skills/tree/main/skills/engineering/code-review) (by `@mattpocock`, MIT) | Off | Standards-versus-spec review |
+| [`codebase-design`](https://github.com/mattpocock/skills/tree/main/skills/engineering/codebase-design) (by `@mattpocock`, MIT) | Off | Architectural review and substantial fixes |
+
+The two Matt Pocock opt-ins are deliberately available without being imposed on every repository. Choose them during onboarding when their practice matches your workflow.
+
+```bash
+crosscheck skill install https://github.com/owner/my-skill.git
+crosscheck skill install /path/to/my-skill
+crosscheck onboard  # enable installed skills
+```
+
+The Git repository or local directory must have `SKILL.md` at its root. For a skill nested in a monorepo, clone it and pass the nested local directory.
+
+`crosscheck status` distinguishes the full installed catalog from the enabled selection and renders attributed identities as `skill-name (by @author, license)`.
+
+At runtime, Crosscheck distinguishes three states: **installed** skills are in the catalog, **enabled** skills are available to agents, and **activated** skills were actually loaded for one workflow step. The terminal and each PR comment attribute only that step's activated skills, for example: `code-review-skill (by @awesome-skills, MIT)`.
+
+Upgrading from an earlier Crosscheck release is opt-in: existing configs default to `skills.enabled: []`. Re-run `crosscheck onboard` to choose the recommended bundle or any additional installed skills.
+
+Review and recheck also honor repository practices in `AGENTS.md` and `CLAUDE.md`. Crosscheck reads the root files plus any nested files whose directory contains a changed path, orders them from broadest to most specific, and lets nested guidance override root guidance. It reads these files from the PR's base branch and disables vendor-native discovery for the run, so guidance added or modified by the PR cannot influence its own review.
 
 ---
 
@@ -1011,7 +1052,7 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 
 On re-runs, `onboard` updates only the fields it collected answers for. Everything else survives unchanged.
 
-**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
+**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `skills.enabled`, `tunnel.*`, `post_review.auto_fix.*`
 
 **Never touched by onboard:** per-repo overrides in `~/.crosscheck/workflows/` (owned by `crosscheck alter`), and `~/.crosscheck/workflow.yml` after its first write
 
@@ -1080,6 +1121,16 @@ quality:
     - performance
   custom_prompt: |          # appended to every review prompt
     Be concise. Flag only issues that would block a merge.
+
+# ── Agent skills ──────────────────────────────────────────────────────────────
+# Enabled means available to every coding-agent operation. The skill description
+# and agent decide whether to activate it for a particular step.
+skills:
+  enabled:
+    - code-review-skill     # recommended · @awesome-skills, MIT
+    - diagnosing-bugs       # recommended · @mattpocock, MIT
+    # - code-review         # preloaded, opt-in · @mattpocock, MIT
+    # - codebase-design     # preloaded, opt-in · @mattpocock, MIT
 
 # ── Budget ────────────────────────────────────────────────────────────────────
 budget:
@@ -1376,6 +1427,9 @@ The fix (file lock for same-machine + GitHub commit status for cross-machine) is
 - **Temp isolation** — each PR cloned into a fresh temp dir, deleted after review
 - **Read-only tools** — Claude restricted to `git diff` and `git log` only
 - **Temp credential isolation** — with `clone_protocol: ssh` (default) no tokens touch disk; with `clone_protocol: https` a short-lived token is embedded in the temp clone's remote URL and removed when the temp dir is deleted after review
+- **Skill package validation** — installs reject unsafe names, attribution injection, symbolic links, packages over 1,000 files or 10 MiB, and collisions; Git sources record their checked-out commit
+- **Skill integrity** — Crosscheck verifies every installed package against its SHA-256 receipt before exposing it to agents; modified or malformed packages fail closed and appear as unavailable in `crosscheck status`
+- **Skill execution boundary** — the activation broker exposes instructions and referenced files but never executes bundled scripts itself. Skills are third-party instructions: inspect their source and license before enabling them; the selected coding agent still operates under its normal sandbox and permissions
 
 ---
 

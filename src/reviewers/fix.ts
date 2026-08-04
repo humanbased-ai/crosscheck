@@ -4,6 +4,7 @@ import { dirname, join } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
+import { claudeSkillBrokerArgs, codexSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 
 interface ClaudeJsonOutput {
   result?: unknown
@@ -81,6 +82,7 @@ export async function runFixStep(
   config: Config,
   model = 'default',
   timeoutMs?: number,
+  skillSession?: SkillActivationSession,
 ): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number }> {
   let diff = ''
   try {
@@ -95,7 +97,7 @@ export async function runFixStep(
     .replace('{PR_TITLE}', prTitle)
     .replace('{REVIEW_COMMENT}', reviewComment.slice(0, 8000))
     .replace('{DIFF}', diff.slice(0, 16000))
-    .replace('{EXTRA_INSTRUCTIONS}', instructions ? `Additional instructions: ${instructions}` : '')
+    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
 
   let output = ''
   let tokensUsed: number | undefined
@@ -103,7 +105,15 @@ export async function runFixStep(
     const modelArgs = model !== 'default' ? ['--model', model] : []
     const effort = config.vendors?.claude?.effort ?? 'medium'
     const resolvedTimeout = timeoutMs === undefined ? tierTimeoutMs(config.quality.tier) : timeoutMs === 0 ? undefined : timeoutMs
-    const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs, '--effort', effort], {
+    const { stdout } = await execa('claude', [
+      '--print', '--output-format', 'json', ...modelArgs, '--effort', effort,
+      ...claudeSkillBrokerArgs(skillSession),
+      ...(skillSession ? ['--allowedTools', [
+        'mcp__crosscheck__list_enabled_skills',
+        'mcp__crosscheck__activate_skill',
+        'mcp__crosscheck__read_skill_file',
+      ].join(',')] : []),
+    ], {
       input: prompt,
       timeout: resolvedTimeout,
       env: { ...process.env },
@@ -251,6 +261,7 @@ export async function runCodexFixStep(
   instructions: string,
   model = 'default',
   timeoutMs?: number,
+  skillSession?: SkillActivationSession,
 ): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number }> {
   let diff = ''
   try {
@@ -265,7 +276,7 @@ export async function runCodexFixStep(
     .replace('{PR_TITLE}', prTitle)
     .replace('{REVIEW_COMMENT}', reviewComment.slice(0, 8000))
     .replace('{DIFF}', diff.slice(0, 16000))
-    .replace('{EXTRA_INSTRUCTIONS}', instructions ? `Additional instructions: ${instructions}` : '')
+    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
 
   const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
   const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
@@ -273,7 +284,7 @@ export async function runCodexFixStep(
   try {
     await execa(
       'codex',
-      ['exec', ...modelArgs, prompt],
+      ['exec', ...modelArgs, ...codexSkillBrokerArgs(skillSession), prompt],
       {
         cwd: tmpDir,
         timeout: resolvedTimeout,

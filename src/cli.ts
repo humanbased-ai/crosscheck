@@ -21,6 +21,7 @@ import { runLinearTest } from './commands/linear-test.js'
 import { isLinearConfigError } from './linear/identity.js'
 import { runScan } from './commands/scan.js'
 import { runKickass } from './commands/kickass.js'
+import { runSkillInstall } from './commands/skill.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
@@ -264,6 +265,13 @@ program
   .description('Show auth state, config summary, and CLI versions')
   .option('-c, --config <path>', 'config file path')
   .action((opts: { config?: string }) => void runStatus(opts.config))
+
+program
+  .command('skill')
+  .description('Manage coding-agent skills')
+  .command('install <source>')
+  .description('Install a skill from a Git URL or local directory')
+  .action((source: string) => void runSkillInstall(source))
 
 program
   .command('diagnose')

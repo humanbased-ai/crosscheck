@@ -43,6 +43,21 @@ Three properties make that practical:
 - **A loop, not a comment.** Findings return to the author agent for repair; a clean recheck follows. The PR moves forward instead of sideways.
 - **No new vendor.** Runs through the `claude` and `codex` CLIs you already pay for. No hosted service, no per-review API bill, no extra trust surface.
 
+## Same mission. Sharper skills.
+
+Crosscheck stays focused on one job: making agent-authored PRs trustworthy. It now ships supercharged with preloaded, coding-specialized skills that every invoked coding agent can use during review, diagnosis, repair, recheck, and conflict resolution.
+
+The recommended onboarding bundle combines a broad review baseline with rigorous bug diagnosis:
+
+- `code-review-skill (by @awesome-skills, MIT)` — comprehensive review guidance across languages, architecture, security, and performance.
+- `diagnosing-bugs (by @mattpocock, MIT)` — requires a reproducible signal, tested hypotheses, and regression evidence before declaring a fix complete.
+
+Matt Pocock's `code-review` and `codebase-design` skills are also preloaded and available in `crosscheck onboard`, but remain off by default. Enable only the practices your team wants, or install your own skill with `crosscheck skill install <source>`.
+
+Enabled skills are available, not blindly forced: the coding agent decides which are relevant to each operation. The terminal and PR comment then attribute only the skills actually activated for that step. Crosscheck also honors the target repository's `AGENTS.md` and `CLAUDE.md` guidance, so shared practices complement the codebase's own rules.
+
+Setup and trust model: **[Agent skills](./get-started.md#crosscheck-skill-install-source)**.
+
 Built by [Humanbased](https://github.com/humanbased-ai). Field report: [What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/).
 
 ---
@@ -153,6 +168,7 @@ Full walkthrough: **[docs/linear-identity.md](./docs/linear-identity.md)**.
 |---|---|
 | `crosscheck onboard` | Guided setup — repos, routing, pipeline depth, connection |
 | `crosscheck status` | Auth, config, Linear identity, logs, impact summary |
+| `crosscheck skill install <source>` | Install an Agent Skill from Git or a local directory |
 | `crosscheck review <pr>` | One-shot review, posts a comment |
 | `crosscheck run <pr>` | Full pipeline for a PR — review, fix, recheck |
 | `crosscheck recheck` / `fix` / `resolve` | Run one step in isolation |
@@ -184,7 +200,17 @@ Config lives at `~/.crosscheck/config.yml`. A `./crosscheck.config.yml` in the w
 ```yaml
 quality:
   tier: balanced    # fast | balanced | thorough
+
+skills:
+  enabled:
+    - code-review-skill  # recommended · @awesome-skills, MIT
+    - diagnosing-bugs    # recommended · @mattpocock, MIT
 ```
+
+Agents decide whether an enabled skill applies to each review, fix, recheck, or conflict-resolution step. PR comments attribute only skills actually activated for that step.
+Existing configs keep skills disabled on upgrade; use `crosscheck onboard` to opt in. Installed packages are integrity-checked before agents can load them.
+
+For review and recheck, Crosscheck also applies repository-defined review practices from `AGENTS.md` and `CLAUDE.md`. In monorepos it combines root guidance with the files scoped to changed paths, using the trusted base-branch versions so a PR cannot rewrite its own review rules.
 
 | Tier | Claude | Codex | Latency |
 |---|---|---|---|

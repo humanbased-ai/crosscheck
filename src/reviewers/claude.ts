@@ -4,6 +4,8 @@ import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { primaryModelFromUsage, resolveClaudeModel } from '../lib/review-models.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
+import { claudeSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
+import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
 
 const EFFORT_MAP: Record<string, string> = {
   low: 'low',
@@ -64,6 +66,7 @@ export async function runClaudeReview(
   // Linked tracker issue rendered as a prompt block (issues/enrich.ts) — anchors
   // the review to the stated goal. Omitted when enrichment is off / unresolved.
   issueContext?: string,
+  skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
   const model = resolveClaudeModel(quality, vendor)
   const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
@@ -73,6 +76,7 @@ export async function runClaudeReview(
   const customLine = quality.custom_prompt ?? ''
 
   const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
+  const repositoryGuidance = loadRepositoryReviewGuidance(repoDir, baseBranch)
 
   const prompt = [
     `You are reviewing a pull request titled: "${prTitle}".`,
@@ -81,6 +85,8 @@ export async function runClaudeReview(
     focusLine,
     customLine,
     behaviorInstructions,
+    repositoryGuidance,
+    skillSession ? renderSkillBrokerInstructions(skillSession) : '',
   ].filter(Boolean).join('\n')
 
   // Omit --max-budget-usd when:
@@ -94,7 +100,15 @@ export async function runClaudeReview(
     '--model', model,
     '--effort', effort,
     ...(applyBudgetCap ? ['--max-budget-usd', String(perReviewBudget)] : []),
-    '--allowedTools', 'Bash(git diff),Bash(git log)',
+    ...claudeSkillBrokerArgs(skillSession),
+    '--allowedTools', [
+      'Bash(git diff)', 'Bash(git log)',
+      ...(skillSession ? [
+        'mcp__crosscheck__list_enabled_skills',
+        'mcp__crosscheck__activate_skill',
+        'mcp__crosscheck__read_skill_file',
+      ] : []),
+    ].join(','),
   ]
 
   onLog?.(`  running: claude --print --model ${model} --effort ${effort}`)
@@ -108,7 +122,12 @@ export async function runClaudeReview(
     try {
       const { result: { stdout }, retried } = await withTimeoutRetry(
         resolvedTimeout,
-        (t) => execa('claude', args, { cwd: repoDir, timeout: t, input: prompt, env: { ...process.env } }),
+        (t) => execa('claude', args, {
+          cwd: repoDir,
+          timeout: t,
+          input: prompt,
+          env: { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
+        }),
         {
           onRetry: (effectiveMs, delayMs) =>
             (onRetry ?? onLog)?.(`  ⏱ claude timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),

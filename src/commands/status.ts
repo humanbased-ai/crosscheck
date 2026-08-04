@@ -7,6 +7,7 @@ import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
 import { getLogDir, getTodayLogPath } from '../lib/logger.js'
 import { buildImpactReport } from './impact.js'
+import { formatSkillIdentity, loadSkillCatalog } from '../skills/catalog.js'
 
 function row(label: string, value: string, ok?: boolean) {
   const indicator = ok === undefined ? ' ' : ok ? chalk.green('✓') : chalk.red('✗')
@@ -65,6 +66,15 @@ export async function runStatus(configPath?: string) {
   row('config path', activeConfigPath ?? 'defaults only')
   row('mode', config.mode)
   row('quality tier', config.quality.tier)
+  const skillCatalog = loadSkillCatalog()
+  const bundledSkills = new Map(skillCatalog.map(skill => [skill.name, skill]))
+  row('installed skills', skillCatalog.map(formatSkillIdentity).join(', '))
+  row('enabled skills', config.skills.enabled.length > 0
+    ? config.skills.enabled.map(name => {
+        const skill = bundledSkills.get(name)
+        return skill ? formatSkillIdentity(skill) : `${name} (not installed or failed integrity check)`
+      }).join(', ')
+    : 'none')
   row('codex auth', config.vendors.codex.auth)
   row('codex model', config.vendors.codex.model ?? 'auto (by tier)')
   row('claude model', config.vendors.claude.model ?? 'default')
