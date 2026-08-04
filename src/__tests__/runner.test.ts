@@ -9,6 +9,7 @@ import {
   exceedsMaxRounds,
   anyFixApplied,
   countCrosscheckCommitsForPR,
+  countCrosscheckCommitsForPRDetailed,
   buildWorkflowCompleteEvent,
   resolveFixVendor,
 } from '../lib/runner.js'
@@ -151,6 +152,39 @@ describe('countCrosscheckCommitsForPR', () => {
 
   afterEach(() => {
     rmSync(tmpDir, { force: true, recursive: true })
+  })
+
+  // The scoped/unscoped distinction matters because an unscoped count is an
+  // over-count of whole-repo history, not a real cap hit. Reporting the two
+  // identically made a transient base-fetch failure look like "you have already
+  // had 5 fixes", which silently disabled auto-fix on every repo with prior
+  // [crosscheck] commits.
+  describe('scoped vs unscoped reporting', () => {
+    it('reports scoped: true when origin/<base> resolves', () => {
+      commit('a.txt', 'a\n', '[crosscheck] fix round 1')
+      expect(countCrosscheckCommitsForPRDetailed(tmpDir, 'base')).toEqual({ count: 1, scoped: true })
+    })
+
+    it('reports scoped: false and over-counts when origin/<base> is missing', () => {
+      commit('a.txt', 'a\n', '[crosscheck] fix round 1')
+      git('update-ref', '-d', 'refs/remotes/origin/base')
+
+      const result = countCrosscheckCommitsForPRDetailed(tmpDir, 'base')
+      expect(result.scoped).toBe(false)
+      // 6 inherited from base history + 1 on this branch — none of the 6 are ours.
+      expect(result.count).toBe(7)
+    })
+
+    it('still fails closed: the over-count trips the cap rather than bypassing it', () => {
+      git('update-ref', '-d', 'refs/remotes/origin/base')
+      expect(countCrosscheckCommitsForPRDetailed(tmpDir, 'base').count).toBeGreaterThanOrEqual(5)
+    })
+
+    it('keeps the scalar helper behaviour identical for existing callers', () => {
+      commit('a.txt', 'a\n', '[crosscheck] fix round 1')
+      expect(countCrosscheckCommitsForPR(tmpDir, 'base'))
+        .toBe(countCrosscheckCommitsForPRDetailed(tmpDir, 'base').count)
+    })
   })
 
   it('counts only [crosscheck] commits ahead of base (ignores base history)', () => {

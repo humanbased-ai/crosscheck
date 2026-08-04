@@ -17,12 +17,12 @@ export const VendorConfigSchema = z.object({
 export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   quality: z.enum(['low', 'medium', 'high']).default('medium'),
   // Codex exposes two tiers above the shared vocabulary: xhigh (Extra High) and
-  // ultra (Max reasoning + automatic task delegation). ultra is only available
-  // on terra/sol; pre-5.6 models stop at xhigh — the CLI rejects unsupported
-  // combinations at call time.
+  // ultra. Ultra is only available on terra/sol; pre-5.6 models stop at xhigh —
+  // the CLI rejects unsupported combinations at call time.
   effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).default('medium'),
-  // Optional per-tier model overrides. When unset, the Codex CLI picks the model.
-  // Subscription auth: leave unset (CLI default). API-key auth: set explicit model IDs.
+  // Optional per-tier model overrides, honored under both auth modes. When unset:
+  // api-key auth falls back to the built-in tier mapping, subscription auth lets
+  // the Codex CLI pick its default model.
   // Example: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol' }
   model_tiers: z.object({
     fast: z.string().optional(),
@@ -240,6 +240,61 @@ export const BrandConfigSchema = z.object({
   reviewer_attribution: z.string().default(''),
 })
 
+// Tiered Linear identity — see src/linear/identity.ts for the tier semantics.
+// Disabled by default, so existing configs are unaffected.
+export const LinearAuthConfigSchema = z.object({
+  // api_key            — T0: personal/workspace key + signature line.
+  // client_credentials — T1: OAuth app token minted per run + createAsUser (botActor).
+  mode: z.enum(['api_key', 'client_credentials']).default('api_key'),
+  // Env var NAMES, never the secrets themselves. Values are read in config/loader.ts.
+  api_key_env: z.string().default('LINEAR_API_KEY'),
+  client_id_env: z.string().default('LINEAR_CLIENT_ID'),
+  client_secret_env: z.string().default('LINEAR_CLIENT_SECRET'),
+  // Linear documents the token request as taking a COMMA-separated list. Space
+  // separated input is normalised on the wire, so both forms work.
+  // NOTE: `read,write` does NOT cover initiatives — initiative:read /
+  // initiative:write are separate scopes that must be requested explicitly.
+  scopes: z.string().default('read,write'),
+})
+
+export const LinearIdentityConfigSchema = z.object({
+  // createAsUser base name in T1; the {actor} placeholder in the signature template.
+  actor: z.string().default('crosscheck'),
+  // Placeholders: {actor} {product} {model} {reviewer} {icon}. Ones with no value
+  // resolve to empty and the leftover separators are tidied away.
+  //
+  // {product} is available but not in the default: actor defaults to the product
+  // name, so `{actor} · {product}` renders as `crosscheck · crosscheck`. The model
+  // carries more information in the same space.
+  signature: z.string().default('🤖 {actor} · {model}'),
+  // Optional logo shown inline in the signature via {icon}. Note the better route
+  // is the OAuth app avatar (T1), which Linear renders natively beside the comment —
+  // see docs/linear-identity.md. Inline images may render block-level.
+  icon_url: z.string().default(''),
+  // Suffix the actor with the workflow step that produced the write, so a review,
+  // a recheck and a fix are distinguishable rather than all reading as one bot:
+  //   crosscheck/review, crosscheck/fix, crosscheck/recheck
+  // Set false for a single flat actor name.
+  per_step_actor: z.boolean().default(true),
+})
+
+export const LinearVerdictFilterSchema = z.enum(['APPROVE', 'NEEDS_WORK', 'BLOCK', 'UNKNOWN'])
+export type LinearVerdictFilter = z.infer<typeof LinearVerdictFilterSchema>
+
+export const LinearConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  auth: LinearAuthConfigSchema.default({}),
+  identity: LinearIdentityConfigSchema.default({}),
+  // Which verdicts get mirrored to the linked Linear issue. Defaults to the ones
+  // that need someone to act: a clean PR posting an APPROVE onto its issue is noise
+  // on every green review. Add 'APPROVE' (and 'UNKNOWN') to hear about those too.
+  comment_on: z.array(LinearVerdictFilterSchema).default(['NEEDS_WORK', 'BLOCK']),
+  // Team key prefixes (e.g. ['IN']) that may be matched as bare identifiers in a
+  // branch/title/body. Leave empty to only follow explicit linear.app issue URLs —
+  // see src/linear/ref.ts for why bare matching is opt-in.
+  team_keys: z.array(z.string()).default([]),
+})
+
 export const ConfigSchema = z.object({
   // Absent = not yet configured; watch/serve will prompt on first run.
   deployment: z.enum(['personal', 'team']).optional(),
@@ -270,6 +325,7 @@ export const ConfigSchema = z.object({
   post_review: PostReviewConfigSchema.default({}),
   display: DisplayConfigSchema.default({}),
   brand: BrandConfigSchema.default({}),
+  linear: LinearConfigSchema.default({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
@@ -287,3 +343,5 @@ export type DisplayTheme = z.infer<typeof DisplayThemeSchema>
 export type BacktraceConfig = z.infer<typeof BacktraceConfigSchema>
 export type IssueEnrichmentConfig = z.infer<typeof IssueEnrichmentConfigSchema>
 export type WatchConfig = z.infer<typeof WatchConfigSchema>
+export type LinearConfig = z.infer<typeof LinearConfigSchema>
+export type LinearAuthConfig = z.infer<typeof LinearAuthConfigSchema>

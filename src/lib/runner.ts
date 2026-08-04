@@ -13,13 +13,17 @@ import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
+import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
+import { notifyLinear } from '../linear/notify.js'
+import { shouldPostToLinear } from '../linear/comment.js'
+import { getLinearCredentials } from '../config/loader.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
-import { loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
+import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
@@ -68,7 +72,17 @@ export function getEffectiveStepType(stepType: string, isRecheckRun: boolean): s
 // base ref with `base_branch_fetch_skipped`), fall back to the full-history
 // count rather than returning 0. Over-counting can stop fix early; returning 0
 // would silently disable the cap and let runaway fix loops keep pushing.
-export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): number {
+export interface CrosscheckCommitCount {
+  count: number
+  /**
+   * false when origin/<base> was unavailable and the count covers the whole
+   * history rather than just this PR. Such a count is an upper bound, usually a
+   * wild over-count, and must be reported as such rather than as a real limit hit.
+   */
+  scoped: boolean
+}
+
+export function countCrosscheckCommitsForPRDetailed(tmpDir: string, baseRef: string): CrosscheckCommitCount {
   const runLog = (args: string[]): string =>
     execFileSync(
       'git',
@@ -78,17 +92,21 @@ export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): nu
   const count = (out: string): number => out.split('\n').filter(l => l.includes('[crosscheck]')).length
 
   try {
-    return count(runLog([`origin/${baseRef}..HEAD`]))
+    return { count: count(runLog([`origin/${baseRef}..HEAD`])), scoped: true }
   } catch {
     // Scoped range unavailable — fall back to full history so the cap still
-    // applies. May over-count when the branch has prior merged crosscheck
-    // commits, but that's preferable to bypassing the safety guard.
+    // applies. Over-counts when the branch has prior merged crosscheck commits,
+    // but that's preferable to bypassing the safety guard.
     try {
-      return count(runLog([]))
+      return { count: count(runLog([])), scoped: false }
     } catch {
-      return 0
+      return { count: 0, scoped: false }
     }
   }
+}
+
+export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): number {
+  return countCrosscheckCommitsForPRDetailed(tmpDir, baseRef).count
 }
 
 // Subset of WorkflowContext + accumulators the workflow_complete event needs.
@@ -229,6 +247,9 @@ export interface WorkflowContext {
   // When true, review output is printed but the GitHub comment is not posted
   // and the fix step is skipped. Used by `crosscheck run --dry-run`.
   dryRun?: boolean
+  // Linear identity resolved once at the command-run boundary and reused across
+  // every round, so a multi-round run mints exactly one token.
+  linearAuth?: ResolvedLinearAuth | null
   // Override the steps to execute instead of loading from workflow.yml.
   // Used by `crosscheck run --steps` to run only a subset of the pipeline.
   steps?: import('./workflow.js').WorkflowStep[]
@@ -524,6 +545,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // can iterate the same list and release these shas if SIGINT/SIGTERM fires
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
+
+  // Linear write-back identity. Resolved up front — before any expensive step —
+  // and allowed to throw. The contract is that a configured-but-failing
+  // client_credentials mint ABORTS rather than degrading, because silently
+  // continuing would either drop the write or re-attribute it to a human. This
+  // matches commands/review.ts; the two paths must not disagree.
+  // The contract is one token per command run. runWorkflow is re-entered for every
+  // fix/recheck round under --crazy and max_rounds, so minting here would mint per
+  // round and let a late transient failure abort work already done. The caller
+  // resolves once and passes it in; resolving here is the single-round fallback.
+  // A dry run posts nothing, so it never mints.
+  let linearAuth: ResolvedLinearAuth | null = ctx.linearAuth ?? null
+
   let workflowFailed = false
   let workflowError: unknown = undefined
   let failedStep: string | undefined = undefined
@@ -557,6 +591,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   emitPRComplexity(ctx, triggerField)
 
   try {
+  // Inside the try so a preflight failure still reaches the completion handler in
+  // the finally — resolving above it meant a failed mint skipped workflow_complete
+  // entirely and left no record of the run.
+  // canWriteVerdict here too: the caller passes null deliberately when the selected
+  // steps cannot write a verdict, and this fallback previously read that as
+  // "unresolved" and resolved anyway — defeating the gate one line upstream.
+  if (!ctx.dryRun && !linearAuth && linearWritePossible(config.linear, steps)) {
+    linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+    fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
+  }
+
   for (const step of steps) {
     currentStepName = step.name
     stepsRun.push(step.name)
@@ -761,6 +806,38 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
+
+        // Mirror the verdict onto the PR's Linear issue. `run` and `watch` both
+        // land here, so this is the path that matters — reviews posted from
+        // commands/review.ts are the exception, not the rule.
+        if (linearAuth && shouldPostToLinear(verdict ?? null, config.linear.comment_on)) {
+          {
+            // Attribute to crosscheck/review, /fix, /recheck rather than a flat actor.
+            const stepAuth = config.linear.identity.per_step_actor ? withWorker(linearAuth, effectiveType) : linearAuth
+            const linearResult = await notifyLinear({
+              auth: stepAuth,
+              config: config.linear,
+              pr: { branch: pr.head.ref, title: pr.title, body: pr.body ?? '', url: `https://${commentUrl}`, sha: annotationSha },
+              verdict: verdict ?? null,
+              reviewer,
+              origin,
+              model,
+              stepType: effectiveType,
+              round: ctx.round ?? 1,
+              service: config.brand.service_name,
+            })
+            fileLog({
+              level: linearResult.status === 'failed' ? 'warn' : 'info',
+              event: 'linear_comment', repo: `${owner}/${repoName}`, pr: prNumber,
+              status: linearResult.status, reason: linearResult.reason, issue: linearResult.identifier,
+            })
+            if (linearResult.status === 'posted') {
+              log(chalk.dim(`  linear: commented on ${linearResult.identifier}`))
+            } else if (linearResult.status === 'failed') {
+              log(chalk.yellow(`  linear: write failed — ${linearResult.reason}`))
+            }
+          }
+        }
         results[step.name] = { verdict, commentBody, commentUrl, commentId, tokens_used: tokensUsed, input_tokens: inputTokens, output_tokens: outputTokens, vendor: reviewer, model }
       }
 
@@ -822,12 +899,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // Scope to commits ahead of base so long-lived branches (e.g. staging)
       // don't count [crosscheck] commits from previously merged PRs.
       // Crazy/halfcrazy mode doubles the cap since it deliberately loops.
-      const existingCount = countCrosscheckCommitsForPR(tmpDir, pr.base.ref)
+      const commitCount = countCrosscheckCommitsForPRDetailed(tmpDir, pr.base.ref)
       const effectiveCommitLimit = ctx.roundMode ? MAX_CROSSCHECK_COMMITS * 2 : MAX_CROSSCHECK_COMMITS
 
-      if (existingCount >= effectiveCommitLimit) {
-        log(chalk.yellow(`⚠  PR #${prNumber}: ${effectiveCommitLimit} [crosscheck] commits already — stopping auto-fix`))
-        skipFix('commit_limit_reached')
+      if (commitCount.count >= effectiveCommitLimit) {
+        // Report the count, not the limit. An unscoped count means origin/<base>
+        // was missing, so this is an over-count from whole-repo history rather
+        // than a real cap hit — say so, or the next person debugs the wrong thing.
+        log(commitCount.scoped
+          ? chalk.yellow(`⚠  PR #${prNumber}: ${commitCount.count}/${effectiveCommitLimit} [crosscheck] commits already — stopping auto-fix`)
+          : chalk.yellow(`⚠  PR #${prNumber}: cannot scope [crosscheck] commit count (origin/${pr.base.ref} missing; ${commitCount.count} across all history) — stopping auto-fix`))
+        skipFix(commitCount.scoped ? 'commit_limit_reached' : 'commit_count_unscoped')
         continue
       }
 
@@ -1110,10 +1192,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
       if (isFork) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
 
-      const existingCount = countCrosscheckCommitsForPR(tmpDir, pr.base.ref)
-      if (existingCount >= MAX_CROSSCHECK_COMMITS) {
+      const crCommitCount = countCrosscheckCommitsForPRDetailed(tmpDir, pr.base.ref)
+      if (crCommitCount.count >= MAX_CROSSCHECK_COMMITS) {
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
-        log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping conflict-resolve`))
+        log(crCommitCount.scoped
+          ? chalk.yellow(`⚠  PR #${prNumber}: ${crCommitCount.count}/${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping conflict-resolve`)
+          : chalk.yellow(`⚠  PR #${prNumber}: cannot scope [crosscheck] commit count (origin/${pr.base.ref} missing) — stopping conflict-resolve`))
         skipConflictResolve('commit_limit_reached')
         continue
       }

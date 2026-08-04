@@ -156,6 +156,52 @@ export LINEAR_API_KEY=lin_api_...
 If it's unset while enrichment is on, crosscheck just skips enrichment and
 reviews the diff as usual — it never errors.
 
+### Linear identity — for writing back to Linear (optional)
+
+Separate from enrichment above, which only *reads*. When `linear.enabled: true`,
+crosscheck mirrors each review verdict onto the PR's Linear issue.
+
+`crosscheck onboard` asks which rung of the attribution ladder you want and writes
+the config for you.
+
+**Start with `api_key`.** It reuses `LINEAR_API_KEY`, works immediately, and posts
+the comment — the feature is fully functional. Comments attribute to your Linear
+account, led by a `🤖 crosscheck · <model>` signature line.
+
+Climb to `client_credentials` when more than one thing writes to your workspace and
+you need them told apart. It uses an OAuth app — one per workspace, not per user —
+so comments post as crosscheck itself with its own icon:
+
+```bash
+export LINEAR_CLIENT_ID=...
+export LINEAR_CLIENT_SECRET=...
+```
+
+A failed T1 token mint aborts the run rather than falling back to `api_key` —
+a silent downgrade would put agent writes back under a human's name.
+
+`crosscheck onboard` walks you through the choice:
+
+<p align="center">
+  <img src="./assets/linear-onboard.svg" alt="crosscheck onboard — choosing a Linear attribution rung" width="700" />
+</p>
+
+Before opening a PR, `crosscheck linear-test` exercises the whole path and posts nothing —
+identity, issue lookup, verdict filter, and the exact comment body:
+
+<p align="center">
+  <img src="./assets/linear-test.svg" alt="crosscheck linear-test — dry-run verification" width="700" />
+</p>
+
+`crosscheck status` shows which rung is active whenever `linear.enabled` is true:
+
+<p align="center">
+  <img src="./assets/linear-status.svg" alt="crosscheck status — the Linear identity section" width="620" />
+</p>
+
+Full walkthrough, including the two Linear UI gotchas that trip people up:
+[docs/linear-identity.md](docs/linear-identity.md).
+
 ---
 
 ## Step 1 — Check your setup
@@ -1015,7 +1061,7 @@ vendors:
   codex:
     enabled: true
     auth: subscription      # subscription | api-key
-    model: gpt-5.6-terra    # only used when auth: api-key
+    model: gpt-5.6-terra    # pins the review model; unset = tier model (api-key) / CLI default (subscription)
     effort: medium          # low | medium | high | xhigh | max | ultra (ultra: terra/sol only)
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
@@ -1145,6 +1191,24 @@ post_review:
 server:
   port: 7891
   webhook_path: /webhook
+
+linear:                       # write review verdicts back to a Linear issue (opt-in)
+  enabled: false
+  auth:
+    mode: api_key             # api_key | client_credentials
+    api_key_env: LINEAR_API_KEY
+    client_id_env: LINEAR_CLIENT_ID
+    client_secret_env: LINEAR_CLIENT_SECRET
+    scopes: "read,write"      # comma-separated; initiative:* are separate scopes
+  identity:
+    actor: crosscheck
+    signature: "🤖 {actor} · {model}"   # {actor} {product} {model} {reviewer} {icon}
+    icon_url: ""              # rendered where {icon} appears; app avatar is preferred
+    per_step_actor: true      # crosscheck/review vs crosscheck/fix in Linear
+  comment_on:                 # verdicts mirrored to the issue (default omits APPROVE)
+    - NEEDS_WORK
+    - BLOCK
+  team_keys: []               # e.g. [IN] — required to match bare refs like IN-42
 ```
 
 ### Quality tiers
@@ -1275,7 +1339,7 @@ If none match, origin is `human` and the PR is skipped in cross-vendor mode.
 codex review --base <base-branch> --title "<pr-title>"
 ```
 
-The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. With `auth: subscription`, no model flag is passed. With `auth: api-key`, the model is selected by quality tier (`fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `thorough` → `gpt-5.6-sol`).
+The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. An explicit `vendors.codex.model` (or matching `model_tiers` entry) is passed as `-c model=...` under either auth mode. When unset: `auth: subscription` passes no model flag (the Codex CLI picks its default), while `auth: api-key` selects the model by quality tier (`fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `thorough` → `gpt-5.6-sol`).
 
 Reasoning effort comes from `vendors.codex.effort` and is always passed through as `-c model_reasoning_effort=...`. The values match the codex CLI tiers 1:1 — `low` (Light), `medium`, `high`, `xhigh` (Extra High), `max`, `ultra`. Not every model supports every tier: `ultra` is terra/sol only, and pre-5.6 models stop at `xhigh` — the CLI rejects unsupported combinations. Higher tiers can multiply review wall-clock time; pair them with `timeout_sec`.
 

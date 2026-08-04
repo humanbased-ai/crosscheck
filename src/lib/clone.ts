@@ -100,7 +100,7 @@ export async function clonePRForReview(params: {
   // --progress forces git to emit stderr progress even when piped; without a
   // progress consumer, stay --quiet so error output remains clean.
   await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress)
-  await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir, false, onProgress)
+  await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir, true, onProgress)
   await runGit(['checkout', `pr-${prNumber}`], tmpDir)
 
   // Fetch base after PR checkout so we are never on the base branch during the fetch
@@ -108,8 +108,12 @@ export async function clonePRForReview(params: {
   // target so the remote-tracking ref is always created — `git fetch origin <branch>`
   // alone only writes FETCH_HEAD in shallow clones when the branch is absent from
   // the default refspec mapping.
+  // Retryable like the clone: a transient failure here is not cosmetic. Without
+  // origin/<base>, countCrosscheckCommitsForPR cannot scope its range and falls
+  // back to counting the whole history — which trips the auto-fix commit cap on
+  // any repo with prior [crosscheck] commits and silently disables fixing.
   try {
-    await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir)
+    await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir, true)
   } catch {
     onBaseFetchFailed?.()
   }

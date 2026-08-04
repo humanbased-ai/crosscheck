@@ -355,6 +355,73 @@ async function promptWorkflowPipeline(opts: OnboardOpts): Promise<WorkflowPreset
   return 'review-fix'
 }
 
+export interface LinearDecision {
+  mode: 'off' | 'api_key' | 'client_credentials'
+  teamKeys: string[]
+}
+
+// The attribution ladder, surfaced at onboarding rather than left in the docs.
+// Each rung buys stronger attribution for more setup; rung 1 needs nothing but a
+// key, so a user who just wants review outcomes in Linear never has to see an
+// OAuth form. Defaults to off — writing into someone's tracker is opt-in.
+export async function promptLinear(
+  current: { enabled?: boolean; mode?: string; teamKeys?: string[] } | undefined,
+  opts: OnboardOpts,
+): Promise<LinearDecision> {
+  const currentMode: LinearDecision['mode'] = !current?.enabled
+    ? 'off'
+    : current.mode === 'client_credentials' ? 'client_credentials' : 'api_key'
+
+  if (opts.yes) return { mode: currentMode, teamKeys: current?.teamKeys ?? [] }
+
+  const currentChoice = currentMode === 'client_credentials' ? '3' : currentMode === 'api_key' ? '2' : '1'
+
+  console.log(chalk.dim('  Post the review verdict onto the Linear issue a PR belongs to.\n'))
+  console.log('  [1] off           — leave Linear alone')
+  console.log(`  [2] api key       — works immediately. Comments post under ${chalk.dim('your own Linear account')}`)
+  console.log(`  [3] workspace app — comments post as ${chalk.cyan('crosscheck')} itself, with its own icon`)
+  console.log(chalk.dim('                      one app per workspace, ~5 min, needs Linear settings access'))
+  console.log(chalk.dim(`\n  Current: ${currentMode}`))
+  console.log()
+
+  // Enter keeps whatever is configured. Defaulting to `off` meant a re-run where
+  // the user just pressed enter silently disabled a working integration.
+  const answer = (await ask(`  Choice [${currentChoice}]: `)).trim()
+  const mode: LinearDecision['mode'] =
+    answer === '1' ? 'off'
+      : answer === '2' ? 'api_key'
+        : answer === '3' ? 'client_credentials'
+          : currentMode
+
+  if (mode === 'off') return { mode, teamKeys: [] }
+
+  // Without team keys only full linear.app URLs resolve — worth asking, because a
+  // user who skips it may see nothing happen and assume the feature is broken.
+  console.log(chalk.dim('\n  Your Linear team key prefixes, so refs like ENG-42 in a branch name resolve.'))
+  console.log(chalk.dim('  Comma-separated. Leave blank to only follow full linear.app links.'))
+  // Blank keeps the current value on a first run (nothing to keep) and on a re-run
+  // where the user just pressed enter. `-` is the explicit clear, because silently
+  // treating blank as "clear" would wipe configured keys on every re-run.
+  const hasCurrent = (current?.teamKeys?.length ?? 0) > 0
+  const keysPrompt = hasCurrent
+    ? `  team keys [${current!.teamKeys!.join(',')}] (- to clear): `
+    : '  team keys: '
+  const keysAnswer = (await ask(keysPrompt)).trim()
+  const teamKeys = keysAnswer === '-'
+    ? []
+    : keysAnswer
+      ? keysAnswer.split(',').map(k => k.trim().toUpperCase()).filter(Boolean)
+      : (current?.teamKeys ?? [])
+
+  if (mode === 'api_key') {
+    console.log(chalk.dim('\n  Set LINEAR_API_KEY in your environment (Linear → Settings → API).'))
+  } else {
+    console.log(chalk.dim('\n  Create the app, then set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET.'))
+    console.log(chalk.dim('  Walkthrough: docs/linear-identity.md'))
+  }
+  return { mode, teamKeys }
+}
+
 async function promptConnectionType(
   currentTunnel: 'localhost.run' | 'smee' | undefined,
   opts: OnboardOpts,
@@ -433,6 +500,7 @@ export interface OnboardDecisions {
   tunnelBackend: 'localhost.run' | 'smee'
   smeeChannel: string
   cloneProtocol: 'ssh' | 'https'
+  linear?: LinearDecision
 }
 
 // Build the workflow YAML for the given preset, with inline per-step instructions.
@@ -494,7 +562,7 @@ export function applyOnboardConfig(
   decisions: OnboardDecisions,
   workflowDir = join(homedir(), '.crosscheck'),
 ): void {
-  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, pipelinePreset, maxRounds, conflictResolve, tunnelBackend, smeeChannel, cloneProtocol } = decisions
+  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, pipelinePreset, maxRounds, conflictResolve, tunnelBackend, smeeChannel, cloneProtocol, linear } = decisions
 
   mkdirSync(dirname(configPath), { recursive: true })
 
@@ -569,9 +637,26 @@ export function applyOnboardConfig(
   tunnelObj.backend = tunnelBackend
   if (tunnelBackend === 'smee' && smeeChannel) tunnelObj.smee_channel = smeeChannel
 
+  // ── Linear write-back ───────────────────────────────────────────────────────
+  // Only touched when onboard actually asked. Auth env-var names and the signature
+  // template are left alone so hand-edits survive a re-run.
+  if (linear) {
+    if (!raw.linear || typeof raw.linear !== 'object') raw.linear = {}
+    const linearObj = raw.linear as Record<string, unknown>
+    linearObj.enabled = linear.mode !== 'off'
+    if (linear.mode !== 'off') {
+      if (!linearObj.auth || typeof linearObj.auth !== 'object') linearObj.auth = {}
+      ;(linearObj.auth as Record<string, unknown>).mode = linear.mode
+      // Write the selection even when empty — otherwise the `-` clear silently
+      // leaves the previous keys in the file and nothing appears to happen.
+      linearObj.team_keys = linear.teamKeys
+    }
+  }
+
   // ── Quality tier + per-vendor effort ────────────────────────────────────────
   // claude.ts derives the model from quality.tier at runtime (vendor.model is ignored).
-  // vendor.model is written for codex only — api-key auth uses it as an override.
+  // vendor.model is written for codex only — it pins the review model under both
+  // auth modes (subscription passes it to the CLI via -c model=).
   if (!raw.quality || typeof raw.quality !== 'object') raw.quality = {}
   ;(raw.quality as Record<string, unknown>).tier = qualityTier
   const tierCfg = QUALITY_TIERS[qualityTier]
@@ -945,6 +1030,18 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   // ── Step 9: Clone protocol ─────────────────────────────────────────────────
   console.log(chalk.bold('Step 9 — clone protocol'))
   const cloneProtocol = await promptCloneProtocol(existingConfig?.clone_protocol, opts)
+  console.log()
+
+  // ── Step 9.5: Linear write-back ────────────────────────────────────────────
+  console.log(chalk.bold('Step 9.5 — Linear write-back (optional)'))
+  const linear = await promptLinear(
+    {
+      enabled: existingConfig?.linear?.enabled,
+      mode: existingConfig?.linear?.auth?.mode,
+      teamKeys: existingConfig?.linear?.team_keys,
+    },
+    opts,
+  )
 
   // ── Step 10: Confirm and write ─────────────────────────────────────────────
   const selectedRepoWorkflowOverrides = selectedRepos.flatMap(repoKey => {
@@ -958,6 +1055,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
   console.log(`  connection   ${chalk.cyan(tunnelBackend)}${tunnelBackend === 'smee' && smeeChannel ? chalk.dim(` (${smeeChannel})`) : ''}`)
   console.log(`  clone        ${chalk.cyan(cloneProtocol)}`)
+  console.log(`  linear       ${chalk.cyan(linear.mode === 'off' ? 'off' : linear.mode)}${linear.mode !== 'off' && linear.teamKeys.length > 0 ? chalk.dim(` (${linear.teamKeys.join(', ')})`) : ''}`)
   console.log(`  mode         ${chalk.cyan(vendorConfig.mode)}`)
   if (vendorConfig.mode === 'single-vendor') {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
@@ -1016,6 +1114,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     tunnelBackend,
     smeeChannel,
     cloneProtocol,
+    linear,
   })
 
   console.log(chalk.green(`  ✓ config written to ${configPath}`))
