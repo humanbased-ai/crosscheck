@@ -75,6 +75,6 @@ export function loadSkillCatalog(installedRoot = INSTALLED_SKILLS_DIR): SkillIde
   return [...skills.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
-export function formatSkillIdentity(skill: SkillIdentity): string {
+export function formatSkillIdentity(skill: Pick<SkillIdentity, 'name' | 'author' | 'license'>): string {
   return `${skill.name} (by @${skill.author}, ${skill.license})`
 }

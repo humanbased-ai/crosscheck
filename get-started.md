@@ -810,6 +810,8 @@ crosscheck onboard  # enable installed skills
 
 `crosscheck status` distinguishes the full installed catalog from the enabled selection and renders attributed identities as `skill-name (by @author, license)`.
 
+At runtime, Crosscheck distinguishes three states: **installed** skills are in the catalog, **enabled** skills are available to agents, and **activated** skills were actually loaded for one workflow step. The terminal and each PR comment attribute only that step's activated skills, for example: `code-review-skill (by @awesome-skills, MIT)`.
+
 ---
 
 ### `crosscheck diagnose`

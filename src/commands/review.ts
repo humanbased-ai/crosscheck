@@ -22,6 +22,7 @@ import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession } from '../skills/broker.js'
+import { appendSkillAttribution, formatSkillAttribution } from '../skills/attribution.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -178,6 +179,8 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
 
     reviewSpinner.succeed(`Review complete (${elapsed}s)`)
+    const activatedSkills = skillSession?.activations() ?? []
+    if (activatedSkills.length > 0) console.log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
     const parsed = parseVerdict(reviewText)
     const { clean } = parsed
     if (parsed.verdict === null) {
@@ -190,11 +193,12 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     if (gate.downgraded) {
       fileLog({ level: 'info', event: 'verdict_severity_gated', repo: `${owner}/${repo}`, pr: number, reviewer, raw_verdict: parsed.verdict, gated_verdict: verdict })
     }
-    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, model, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed })
+    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, model, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed, skills_activated: activatedSkills.map(skill => skill.name) })
     console.log(`  ${formatVerdict(verdict)}`)
-    const commentBody = verdict === null
+    const reviewBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
       : prependVerdictToComment(gate.downgraded ? `${SEVERITY_GATE_NOTE}\n\n${clean}` : clean, verdict)
+    const commentBody = appendSkillAttribution(reviewBody, activatedSkills, 'review')
     await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))

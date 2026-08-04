@@ -191,6 +191,8 @@ skills:
     - code-review-skill  # bundled by @awesome-skills, MIT
 ```
 
+Agents decide whether an enabled skill applies to each review, fix, recheck, or conflict-resolution step. PR comments attribute only skills actually activated for that step.
+
 | Tier | Claude | Codex | Latency |
 |---|---|---|---|
 | `fast` | Haiku 4.5 | GPT-5.6 Luna | ~10s |
