@@ -1,8 +1,9 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, rmSync, statSync } from 'fs'
 import { join, resolve, sep } from 'path'
-import { tmpdir } from 'os'
 import { fileURLToPath } from 'url'
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto'
+import { randomUUID } from 'crypto'
+import { createServer, type Server, type Socket } from 'net'
+import { createInterface } from 'readline'
 import { findCompetingSkill, type SkillIdentity } from './catalog.js'
 
 export type SkillMetadata = Omit<SkillIdentity, 'path'>
@@ -12,10 +13,6 @@ interface SkillSessionState {
   stepType: string
   enabled: SkillIdentity[]
   activated: string[]
-}
-
-interface PersistedSkillSessionState extends SkillSessionState {
-  mac: string
 }
 
 export interface BrokerToolResult {
@@ -39,7 +36,6 @@ export interface McpResponse {
 
 export interface SkillActivationSession {
   path: string
-  brokerKey: string
   stepType: string
   enabledSkills: SkillMetadata[]
   activations(): SkillMetadata[]
@@ -49,33 +45,38 @@ export interface SkillActivationSession {
 const BROKER_SERVER_PATH = fileURLToPath(new URL('./broker-server.js', import.meta.url))
 const BROKER_SERVER_TS_PATH = fileURLToPath(new URL('./broker-server.ts', import.meta.url))
 const MAX_SKILL_FILE_BYTES = 512_000
-const SESSION_KEY_ENV = 'CROSSCHECK_SKILL_SESSION_KEY'
-const sessionKeys = new Map<string, string>()
+const sessionStates = new Map<string, SkillSessionState>()
 
-function sessionKey(sessionPath: string): string {
-  const key = sessionKeys.get(sessionPath) ?? process.env[SESSION_KEY_ENV]
-  if (!key) throw new Error('Skill session authentication key is missing')
-  return key
-}
-
-function stateMac(state: SkillSessionState, key: string): string {
-  return createHmac('sha256', key).update(JSON.stringify(state)).digest('hex')
-}
-
-function readState(sessionPath: string, key = sessionKey(sessionPath)): SkillSessionState {
-  const persisted = JSON.parse(readFileSync(sessionPath, 'utf8')) as PersistedSkillSessionState
-  const { mac, ...state } = persisted
-  const expected = stateMac(state, key)
-  if (!/^[0-9a-f]{64}$/.test(mac)
-    || !timingSafeEqual(Buffer.from(mac, 'hex'), Buffer.from(expected, 'hex'))) {
-    throw new Error('Skill session authentication failed')
-  }
+function readState(sessionPath: string): SkillSessionState {
+  const state = sessionStates.get(sessionPath)
+  if (!state) throw new Error('Skill session not found')
   return state
 }
 
-function writeState(sessionPath: string, state: SkillSessionState, key = sessionKey(sessionPath)): void {
-  const persisted: PersistedSkillSessionState = { ...state, mac: stateMac(state, key) }
-  writeFileSync(sessionPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 })
+async function serveBrokerConnection(socket: Socket, sessionPath: string): Promise<void> {
+  const lines = createInterface({ input: socket, crlfDelay: Infinity })
+  for await (const line of lines) {
+    if (!line.trim()) continue
+    let response: McpResponse | null
+    try {
+      response = handleSkillBrokerRequest(sessionPath, JSON.parse(line) as McpRequest)
+    } catch (err: unknown) {
+      response = {
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32700, message: err instanceof Error ? err.message : String(err) },
+      }
+    }
+    if (response) socket.write(`${JSON.stringify(response)}\n`)
+  }
+}
+
+function createBrokerServer(sessionPath: string): Server {
+  const server = createServer(socket => {
+    void serveBrokerConnection(socket, sessionPath).catch(() => socket.destroy())
+  })
+  server.listen(sessionPath)
+  return server
 }
 
 function metadata(skill: SkillIdentity): SkillMetadata {
@@ -98,37 +99,36 @@ export function createSkillActivationSession(
 ): SkillActivationSession {
   const enabledSet = new Set(enabledNames)
   const enabled = catalog.filter(skill => enabledSet.has(skill.name))
-  const sessionDir = mkdtempSync(join(tmpdir(), 'crosscheck-skill-session-'))
-  const path = join(sessionDir, 'session.json')
-  const key = randomBytes(32).toString('hex')
-  sessionKeys.set(path, key)
-  writeState(path, { schemaVersion: 1, stepType, enabled, activated: [] }, key)
+  const path = process.platform === 'win32'
+    ? `\\\\.\\pipe\\crosscheck-skill-${randomUUID()}`
+    : `/tmp/crosscheck-skill-${randomUUID()}.sock`
+  sessionStates.set(path, { schemaVersion: 1, stepType, enabled, activated: [] })
+  const server = createBrokerServer(path)
 
   return {
     path,
-    brokerKey: key,
     stepType,
     enabledSkills: enabled.map(metadata),
     activations: () => {
-      const state = readState(path, key)
+      const state = readState(path)
       const activated = new Set(state.activated)
       return state.enabled.filter(skill => activated.has(skill.name)).map(metadata)
     },
     close: () => {
-      sessionKeys.delete(path)
-      rmSync(sessionDir, { recursive: true, force: true })
+      sessionStates.delete(path)
+      server.close()
+      if (process.platform !== 'win32') rmSync(path, { force: true })
     },
   }
 }
 
-export function skillBrokerCommand(session: SkillActivationSession): { command: string; args: string[]; env: Record<string, string> } {
+export function skillBrokerCommand(session: SkillActivationSession): { command: string; args: string[] } {
   const serverArgs = existsSync(BROKER_SERVER_PATH)
     ? [BROKER_SERVER_PATH]
     : ['--import', 'tsx', BROKER_SERVER_TS_PATH]
   return {
     command: process.execPath,
-    args: [...serverArgs, '--session', session.path],
-    env: { [SESSION_KEY_ENV]: session.brokerKey },
+    args: [...serverArgs, '--socket', session.path],
   }
 }
 
@@ -148,7 +148,7 @@ export function claudeSkillBrokerArgs(session?: SkillActivationSession): string[
   if (!session) return []
   const broker = skillBrokerCommand(session)
   return ['--mcp-config', JSON.stringify({
-    mcpServers: { crosscheck: { command: broker.command, args: broker.args, env: broker.env } },
+    mcpServers: { crosscheck: { command: broker.command, args: broker.args } },
   })]
 }
 
@@ -158,7 +158,6 @@ export function codexSkillBrokerArgs(session?: SkillActivationSession): string[]
   return [
     '-c', `mcp_servers.crosscheck.command=${JSON.stringify(broker.command)}`,
     '-c', `mcp_servers.crosscheck.args=${JSON.stringify(broker.args)}`,
-    '-c', `mcp_servers.crosscheck.env=${JSON.stringify(broker.env)}`,
   ]
 }
 
@@ -185,7 +184,6 @@ export function callSkillBrokerTool(
     const instructions = readFileSync(join(skill.path, 'SKILL.md'), 'utf8')
     if (!state.activated.includes(name)) {
       state.activated.push(name)
-      writeState(sessionPath, state)
     }
     return {
       content: [{

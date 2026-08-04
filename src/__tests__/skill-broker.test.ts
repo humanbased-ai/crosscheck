@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import {
   callSkillBrokerTool,
   claudeSkillBrokerArgs,
@@ -55,15 +57,15 @@ describe('skill activation broker', () => {
     expect(callSkillBrokerTool(session.path, 'activate_skill', { name: 'missing' }).isError).toBe(true)
   })
 
-  it('rejects agent-written changes to broker authority and attribution', () => {
+  it('ignores attacker-created state files', () => {
     session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
-    const state = JSON.parse(readFileSync(session.path, 'utf8')) as Record<string, unknown>
-    state.activated = ['code-review-skill']
-    writeFileSync(session.path, JSON.stringify(state))
+    const attackerDir = mkdtempSync(join(tmpdir(), 'crosscheck-forged-session-'))
+    const attackerPath = join(attackerDir, 'session.json')
+    writeFileSync(attackerPath, JSON.stringify({ enabled: loadBundledSkills(), activated: ['code-review-skill'] }))
 
-    expect(() => session!.activations()).toThrow('authentication failed')
-    expect(() => callSkillBrokerTool(session!.path, 'list_enabled_skills', {}))
-      .toThrow('authentication failed')
+    expect(() => callSkillBrokerTool(attackerPath, 'list_enabled_skills', {})).toThrow('not found')
+    expect(session.activations()).toEqual([])
+    rmSync(attackerDir, { recursive: true, force: true })
   })
 
   it('rejects activation of a competing review baseline', () => {
@@ -115,7 +117,7 @@ describe('skill activation broker', () => {
       { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     ].map(request => JSON.stringify(request)).join('\n') + '\n'
 
-    const { stdout } = await execa(broker.command, broker.args, { input: requests, env: broker.env })
+    const { stdout } = await execa(broker.command, broker.args, { input: requests })
     const responses = stdout.split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
 
     expect(responses).toHaveLength(2)
@@ -131,11 +133,11 @@ describe('skill activation broker', () => {
     expect(codexSkillBrokerArgs(session)).toEqual([
       '-c', expect.stringContaining('mcp_servers.crosscheck.command='),
       '-c', expect.stringContaining('mcp_servers.crosscheck.args='),
-      '-c', expect.stringContaining('mcp_servers.crosscheck.env='),
     ])
+    expect(codexSkillBrokerArgs(session).join(' ')).not.toContain('CROSSCHECK_SKILL_SESSION_KEY')
   })
 
-  it('removes the session directory on close', () => {
+  it('removes the session endpoint on close', () => {
     session = createSkillActivationSession('review', [], loadBundledSkills())
     const path = session.path
     session.close()
