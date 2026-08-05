@@ -84,9 +84,12 @@ export async function runClaudeReview(
     issueContext ?? '',
     focusLine,
     customLine,
+    // Ahead of behaviorInstructions: that block ends with "the very last line of
+    // your response MUST be VERDICT: …", so anything after it reads as trailing
+    // boilerplate arriving after the prompt's terminal instruction.
+    skillSession ? renderSkillBrokerInstructions(skillSession) : '',
     behaviorInstructions,
     repositoryGuidance,
-    skillSession ? renderSkillBrokerInstructions(skillSession) : '',
   ].filter(Boolean).join('\n')
 
   // Omit --max-budget-usd when:

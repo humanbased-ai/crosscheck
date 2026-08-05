@@ -217,7 +217,7 @@ describe('runCodexFixStep', () => {
       await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '', 'default', undefined, session)
       const args = execaMock.mock.calls[0][1] as string[]
       expect(args).toContainEqual(expect.stringContaining('mcp_servers.crosscheck.command='))
-      expect(args.at(-1)).toContain('Decide from each description whether a skill applies')
+      expect(args.at(-1)).toContain('Call `list_enabled_skills`')
     } finally {
       session.close()
     }
@@ -304,7 +304,7 @@ describe('runFixStep timeout defaults', () => {
       expect(args).toContain('--mcp-config')
       expect(args).toContain('--allowedTools')
       expect(args.join(' ')).toContain('mcp__crosscheck__activate_skill')
-      expect(opts.input).toContain('Decide from each description whether a skill applies')
+      expect(opts.input).toContain('Call `list_enabled_skills`')
     } finally {
       session.close()
     }

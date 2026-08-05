@@ -180,9 +180,23 @@ export function renderSkillBrokerInstructions(session: SkillActivationSession): 
   const skills = session.enabledSkills
     .map(skill => `- ${skill.name}: ${skill.description} (by @${skill.author}, ${skill.license})`)
     .join('\n')
+  // Ordered, obligatory, and step-aware on purpose. The advisory phrasing this
+  // replaced ("decide whether a skill applies") never produced a single
+  // activation in production: a fully-specified step leaves the agent no reason
+  // to reach for an optional tool. Two further frictions are handled here —
+  // catalog descriptions are written for interactive use ("when the user wants
+  // …") and so never match a headless step, and a SKILL.md that links to files
+  // in its own package is unusable unless the agent knows read_skill_file is the
+  // only way to fetch them (Read/Grep/Glob are not granted for skill paths).
   return [
-    'Crosscheck Agent Skills are available through the crosscheck MCP server.',
-    'Decide from each description whether a skill applies to this operation. Activate only applicable skills before following their instructions.',
+    '## Agent Skills (do this first)',
+    `Crosscheck exposes Agent Skills for this ${session.stepType} step through the crosscheck MCP server. Before you begin:`,
+    '1. Call `list_enabled_skills`.',
+    `2. Judge each description against the work in front of you. The descriptions are written for interactive use, so read "when the user wants X" as "when this step is X" — this is a ${session.stepType} step.`,
+    '3. Call `activate_skill` for every skill that applies, then follow its instructions for the rest of this step.',
+    '4. If none apply, say so in one line and carry on.',
+    'A SKILL.md may link to further files inside its own package. Fetch those with `read_skill_file`, passing a path relative to the skill root — Read, Grep and Glob are not available for skill files.',
+    'Skills enabled for this step:',
     skills,
   ].join('\n')
 }
