@@ -745,6 +745,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const activatedSkills = skillSession?.activations() ?? []
       if (activatedSkills.length > 0) log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
+      // Skills were offered and the agent took none. Silent before, which is how
+      // a prompt that never triggered activation ran unnoticed for 336 steps.
+      else if (skillSession) fileLog({ level: 'warn', event: 'skills_none_activated', repo: `${owner}/${repoName}`, pr: prNumber, step_type: 'review', enabled: skillSession.enabledSkills.map(skill => skill.name) })
 
       // First attempt timed out but the delayed retry succeeded — surface a
       // soft notice on the review comment so the author knows it was a transient blip.
@@ -997,6 +1000,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const activatedSkills = skillSession?.activations() ?? []
       if (activatedSkills.length > 0) log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
+      // Skills were offered and the agent took none. Silent before, which is how
+      // a prompt that never triggered activation ran unnoticed for 336 steps.
+      else if (skillSession) fileLog({ level: 'warn', event: 'skills_none_activated', repo: `${owner}/${repoName}`, pr: prNumber, step_type: 'fix', enabled: skillSession.enabledSkills.map(skill => skill.name) })
 
       if (fixErr !== undefined) {
         skipFix(isSubscriptionLimitError(fixErr) ? 'vendor_limit' : 'fix_error')
@@ -1245,6 +1251,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const activatedSkills = skillSession?.activations() ?? []
       if (activatedSkills.length > 0) log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
+      // Skills were offered and the agent took none. Silent before, which is how
+      // a prompt that never triggered activation ran unnoticed for 336 steps.
+      else if (skillSession) fileLog({ level: 'warn', event: 'skills_none_activated', repo: `${owner}/${repoName}`, pr: prNumber, step_type: 'conflict-resolve', enabled: skillSession.enabledSkills.map(skill => skill.name) })
 
       if (appliedCount === 0) {
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
