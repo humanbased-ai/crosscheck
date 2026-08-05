@@ -85,12 +85,17 @@ export async function runClaudeReview(
     focusLine,
     customLine,
     // Ahead of behaviorInstructions: that block ends with "the very last line of
-    // your response MUST be VERDICT: …", so anything after it reads as trailing
-    // boilerplate arriving after the prompt's terminal instruction.
+    // your response MUST be VERDICT: …", and activation has to happen before the
+    // review starts, so arriving after that terminal instruction buries it.
+    // repositoryGuidance stays where it is — reference material to consult while
+    // reviewing, not an action to take first.
     skillSession ? renderSkillBrokerInstructions(skillSession) : '',
     behaviorInstructions,
     repositoryGuidance,
-  ].filter(Boolean).join('\n')
+    // Blank line between blocks (codex.ts already does this): the skill block
+    // ends in a bullet list, which would otherwise run straight into
+    // behaviorInstructions' first heading with no separator.
+  ].filter(Boolean).join('\n\n')
 
   // Omit --max-budget-usd when:
   // 1. No ANTHROPIC_API_KEY → subscription mode (claude.ai plan, budget limits don't apply)
