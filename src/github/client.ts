@@ -3,6 +3,8 @@ import { createHmac, timingSafeEqual } from 'crypto'
 import { buildAnnotation, parseAnnotation, parseAnnotationFields, type CrosscheckStepType } from '../lib/annotation.js'
 import { modelDisplayName } from '../lib/review-models.js'
 import { CROSSCHECK_REPO_URL } from '../lib/product.js'
+import { renderSkillAttributionLine } from '../skills/attribution.js'
+import type { SkillMetadata } from '../skills/broker.js'
 
 export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
@@ -1006,6 +1008,8 @@ export interface ReviewCommentBodyInput {
   nextStep?: string
   /** Workflow trigger (e.g. 'kickass') embedded so the issue_comment bridge only fires for one-step dispatches. */
   trigger?: string
+  /** Skills the reviewer activated for this step. Rendered under the attribution line. */
+  skills?: SkillMetadata[]
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -1026,7 +1030,10 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     ? `_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
     : `_Reviewed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
   const attribution = brand.reviewer_attribution || defaultAttribution
-  const footer = `\n\n---\n${attribution}`
+  // Skill receipt sits directly beneath the attribution, not in the review body —
+  // it is provenance for the run, and the body belongs to the findings.
+  const skillsLine = renderSkillAttributionLine(input.skills ?? [])
+  const footer = `\n\n---\n${attribution}${skillsLine ? `\n\n${skillsLine}` : ''}`
 
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
@@ -1069,6 +1076,7 @@ export async function postReviewComment(
   sha?: string,
   nextStep?: string,
   trigger?: string,
+  skills: SkillMetadata[] = [],
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -1089,6 +1097,7 @@ export async function postReviewComment(
       sha,
       nextStep,
       trigger,
+      skills,
     }),
   })
   return comment.id

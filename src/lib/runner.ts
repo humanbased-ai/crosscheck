@@ -789,10 +789,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const baseBody = verdict === null
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(gate.downgraded ? `${SEVERITY_GATE_NOTE}\n\n${clean}` : clean, verdict)
-      const reviewBody = retried
+      // Skills are not folded into the body — postReviewComment renders the
+      // receipt beneath the attribution footer.
+      const commentBody = retried
         ? `${buildRetriedReviewBanner(retried.timeoutMs, retried.delayMs)}\n\n${baseBody}`
         : baseBody
-      const commentBody = appendSkillAttribution(reviewBody, activatedSkills, effectiveType)
       const commentCount = countComments(rawReview)
       fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, skills_activated: activatedSkills.map(skill => skill.name), ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
 
@@ -842,6 +843,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, annotationSha,
           nextStepAnnotation,
           ctx.trigger === 'kickass' ? 'kickass' : undefined,
+          activatedSkills,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
@@ -1028,7 +1030,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             const octokit = createGithubClient(token)
             await octokit.rest.issues.createComment({
               owner, repo: repoName, issue_number: prNumber,
-              body: appendSkillAttribution(`⚠️ **Auto-fix failed**\n\nThe fix step timed out after retrying. Push a new commit or run \`crosscheck run ${pr.html_url}\` to retry manually.\n\n<!-- crosscheck: fix_failed -->`, activatedSkills, effectiveType),
+              body: appendSkillAttribution(`⚠️ **Auto-fix failed**\n\nThe fix step timed out after retrying. Push a new commit or run \`crosscheck run ${pr.html_url}\` to retry manually.\n\n<!-- crosscheck: fix_failed -->`, activatedSkills),
             })
             fileLog({ level: 'info', event: 'fix_failed_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber })
           } catch { /* best-effort notification */ }
@@ -1114,7 +1116,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             changedFiles: fixChangedFiles,
             vendor: activeVendor,
             reviewCommentBody,
-          }), activatedSkills, effectiveType)
+          }), activatedSkills)
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
           fileLog({ level: 'info', event: 'fix_applied_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })
         } catch (err) {
@@ -1155,7 +1157,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           head: fixBranch,
           base: pr.head.ref,
           title: fixPrTitle,
-          body: appendSkillAttribution(`Auto-fix by crosscheck for CR issues found in #${prNumber}.\n\nReview: https://github.com/${owner}/${repoName}/pull/${prNumber}`, activatedSkills, effectiveType),
+          body: appendSkillAttribution(`Auto-fix by crosscheck for CR issues found in #${prNumber}.\n\nReview: https://github.com/${owner}/${repoName}/pull/${prNumber}`, activatedSkills),
         })
         if (config.post_review.auto_fix.delivery.label) {
           try {
@@ -1174,7 +1176,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         try { patch = execSync('git diff', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* ignore */ }
         if (patch) {
           const octokit = createGithubClient(token)
-          const body = appendSkillAttribution(`### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\``, activatedSkills, effectiveType)
+          const body = appendSkillAttribution(`### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\``, activatedSkills)
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
@@ -1377,7 +1379,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           owner, repo: repoName, sha: newSha,
           conflictCount: conflictedFiles.length,
           files: resolvedPaths.length > 0 ? resolvedPaths : conflictedFiles,
-        }), activatedSkills, effectiveType)
+        }), activatedSkills)
         await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         fileLog({ level: 'info', event: 'conflict_resolved_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })
       } catch (err) {
