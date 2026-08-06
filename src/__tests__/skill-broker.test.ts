@@ -8,6 +8,7 @@ import {
   codexSkillBrokerArgs,
   createSkillActivationSession,
   handleSkillBrokerRequest,
+  renderSkillBrokerInstructions,
   skillBrokerCommand,
   type SkillActivationSession,
 } from '../skills/broker.js'
@@ -34,6 +35,28 @@ describe('skill activation broker', () => {
     ])
     expect(session.enabledSkills[0]).not.toHaveProperty('path')
     expect(session.activations()).toEqual([])
+  })
+
+  it('asks for the listing as an obligatory first step, naming the step type', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+
+    const instructions = renderSkillBrokerInstructions(session)
+
+    expect(instructions).toContain('do this first')
+    expect(instructions).toContain('Call `list_enabled_skills`')
+    expect(instructions).toContain('this review step')
+    // The catalog's descriptions are phrased for interactive use; without this
+    // the agent measures them against a user request that never arrives.
+    expect(instructions).toContain('when the user wants X')
+    // SKILL.md links to sibling files that no granted tool can open.
+    expect(instructions).toContain('`read_skill_file`')
+    expect(instructions).toContain('- code-review-skill:')
+  })
+
+  it('renders nothing when no skill is enabled for the step', () => {
+    session = createSkillActivationSession('review', [], loadBundledSkills())
+
+    expect(renderSkillBrokerInstructions(session)).toBe('')
   })
 
   it('loads and records a skill only when the agent activates it', () => {

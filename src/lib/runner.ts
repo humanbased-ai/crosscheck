@@ -21,7 +21,7 @@ import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js
 import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
-import { buildStepIdentityFields } from '../lib/event-fields.js'
+import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
@@ -558,6 +558,26 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     skillSessions.set(stepName, session)
     return session
   }
+  // Skills were offered and the agent took none. Silent before, which is how a
+  // prompt that never triggered activation ran unnoticed for 336 steps.
+  // `skills_activated: []` on the *_complete events says something similar but
+  // quietly; what is new here is `enabled` (what was actually on offer) and the
+  // warn level, which makes a step that activates nothing greppable on its own.
+  const logSkillsNoneActivated = (
+    session: SkillActivationSession,
+    identity: StepIdentityFields | { step_type: 'fix' | 'conflict-resolve'; step_name: string },
+  ): void => {
+    // skillSessionFor hands back a session whenever the catalog is non-empty,
+    // but createSkillActivationSession filters that catalog down to
+    // config.skills.enabled — so a configured name that never resolved (typo,
+    // skill not installed) leaves enabledSkills empty, and then
+    // renderSkillBrokerInstructions renders nothing at all. Nothing was offered,
+    // so nothing was refused: that is broken config, not agent non-compliance,
+    // and logging it here would conflate the two causes the event exists to
+    // tell apart.
+    if (session.enabledSkills.length === 0) return
+    fileLog({ level: 'warn', event: 'skills_none_activated', repo: `${owner}/${repoName}`, pr: prNumber, ...identity, enabled: session.enabledSkills.map(skill => skill.name) })
+  }
 
   // Linear write-back identity. Resolved up front — before any expensive step —
   // and allowed to throw. The contract is that a configured-but-failing
@@ -745,6 +765,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const activatedSkills = skillSession?.activations() ?? []
       if (activatedSkills.length > 0) log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
+      else if (skillSession) logSkillsNoneActivated(skillSession, stepIdentity)
 
       // First attempt timed out but the delayed retry succeeded — surface a
       // soft notice on the review comment so the author knows it was a transient blip.
@@ -997,6 +1018,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const activatedSkills = skillSession?.activations() ?? []
       if (activatedSkills.length > 0) log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
+      else if (skillSession) logSkillsNoneActivated(skillSession, { step_type: 'fix', step_name: step.name })
 
       if (fixErr !== undefined) {
         skipFix(isSubscriptionLimitError(fixErr) ? 'vendor_limit' : 'fix_error')
@@ -1245,6 +1267,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const activatedSkills = skillSession?.activations() ?? []
       if (activatedSkills.length > 0) log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
+      else if (skillSession) logSkillsNoneActivated(skillSession, { step_type: 'conflict-resolve', step_name: step.name })
 
       if (appliedCount === 0) {
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }

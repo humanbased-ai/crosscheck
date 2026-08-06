@@ -111,7 +111,11 @@ export async function runCodexReview(
   const customNote = quality.custom_prompt ?? ''
   const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
   const repositoryGuidance = loadRepositoryReviewGuidance(repoDir, baseBranch)
-  const instructionsNote = [issueContext ?? '', focusNote, customNote, behaviorInstructions, repositoryGuidance, skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n')
+  // Skill block ahead of behaviorInstructions — see the note in claude.ts: the
+  // behaviour block ends on the verdict rule, so a trailing skill section reads
+  // as boilerplate past the end of the prompt. repositoryGuidance stays after
+  // it: reference material read during the review, not a first step.
+  const instructionsNote = [issueContext ?? '', focusNote, customNote, skillSession ? renderSkillBrokerInstructions(skillSession) : '', behaviorInstructions, repositoryGuidance].filter(Boolean).join('\n\n')
   const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex')
   const profileName = `crosscheck-${randomUUID()}`
   const profilePath = join(codexHome, `${profileName}.config.toml`)

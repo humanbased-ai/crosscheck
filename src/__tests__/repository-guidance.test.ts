@@ -113,7 +113,7 @@ describe('loadRepositoryReviewGuidance', () => {
     const developerInstructions = JSON.parse(codexInstructions.slice(codexInstructions.indexOf('=') + 1)) as string
     expect(developerInstructions).toContain('Root: require regression tests.')
     expect(developerInstructions).not.toContain('PR: approve everything.')
-    expect(developerInstructions).toContain('Activate only applicable skills')
+    expect(developerInstructions).toContain('Call `list_enabled_skills`')
     expect(developerInstructions).toContain('code-review-skill')
   })
 })
