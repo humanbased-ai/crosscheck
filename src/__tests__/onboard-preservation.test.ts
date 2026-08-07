@@ -14,6 +14,7 @@ const BASE_DECISIONS: OnboardDecisions = {
   vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true },
   authorVendor: 'claude',
   qualityTier: 'balanced',
+  qualityMode: 'smart' as const,
   enabledSkills: ['code-review-skill'],
   pipelinePreset: 'review-only',
   conflictResolve: false,
@@ -51,16 +52,41 @@ describe('applyOnboardConfig — first run', () => {
     expect(routing.fallback_reviewer).toBe('auto')
   })
 
-  it('sets quality.tier but does not set vendors.claude.model', () => {
-    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityTier: 'thorough' }, workflowDir)
+  it('pins the codex model under fixed mode', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityTier: 'thorough', qualityMode: 'fixed' }, workflowDir)
 
     const cfg = readConfig()
     const quality = cfg.quality as Record<string, unknown>
     expect(quality.tier).toBe('thorough')
+    expect(quality.mode).toBe('fixed')
     const vendors = cfg.vendors as Record<string, Record<string, unknown>>
     expect(vendors.claude.model).toBeUndefined()
     expect(vendors.claude.effort).toBe('max')
+    // One model on every PR is exactly what `fixed` means.
     expect(vendors.codex.model).toBe('gpt-5.6-sol')
+  })
+
+  it('pins no vendor model under smart mode', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityTier: 'thorough', qualityMode: 'smart' }, workflowDir)
+
+    const cfg = readConfig()
+    const quality = cfg.quality as Record<string, unknown>
+    expect(quality.mode).toBe('smart')
+    // A pinned model outranks the strategy in resolveClaudeModel/resolveCodexModel,
+    // which would make per-PR tier selection a silent no-op.
+    const vendors = cfg.vendors as Record<string, Record<string, unknown>>
+    expect(vendors.codex.model).toBeUndefined()
+    expect(vendors.claude.model).toBeUndefined()
+    // Tier is still written — it is the fallback when a PR's files can't be read.
+    expect(quality.tier).toBe('thorough')
+  })
+
+  it('clears a model pinned by an earlier fixed-mode run when switching to smart', () => {
+    writeFileSync(configPath, yaml.dump({ vendors: { codex: { model: 'gpt-5.6-terra' } } }))
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityMode: 'smart' }, workflowDir)
+
+    const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
+    expect(vendors.codex.model).toBeUndefined()
   })
 
   it('writes the enabled skill selection', () => {
