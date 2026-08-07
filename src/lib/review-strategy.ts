@@ -19,6 +19,9 @@ const require = createRequire(import.meta.url)
 export type Tier = QualityConfig['tier']
 export type Domain = 'frontend' | 'backend'
 
+/** Ordered effort ladder. Index-based so escalation is a step, not a lookup. */
+const EFFORT_LADDER = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
 const MatchSchema = z.object({
   all_files_match: z.array(z.string()).optional(),
   any_path_matches: z.array(z.string()).optional(),
@@ -38,7 +41,9 @@ const PRClassSchema = z.object({
   label: z.string(),
   match: MatchSchema,
   tier: z.enum(['fast', 'balanced', 'thorough']).nullable(),
-  effort: z.string().nullable(),
+  // Not z.string(): a typo ("higgh") would validate, then read as -1 in
+  // clampEffort and silently drop the whole class to the model's lowest level.
+  effort: z.enum(EFFORT_LADDER).nullable(),
   steps: z.array(z.string()),
   focus: z.string().optional(),
   reason: z.string(),
@@ -56,7 +61,9 @@ const StrategySchema = z.object({
     tiers: z.record(z.string(), z.string()),
   }).passthrough()),
   domains: z.record(z.string(), z.unknown()),
-  pr_classes: z.array(PRClassSchema),
+  // .min(1): resolveReviewStrategy falls back to the last entry, which is
+  // undefined — and throws on `cls.id` — for an empty list.
+  pr_classes: z.array(PRClassSchema).min(1),
   ladder: z.object({
     max_blocking_findings: z.number(),
     max_rounds: z.number(),
@@ -68,15 +75,21 @@ const StrategySchema = z.object({
 const raw: unknown = require('../config/review-strategy.json')
 const STRATEGY = StrategySchema.parse(raw)
 
-/** Ordered effort ladder. Index-based so escalation is a step, not a lookup. */
-const EFFORT_LADDER = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 const TIER_LADDER: Tier[] = ['fast', 'balanced', 'thorough']
+
+/** Position on EFFORT_LADDER; -1 for null or an unrecognised level. */
+function effortIndex(effort: string | null): number {
+  return effort === null ? -1 : EFFORT_LADDER.indexOf(effort as (typeof EFFORT_LADDER)[number])
+}
 
 const FRONTEND_EXT = /\.(tsx|jsx|vue|svelte|css|scss|less|html)$/i
 const BACKEND_EXT = /\.(py|go|rs|java|rb|php|sql|ts)$/i
 const DOC_EXT = /\.(md|mdx|rst|adoc)$/i
 const CONFIG_EXT = /(\.(json|ya?ml|toml|ini|lock|txt|csv|svg|png|jpe?g)$|^\.github\/)/i
-const TEST_PATH = /(test|spec|__tests__|\.test\.|\.spec\.|e2e|fixtures?)/i
+// Anchored on path segments and extensions. Unanchored, `spec` matched
+// src/lib/pr-spec.ts and `test` matched any latest.ts, routing ordinary source
+// PRs to test_only with a test-focused prompt.
+const TEST_PATH = /((^|\/)(__tests__|tests?|e2e|fixtures?)(\/|$)|\.(test|spec)\.)/i
 const GENERATED = /((^|\/)(dist|build|node_modules)\/|\.(lock|sum)$|package-lock|pnpm-lock|yarn\.lock|\.(pb|_pb2)\.[a-z]+$|(^|\/)generated\/)/i
 
 export interface PRContext {
@@ -163,7 +176,10 @@ function matches(cls: z.infer<typeof PRClassSchema>, pr: PRContext): boolean {
     const srcFiles = files.filter(f => !GENERATED.test(f) && !CONFIG_EXT.test(f))
     // Churn is only attributable per-file with a full diff; approximate with the
     // PR total when the change is entirely source, which is the case that matters.
-    const churn = srcFiles.length === files.length ? additions + deletions : 0
+    // Fails CLOSED when churn cannot be attributed: falling back to 0 passed
+    // every cap, so one stray config file routed a 5,000-line change to the
+    // core runner into `trivial` — fast tier, no recheck.
+    const churn = srcFiles.length === files.length ? additions + deletions : Infinity
     if (churn > m.src_churn_max) return false
   }
 
@@ -228,15 +244,22 @@ export function escalate(
 ): { tier: Tier; effort: string | null } {
   if (round <= 1) return base
 
-  const levels = effortLevelsFor(model)
+  // Clamp the target to what the model accepts, then compare it against what the
+  // round before already asked for. An exact `levels.includes(target)` test made
+  // round 3 miss on any model whose ladder tops out below xhigh (deepseek:
+  // none/high/max) and return base.effort — weaker than round 2.
   const target = round >= 3 ? 'xhigh' : 'high'
+  const clamped = clampEffort(model, target)
+  const previous = round >= 3 ? clampEffort(model, 'high') ?? base.effort : base.effort
+  if (clamped !== null && effortIndex(clamped) > effortIndex(previous)) {
+    return { tier: base.tier, effort: clamped }
+  }
 
-  if (levels.includes(target)) return { tier: base.tier, effort: target }
-
-  // No effort control on this model — promote a tier instead, capped at thorough.
+  // Effort cannot rise on this model — promote a tier instead (the strategy's
+  // ladder.effort_fallback), capped at thorough.
   const idx = TIER_LADDER.indexOf(base.tier)
   const promoted = TIER_LADDER[Math.min(idx + 1, TIER_LADDER.length - 1)]
-  return { tier: promoted, effort: base.effort }
+  return { tier: promoted, effort: clamped ?? base.effort }
 }
 
 /** Clamps a requested effort to what the model actually accepts. */
@@ -245,7 +268,9 @@ export function clampEffort(model: string, effort: string | null): string | null
   const levels = effortLevelsFor(model)
   if (levels.length === 0) return null
   if (levels.includes(effort)) return effort
-  // Snap down to the nearest supported level rather than failing the call.
+  // Snap down to the nearest supported level rather than failing the call. When
+  // the model supports nothing at or below the request, snap UP to its lowest
+  // level instead — sending an effort the model rejects fails the call outright.
   const want = EFFORT_LADDER.indexOf(effort as (typeof EFFORT_LADDER)[number])
   for (let i = want; i >= 0; i--) {
     if (levels.includes(EFFORT_LADDER[i])) return EFFORT_LADDER[i]

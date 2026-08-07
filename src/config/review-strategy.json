@@ -108,8 +108,9 @@
     },
     {
       "id": "risky", "label": "Security / data-critical",
+      "_any_path_matches_note": "Anchored on path segments and extensions. Unanchored, `auth` matched author/authors/oauth and `migration` matched MIGRATION_AND_GROWTH.md, promoting a pure-docs PR to thorough with a full fix/recheck loop.",
       "match": {
-        "any_path_matches": ["auth", "token", "secret", "credential", "password", "crypto", "payment", "billing", "migration", "\\.sql$", "permission", "rbac", "session", "cors"],
+        "any_path_matches": ["(^|/)auth([/.]|$)", "(^|/)tokens?([/.]|$)", "(^|/)secrets?([/.]|$)", "(^|/)credentials?([/.]|$)", "(^|/)passwords?([/.]|$)", "(^|/)crypto([/.]|$)", "(^|/)payments?([/.]|$)", "(^|/)billing([/.]|$)", "(^|/)migrations?([/.]|$)", "\\.sql$", "(^|/)permissions?([/.]|$)", "(^|/)rbac([/.]|$)", "(^|/)sessions?([/.]|$)", "(^|/)cors([/.]|$)"],
         "or_labels": ["risk:T3"],
         "or_hotfix_to_default_branch": true
       },
@@ -132,7 +133,7 @@
     },
     {
       "id": "test_only", "label": "Test-only",
-      "match": { "all_files_match": ["(test|spec|__tests__|\\.test\\.|\\.spec\\.|e2e|fixtures?)"] },
+      "match": { "all_files_match": ["((^|/)(__tests__|tests?|e2e|fixtures?)(/|$)|\\.(test|spec)\\.)"] },
       "tier": "fast", "effort": "medium", "steps": ["review", "fix"],
       "focus": "assertions that cannot fail, over-mocking that voids the test, coverage claimed but not exercised",
       "reason": "tests only - no production code path changes"

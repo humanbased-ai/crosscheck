@@ -47,7 +47,7 @@ quality:
   #   ─────────  ───────────────────  ───────────  ───────  ──────
   #   fast       Haiku 4.5 · low      GPT-5.6 Luna · low    ~10s  lowest
   #   balanced   Sonnet 5 · medium    GPT-5.6 Terra · med   ~30s  standard
-  #   thorough   Opus 4.8 · max       GPT-5.6 Sol · high    ~60s  higher
+  #   thorough   Opus 5 · max         GPT-5.6 Sol · high    ~60s  higher
   #
   # crosscheck onboard writes these automatically when you pick a tier.
   # You can override individual vendor settings in the vendors: block below.
