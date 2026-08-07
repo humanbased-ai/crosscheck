@@ -72,7 +72,7 @@ describe('loadRepositoryReviewGuidance', () => {
 
     const { execa } = await import('execa')
     const execaMock = vi.mocked(execa) as ReturnType<typeof vi.fn>
-    const quality = { tier: 'balanced', focus: [] } as QualityConfig
+    const quality = { tier: 'balanced', mode: 'smart', focus: [] } as QualityConfig
     const claudeVendor = { effort: 'medium' } as VendorConfig
     const codexVendor = { auth: 'subscription' } as CodexVendorConfig
     let codexInstructions = ''

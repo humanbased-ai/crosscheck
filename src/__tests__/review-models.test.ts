@@ -29,7 +29,10 @@ describe('review model resolution', () => {
   it('resolves Claude models by tier', () => {
     expect(resolveClaudeModel(quality('fast'))).toBe('claude-haiku-4-5-20251001')
     expect(resolveClaudeModel(quality('balanced'))).toBe('claude-sonnet-5')
-    expect(resolveClaudeModel(quality('thorough'))).toBe('claude-opus-4-8')
+    // thorough moved from the legacy claude-opus-4-8 to claude-opus-5 — identical
+    // $5/$25 pricing, higher coding benchmark score. The stale pin was a silent
+    // capability loss.
+    expect(resolveClaudeModel(quality('thorough'))).toBe('claude-opus-5')
   })
 
   it('honors an explicit vendors.claude.model over the tier mapping', () => {
@@ -41,7 +44,7 @@ describe('review model resolution', () => {
   })
 
   it('falls back to the tier mapping when vendors.claude.model is unset', () => {
-    expect(resolveClaudeModel(quality('thorough'), claudeVendor(null))).toBe('claude-opus-4-8')
+    expect(resolveClaudeModel(quality('thorough'), claudeVendor(null))).toBe('claude-opus-5')
   })
 
   it('resolves Codex API-key models by tier and configured override', () => {

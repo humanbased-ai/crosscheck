@@ -21,23 +21,47 @@ const reviewModelTierConfig = ReviewModelTierConfigSchema.parse(rawReviewModelTi
 export const CLAUDE_TIER_MODELS: Record<QualityConfig['tier'], string> = reviewModelTierConfig.claude
 export const CODEX_TIER_MODELS_API: Record<QualityConfig['tier'], string> = reviewModelTierConfig.codex_api
 
-export function resolveClaudeModel(quality: QualityConfig, vendor?: VendorConfig): string {
+/**
+ * The tier in force for one call. Under `quality.mode: 'smart'` the per-PR
+ * strategy wins; otherwise the single configured tier applies. Falls back to the
+ * configured tier whenever no strategy resolved — one-shot commands, or a PR
+ * whose file list could not be read.
+ */
+export function effectiveTier(
+  quality: QualityConfig,
+  strategy?: { tier: QualityConfig['tier'] | null } | null,
+): QualityConfig['tier'] {
+  if (quality.mode === 'smart' && strategy?.tier) return strategy.tier
+  return quality.tier
+}
+
+export function resolveClaudeModel(
+  quality: QualityConfig,
+  vendor?: VendorConfig,
+  strategy?: { tier: QualityConfig['tier'] | null } | null,
+): string {
   // An explicit vendors.claude.model wins over the tier mapping. The claude CLI
   // accepts --model under both subscription and api-key auth, so we honor it
   // regardless of auth instead of silently dropping it.
   if (vendor?.model) return vendor.model
-  return CLAUDE_TIER_MODELS[quality.tier] ?? CLAUDE_TIER_MODELS.balanced
+  return CLAUDE_TIER_MODELS[effectiveTier(quality, strategy)] ?? CLAUDE_TIER_MODELS.balanced
 }
 
-export function resolveCodexModel(quality: QualityConfig, vendor: CodexVendorConfig): string {
+export function resolveCodexModel(
+  quality: QualityConfig,
+  vendor: CodexVendorConfig,
+  strategy?: { tier: QualityConfig['tier'] | null } | null,
+): string {
+  const tier = effectiveTier(quality, strategy)
   // An explicitly configured model wins under either auth — the codex CLI
   // accepts -c model= with subscription (ChatGPT) auth too. Only the built-in
   // tier mapping stays api-key-only: with nothing configured, subscription
-  // users keep the CLI's own default model.
-  const explicit = vendor.model || vendor.model_tiers?.[quality.tier]
+  // users keep the CLI's own default model, because the gpt-5.6-* IDs need
+  // codex >= 0.147.0 and would 400 on an older CLI.
+  const explicit = vendor.model || vendor.model_tiers?.[tier]
   if (explicit) return explicit
   if (vendor.auth !== 'api-key') return 'default'
-  return CODEX_TIER_MODELS_API[quality.tier] || CODEX_TIER_MODELS_API.balanced
+  return CODEX_TIER_MODELS_API[tier] || CODEX_TIER_MODELS_API.balanced
 }
 
 // Derives a display name from the regular claude model ID shape:

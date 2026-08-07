@@ -14,18 +14,18 @@
     {
       "name": "Anthropic model catalog",
       "url": "https://platform.claude.com/docs/en/about-claude/models/overview",
-      "checks": ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8"]
+      "checks": ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5"]
     },
     {
       "name": "Anthropic model selection guide",
       "url": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model",
-      "checks": ["Claude Haiku 4.5", "Claude Sonnet 5", "Claude Opus 4.8"]
+      "checks": ["Claude Haiku 4.5", "Claude Sonnet 5", "Claude Opus 5"]
     }
   ],
   "claude": {
     "fast": "claude-haiku-4-5-20251001",
     "balanced": "claude-sonnet-5",
-    "thorough": "claude-opus-4-8"
+    "thorough": "claude-opus-5"
   },
   "codex_api": {
     "fast": "gpt-5.6-luna",

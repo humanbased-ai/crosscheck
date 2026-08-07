@@ -214,9 +214,24 @@ describe('model resolution honours the strategy', () => {
     expect(resolveCodexModel(quality(), vendor)).toBe('gpt-5.6-sol')
   })
 
-  it('resolves a codex tier model under subscription auth rather than default', () => {
-    const vendor = { enabled: true, model: null, auth: 'subscription', effort: 'medium', timeout_sec: null, quality: 'medium' } as CodexVendorConfig
+  it('drives the codex tier model from the strategy under api-key auth', () => {
+    const vendor = { enabled: true, model: null, auth: 'api-key', effort: 'medium', timeout_sec: null, quality: 'medium' } as CodexVendorConfig
     expect(resolveCodexModel(quality(), vendor, { tier: 'thorough' })).toBe('gpt-5.6-sol')
+    expect(resolveCodexModel(quality(), vendor, { tier: 'fast' })).toBe('gpt-5.6-luna')
+  })
+
+  it('keeps the CLI default under subscription auth with nothing configured', () => {
+    // The built-in tier mapping stays api-key-only on purpose: the gpt-5.6-*
+    // IDs require codex >= 0.147.0 and would 400 on an older CLI, so a
+    // subscription user with no model configured keeps the CLI's own default.
+    const vendor = { enabled: true, model: null, auth: 'subscription', effort: 'medium', timeout_sec: null, quality: 'medium' } as CodexVendorConfig
+    expect(resolveCodexModel(quality(), vendor, { tier: 'thorough' })).toBe('default')
+  })
+
+  it('drives model_tiers selection from the strategy under subscription auth', () => {
+    const vendor = { enabled: true, model: null, auth: 'subscription', effort: 'medium', timeout_sec: null, quality: 'medium', model_tiers: { thorough: 'gpt-5.6-sol' } } as CodexVendorConfig
+    expect(resolveCodexModel(quality(), vendor, { tier: 'thorough' })).toBe('gpt-5.6-sol')
+    expect(resolveCodexModel(quality(), vendor, { tier: 'fast' })).toBe('default')
   })
 })
 
