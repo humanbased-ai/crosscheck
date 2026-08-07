@@ -162,7 +162,7 @@ export async function runCodexReview(
         const review = rawReview.includes('VERDICT:')
           ? rawReview
           : `${rawReview}\n\nVERDICT: ${inferVerdictFromCodexOutput(rawReview)}`
-        return { review, tokensUsed, model, retried }
+        return { review, tokensUsed, model, effort: reasoningEffort, retried }
       } finally {
         rmSync(profilePath, { force: true })
       }

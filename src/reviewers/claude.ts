@@ -14,6 +14,14 @@ const EFFORT_MAP: Record<string, string> = {
   max: 'max',
 }
 
+// Whitelist rather than translation — anything outside the schema's vocabulary
+// falls back to medium instead of reaching the CLI as an arbitrary string.
+// Shared with the fix and conflict-resolve steps so every Claude call in a run
+// uses the same effort, and the comment can report it.
+export function claudeEffort(effort?: string): string {
+  return (effort && EFFORT_MAP[effort]) ?? 'medium'
+}
+
 // Detect transient Claude API errors that should be retried:
 // - 429 session limit: "You've hit your session limit"
 // - Socket disconnect: "socket connection was closed unexpectedly"
@@ -33,6 +41,9 @@ export interface ReviewResult {
   inputTokens?: number
   outputTokens?: number
   model: string
+  // Reasoning effort actually handed to the CLI (post-whitelist), so the posted
+  // comment reports what ran rather than what the config asked for.
+  effort?: string
   // Set only when the first attempt timed out and the delayed retry succeeded —
   // signals a transient blip that resolved on its own. The runner surfaces this
   // as a soft banner on the posted review comment.
@@ -69,7 +80,7 @@ export async function runClaudeReview(
   skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
   const model = resolveClaudeModel(quality, vendor)
-  const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
+  const effort = claudeEffort(vendor.effort)
   const focusLine = quality.focus.length > 0
     ? `Focus areas: ${quality.focus.join(', ')}.`
     : ''
@@ -151,9 +162,9 @@ export async function runClaudeReview(
         // string: `model` may be an alias ("opus") and the CLI resolves or
         // substitutes it. Fall back to the requested value when absent.
         const actualModel = primaryModelFromUsage(parsed.modelUsage)
-        return { review, tokensUsed, inputTokens, outputTokens, model: actualModel ?? model, retried }
+        return { review, tokensUsed, inputTokens, outputTokens, model: actualModel ?? model, effort, retried }
       } catch {
-        return { review: raw, model, retried }
+        return { review: raw, model, effort, retried }
       }
     } catch (err: unknown) {
       const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }

@@ -192,13 +192,16 @@ export function renderSkillBrokerInstructions(session: SkillActivationSession): 
   // Deliberately no "if none apply, say so" step: on a review step the model's
   // output IS the posted comment body, so that sentence would land above
   // `## Summary` on every review where nothing matched. The skills_none_activated
-  // log event carries that signal instead, where nobody has to read it.
+  // log event carries that signal instead, where nobody has to read it. The
+  // silence is stated outright below for the same reason — a skill that did
+  // activate is attributed in the comment footer, not narrated in the body.
   return [
     '## Agent Skills (do this first)',
     `Crosscheck exposes Agent Skills for this ${session.stepType} step through the crosscheck MCP server. Before you begin:`,
     '1. Call `list_enabled_skills`.',
     `2. Judge each description against the work in front of you. The descriptions are written for interactive use, so read "when the user wants X" as "when this step is X" — this is a ${session.stepType} step.`,
     '3. Call `activate_skill` for every skill that applies, then follow its instructions for the rest of this step. Some skills compete with one another — activating one makes the other an error, so among competing skills pick the single best fit.',
+    'Do not mention skills, activation, or these instructions in your output — crosscheck records which skills were activated and attributes them itself.',
     'A SKILL.md may link to further files inside its own package. Fetch those with `read_skill_file`, passing a path relative to the skill root — Read, Grep and Glob are not available for skill files.',
     'Skills enabled for this step:',
     skills,

@@ -19,6 +19,47 @@ describe('buildReviewCommentBody', () => {
     expect(body).toContain('model=claude-opus-4-8 type=review round=2 verdict=APPROVE service=Acme sha=abc1234')
   })
 
+  it('reports the model and effort the review actually ran with in the attribution', () => {
+    const body = buildReviewCommentBody({
+      body: 'VERDICT: APPROVE',
+      reviewer: 'claude',
+      verdict: 'APPROVE',
+      model: 'claude-opus-4-8',
+      effort: 'high',
+      stepType: 'review',
+    })
+
+    expect(body).toContain('via [Crosscheck](https://github.com/humanbased-ai/crosscheck)_ _(Opus 4.8 · high effort)_')
+  })
+
+  it('reports effort alone when the model is the vendor default', () => {
+    const body = buildReviewCommentBody({
+      body: 'VERDICT: APPROVE',
+      reviewer: 'codex',
+      verdict: 'APPROVE',
+      model: 'default',
+      effort: 'xhigh',
+      stepType: 'review',
+    })
+
+    expect(body).toContain('_(xhigh effort)_')
+  })
+
+  it('appends run details to a branded attribution rather than replacing it', () => {
+    const body = buildReviewCommentBody({
+      body: 'VERDICT: APPROVE',
+      reviewer: 'claude',
+      verdict: 'APPROVE',
+      brand: { reviewer_attribution: '**Acme Review Bot**' },
+      model: 'claude-opus-4-8',
+      effort: 'max',
+      stepType: 'review',
+    })
+
+    expect(body).toContain('**Acme Review Bot** _(Opus 4.8 · max effort)_')
+    expect(body).not.toContain('Reviewed with [Claude Code]')
+  })
+
   it('omits model and service segments for default Codex subscription auth', () => {
     const body = buildReviewCommentBody({
       body: 'VERDICT: NEEDS_WORK',

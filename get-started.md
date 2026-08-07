@@ -1397,7 +1397,7 @@ codex review --base <base-branch> --title "<pr-title>"
 
 The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. An explicit `vendors.codex.model` (or matching `model_tiers` entry) is passed as `-c model=...` under either auth mode. When unset: `auth: subscription` passes no model flag (the Codex CLI picks its default), while `auth: api-key` selects the model by quality tier (`fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `thorough` → `gpt-5.6-sol`).
 
-Reasoning effort comes from `vendors.codex.effort` and is always passed through as `-c model_reasoning_effort=...`. The values match the codex CLI tiers 1:1 — `low` (Light), `medium`, `high`, `xhigh` (Extra High), `max`, `ultra`. Not every model supports every tier: `ultra` is terra/sol only, and pre-5.6 models stop at `xhigh` — the CLI rejects unsupported combinations. Higher tiers can multiply review wall-clock time; pair them with `timeout_sec`.
+Reasoning effort comes from `vendors.codex.effort` and is always passed through as `-c model_reasoning_effort=...` — for the review step and for the auto-fix step (`codex exec`) alike. The values match the codex CLI tiers 1:1 — `low` (Light), `medium`, `high`, `xhigh` (Extra High), `max`, `ultra`. Not every model supports every tier: `ultra` is terra/sol only, and pre-5.6 models stop at `xhigh` — the CLI rejects unsupported combinations. Higher tiers can multiply review wall-clock time; pair them with `timeout_sec`.
 
 ### How Claude reviews run
 
@@ -1412,7 +1412,16 @@ claude \
   "<prompt>"
 ```
 
-`--bare` makes execution fast and deterministic. `--allowedTools` limits Claude to read-only git operations on the cloned repo.
+`--bare` makes execution fast and deterministic. `--allowedTools` limits Claude to read-only git operations on the cloned repo. `vendors.claude.effort` drives `--effort` for every Claude step — review, recheck, auto-fix and conflict-resolve.
+
+Every comment crosscheck posts closes with the model and effort the step actually ran with, plus any skills the agent activated:
+
+```
+---
+_Reviewed with Claude Code via Crosscheck_ _(Opus 4.8 · high effort)_
+
+_Skills: code-review-skill (by @awesome-skills, MIT)_
+```
 
 ### Deduplication
 

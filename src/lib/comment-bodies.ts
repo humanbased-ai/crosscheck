@@ -3,6 +3,42 @@
 // N commits" line. Pure functions — kept here so they can be unit-tested
 // without exercising the runner.
 import { CROSSCHECK_REPO_URL } from './product.js'
+import { modelDisplayName } from './review-models.js'
+import { renderSkillAttributionLine } from '../skills/attribution.js'
+import type { SkillMetadata } from '../skills/broker.js'
+
+// Every card crosscheck posts closes the same way: a rule, one italic line
+// naming the CLI that did the work and how it was configured, then the skill
+// receipt beneath it. Shared here so review, fix and conflict-resolve can't
+// drift apart.
+export interface AttributionFooterInput {
+  /** Past-tense verb for what the step did: Reviewed / Fixed / Resolved. */
+  action: string
+  /** 'claude' | 'codex'. Anything else (or unset) attributes to Claude Code. */
+  vendor?: string
+  /** Resolved model id; 'default' and unset render no model segment. */
+  model?: string
+  /** Reasoning effort the CLI actually ran with. */
+  effort?: string
+  skills?: SkillMetadata[]
+  /** brand.reviewer_attribution — replaces the sentence, keeps the run details. */
+  override?: string
+}
+
+export function buildAttributionFooter(input: AttributionFooterInput): string {
+  const vendorLink = input.vendor === 'codex'
+    ? '[OpenAI Codex](https://openai.com/codex)'
+    : '[Claude Code](https://claude.ai/code)'
+  const sentence = input.override
+    || `_${input.action} with ${vendorLink} via [Crosscheck](${CROSSCHECK_REPO_URL})_`
+  // Its own italic run so a branded override keeps whatever markdown it uses.
+  const runDetail = [
+    modelDisplayName(input.model ?? 'default'),
+    input.effort ? `${input.effort} effort` : null,
+  ].filter(Boolean).join(' · ')
+  const skillsLine = renderSkillAttributionLine(input.skills ?? [])
+  return `---\n${sentence}${runDetail ? ` _(${runDetail})_` : ''}${skillsLine ? `\n\n${skillsLine}` : ''}`
+}
 
 // Cap the file list at this length to keep comment bodies readable when a
 // resolve touches many files.
@@ -40,10 +76,16 @@ export interface FixAppliedCommentInput {
   vendor?: string
   /** Body of the review comment the fix addressed. Issue points are extracted and listed. */
   reviewCommentBody?: string
+  /** Model the fix ran with. Rendered in the attribution. */
+  model?: string
+  /** Reasoning effort the fix ran with. Rendered in the attribution. */
+  effort?: string
+  /** Skills the fix step activated. Rendered beneath the attribution. */
+  skills?: SkillMetadata[]
 }
 
 export function buildFixAppliedCommentBody(input: FixAppliedCommentInput): string {
-  const { owner, repo, sha, appliedCount, reviewCommentId, changedFiles, vendor, reviewCommentBody } = input
+  const { owner, repo, sha, appliedCount, reviewCommentId, changedFiles, vendor, reviewCommentBody, model, effort, skills } = input
   const shortSha = sha.slice(0, 7)
   const commitUrl = `https://github.com/${owner}/${repo}/commit/${sha}`
   const backlink = reviewCommentId
@@ -73,14 +115,44 @@ export function buildFixAppliedCommentBody(input: FixAppliedCommentInput): strin
     if (remainder > 0) lines.push(`- _...and ${remainder} more_`)
   }
 
-  const isClaude = !vendor || vendor === 'claude'
-  const vendorAttribution = isClaude
-    ? `_Fixed with [Claude Code](https://claude.ai/code) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
-    : `_Fixed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
-
-  lines.push('', '---', vendorAttribution, '', '<!-- crosscheck: fix_applied -->')
+  lines.push(
+    '',
+    buildAttributionFooter({ action: 'Fixed', vendor, model, effort, skills }),
+    '',
+    '<!-- crosscheck: fix_applied -->',
+  )
 
   return lines.join('\n')
+}
+
+export interface FixFailedCommentInput {
+  prUrl: string
+  vendor?: string
+  model?: string
+  effort?: string
+  skills?: SkillMetadata[]
+}
+
+// Posted when the fix step times out after its retry. Nothing was produced, so
+// the footer reports rather than claims credit — but it still names the model
+// and effort that timed out, which is the first thing worth knowing.
+export function buildFixFailedCommentBody(input: FixFailedCommentInput): string {
+  return [
+    '⚠️ **Auto-fix failed**',
+    '',
+    `The fix step timed out after retrying. Push a new commit or run \`crosscheck run ${input.prUrl}\` to retry manually.`,
+    '',
+    buildAttributionFooter({
+      action: 'Attempted',
+      vendor: input.vendor,
+      model: input.model,
+      effort: input.effort,
+      skills: input.skills,
+      override: `_Reported by [Crosscheck](${CROSSCHECK_REPO_URL})_`,
+    }),
+    '',
+    '<!-- crosscheck: fix_failed -->',
+  ].join('\n')
 }
 
 // Prominent banner prepended to a review comment when the first review attempt
@@ -155,10 +227,16 @@ export interface ConflictResolvedCommentInput {
   sha: string
   conflictCount: number
   files: string[]
+  /** Model the resolver ran with. Rendered in the attribution. */
+  model?: string
+  /** Reasoning effort the resolver ran with. Rendered in the attribution. */
+  effort?: string
+  /** Skills the conflict-resolve step activated. Rendered beneath the attribution. */
+  skills?: SkillMetadata[]
 }
 
 export function buildConflictResolvedCommentBody(input: ConflictResolvedCommentInput): string {
-  const { owner, repo, sha, conflictCount, files } = input
+  const { owner, repo, sha, conflictCount, files, model, effort, skills } = input
   const shortSha = sha.slice(0, 7)
   const commitUrl = `https://github.com/${owner}/${repo}/commit/${sha}`
   const plural = conflictCount !== 1 ? 's' : ''
@@ -176,8 +254,9 @@ export function buildConflictResolvedCommentBody(input: ConflictResolvedCommentI
     '',
     `Pushed [\`${shortSha}\`](${commitUrl}).`,
     '',
-    '---',
-    `_Resolved by Claude Code via [Crosscheck](${CROSSCHECK_REPO_URL})._`,
+    // Conflict resolution is Claude-only today; the footer still routes through
+    // the shared builder so the wording matches review and fix.
+    buildAttributionFooter({ action: 'Resolved', vendor: 'claude', model, effort, skills }),
     '',
     '<!-- crosscheck: conflict_resolved -->',
   ].join('\n')

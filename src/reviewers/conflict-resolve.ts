@@ -3,6 +3,7 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import { execa } from 'execa'
 import { applyEdit } from './fix.js'
+import { claudeEffort } from './claude.js'
 import { claudeSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 
 interface ClaudeJsonOutput {
@@ -127,9 +128,14 @@ export async function runConflictResolveStep(
   model = 'default',
   timeoutMs?: number,
   skillSession?: SkillActivationSession,
-): Promise<{ appliedCount: number; resolvedPaths: string[]; tokensUsed?: number }> {
+  // Reasoning effort from vendors.claude.effort. Was never passed here, so the
+  // resolver ran at the CLI default while review and fix honored the config;
+  // the posted card now reports this value, so it has to be the real one.
+  configuredEffort?: string,
+): Promise<{ appliedCount: number; resolvedPaths: string[]; tokensUsed?: number; effort: string }> {
+  const effort = claudeEffort(configuredEffort)
   const conflictedFiles = findConflictedFiles(tmpDir)
-  if (conflictedFiles.length === 0) return { appliedCount: 0, resolvedPaths: [] }
+  if (conflictedFiles.length === 0) return { appliedCount: 0, resolvedPaths: [], effort }
 
   const filesBlock = buildConflictedFilesBlock(tmpDir, conflictedFiles)
   const prompt = PROMPT_TEMPLATE
@@ -143,7 +149,7 @@ export async function runConflictResolveStep(
     const modelArgs = model !== 'default' ? ['--model', model] : []
     const resolvedTimeout = timeoutMs === undefined ? 180_000 : timeoutMs === 0 ? undefined : timeoutMs
     const { stdout } = await execa('claude', [
-      '--print', '--output-format', 'json', ...modelArgs,
+      '--print', '--output-format', 'json', ...modelArgs, '--effort', effort,
       ...claudeSkillBrokerArgs(skillSession),
       ...(skillSession ? ['--allowedTools', [
         'mcp__crosscheck__list_enabled_skills',
@@ -173,7 +179,7 @@ export async function runConflictResolveStep(
     throw err
   }
 
-  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, resolvedPaths: [], tokensUsed }
+  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, resolvedPaths: [], tokensUsed, effort }
 
   const fileEdits = new Map<string, string>()
   const fileCache = new Map<string, string>()
@@ -208,7 +214,7 @@ export async function runConflictResolveStep(
     } catch { /* skip unwritable paths */ }
   }
 
-  return { appliedCount, resolvedPaths, tokensUsed }
+  return { appliedCount, resolvedPaths, tokensUsed, effort }
 }
 
 export interface ResolverEdit {

@@ -4,6 +4,8 @@ import { dirname, join } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
+import { claudeEffort } from './claude.js'
+import { codexReasoningEffort } from './codex.js'
 import { claudeSkillBrokerArgs, codexSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 
 interface ClaudeJsonOutput {
@@ -83,7 +85,8 @@ export async function runFixStep(
   model = 'default',
   timeoutMs?: number,
   skillSession?: SkillActivationSession,
-): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number }> {
+): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort: string }> {
+  const effort = claudeEffort(config.vendors?.claude?.effort)
   let diff = ''
   try {
     diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
@@ -103,7 +106,6 @@ export async function runFixStep(
   let tokensUsed: number | undefined
   try {
     const modelArgs = model !== 'default' ? ['--model', model] : []
-    const effort = config.vendors?.claude?.effort ?? 'medium'
     const resolvedTimeout = timeoutMs === undefined ? tierTimeoutMs(config.quality.tier) : timeoutMs === 0 ? undefined : timeoutMs
     const { stdout } = await execa('claude', [
       '--print', '--output-format', 'json', ...modelArgs, '--effort', effort,
@@ -136,7 +138,7 @@ export async function runFixStep(
     throw err
   }
 
-  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, changedFiles: [], tokensUsed }
+  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, changedFiles: [], tokensUsed, effort }
 
   let appliedCount = 0
 
@@ -225,7 +227,7 @@ export async function runFixStep(
     }
   }
 
-  return { appliedCount, changedFiles: writtenFiles, tokensUsed }
+  return { appliedCount, changedFiles: writtenFiles, tokensUsed, effort }
 }
 
 // Codex fix: codex is an agentic tool that edits files directly on disk.
@@ -262,7 +264,12 @@ export async function runCodexFixStep(
   model = 'default',
   timeoutMs?: number,
   skillSession?: SkillActivationSession,
-): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number }> {
+  // Reasoning effort from vendors.codex.effort. Was never passed here, so a
+  // configured effort applied to the review and then silently dropped for the
+  // fix; the posted card now reports this value, so it has to be the real one.
+  configuredEffort?: string,
+): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort: string }> {
+  const effort = codexReasoningEffort(configuredEffort ?? 'medium')
   let diff = ''
   try {
     diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
@@ -284,7 +291,7 @@ export async function runCodexFixStep(
   try {
     await execa(
       'codex',
-      ['exec', ...modelArgs, ...codexSkillBrokerArgs(skillSession), prompt],
+      ['exec', ...modelArgs, '-c', `model_reasoning_effort="${effort}"`, ...codexSkillBrokerArgs(skillSession), prompt],
       {
         cwd: tmpDir,
         timeout: resolvedTimeout,
@@ -306,5 +313,5 @@ export async function runCodexFixStep(
     ...(changedOutput ? changedOutput.split('\n').filter(Boolean) : []),
     ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
   ]
-  return { appliedCount: changedFiles.length, changedFiles }
+  return { appliedCount: changedFiles.length, changedFiles, effort }
 }
