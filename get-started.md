@@ -1119,7 +1119,8 @@ vendors:
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:
-  tier: balanced            # fast | balanced | thorough
+  mode: smart               # smart (default) | fixed — see Review thoroughness
+  tier: balanced            # fast | balanced | thorough (fallback under smart)
   focus:                    # narrows review scope (optional)
     - security
     - types
@@ -1267,13 +1268,73 @@ linear:                       # write review verdicts back to a Linear issue (op
   team_keys: []               # e.g. [IN] — required to match bare refs like IN-42
 ```
 
+### Review thoroughness
+
+**`quality.mode: smart` is the default.** Crosscheck classifies each PR from its
+changed-file list and adjusts model and effort to match, rather than applying one
+tier to everything. Classification runs on the already-cloned working copy, so it
+costs one `git diff` and no API call. Set `mode: fixed` to opt out.
+
+| # | PR class | Detected by | Tier | Steps |
+|---|---|---|---|---|
+| 1 | Generated / vendored | every file is a lockfile or build output | — | **PR skipped** |
+| 2 | Security / data-critical | auth, crypto, payment, migration paths; `risk:T3`; hotfix→default | `thorough` | full loop |
+| 3 | Deletion-only | ≤ 5 additions with ≥ 20 deletions | `fast` | review |
+| 4 | Docs / spec | ≥ 50% Markdown | `balanced` | review |
+| 5 | Test-only | every file is a test | `fast` | review, fix |
+| 6 | Config / infra | ≥ 50% config, no source | `balanced` | full loop |
+| 7 | Trivial | ≤ 3 files, ≤ 150 lines | `fast` | review, fix |
+| 8 | Standard | everything else | `balanced` | full loop |
+
+First match wins, and security sits second so it dominates every cheapening rule
+below it — a deletion that removes auth code, or a two-file migration, is never
+routed to `fast`.
+
+The class's step set narrows the configured pipeline and never widens it, so a
+repo pinned to review-only with `crosscheck alter` stays review-only. Rounds past
+the first escalate on measured non-convergence: effort rises where the model
+supports it, the tier is promoted where it does not.
+
+Note that classes 3 and 4 narrow to `review` alone, which also drops
+`conflict-resolve` — review-only never touches code, and auto-conflict-resolve
+is code modification. That rule normally follows an operator's explicit
+`crosscheck alter --review-only`; under smart mode the *classifier* can reach it
+too, so a docs-only or deletion-only PR with a merge conflict is reviewed but not
+auto-resolved. Set `mode: fixed` if you want auto-conflict-resolve on every PR.
+
+Every comment cites the policy that produced it:
+
+```
+<!-- crosscheck: … verdict=BLOCK strategy=1.1.0 class=risky tier=thorough … -->
+```
+
+> **Leave `vendors.*.model` unset under smart mode.** An explicit model outranks
+> the strategy, so pinning one makes per-PR selection a no-op. When that happens
+> crosscheck **withholds** the tier from the comment rather than citing one that
+> did not run. `crosscheck onboard` clears the pin — and prints what it cleared —
+> when you choose smart.
+
+Verify the policy is current with `npm run verify:strategy`. Full rationale:
+[docs/dynamic-thoroughness.md](./docs/dynamic-thoroughness.md).
+
 ### Quality tiers
 
-| Tier | Speed | Depth | Best for |
-|---|---|---|---|
-| `fast` | ~10s | Top issues only | High-volume repos, draft PRs |
-| `balanced` | ~30s | Full review, all issues explained | Default for most teams |
-| `thorough` | ~60–90s | Deep multi-pass, architecture + security | Before merging to main |
+Under `fixed`, the tier applies to every call. Under `smart`, it is the fallback
+when a PR's file list cannot be read.
+
+| Tier | Claude | Codex | Cost per review | Best for |
+|---|---|---|---|---|
+| `fast` | Haiku 4.5 | GPT-5.6 Luna | $0.24 · $0.06 | High-volume repos, draft PRs |
+| `balanced` | Sonnet 5 | GPT-5.6 Terra | $0.72 · $0.58 | Default for most teams |
+| `thorough` | Opus 5 | GPT-5.6 Sol | $1.20 · $1.44 | Before merging to main |
+
+Cost is output-token cost at 48k output tokens, the measured median for one
+review. A review is an agentic session, not a single call — expect 10–16 minutes
+of wall clock (median 643s, p90 984s across 43 logged runs). Tier changes depth
+and the subprocess timeout, not seconds-scale latency.
+
+`claude-fable-5` is banned from review: 2× Opus 5's price for a lower coding
+benchmark score.
 
 ### Issue enrichment
 

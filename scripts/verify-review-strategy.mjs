@@ -62,6 +62,21 @@ if (noEffort.length > 0 && !s.ladder.effort_fallback) {
   errors.push(`models without effort levels (${noEffort.join(', ')}) require ladder.effort_fallback to be set`)
 }
 
+// The runtime tier->model lookup lives in review-model-tiers.json; `vendors`
+// here is the documented policy. Drift between them would be silent, so assert
+// they agree for every vendor the tier map covers.
+const tierMap = JSON.parse(await readFile(new URL('../src/config/review-model-tiers.json', import.meta.url), 'utf8'))
+for (const [vendorKey, mapKey] of [['claude', 'claude'], ['codex', 'codex_api']]) {
+  const declared = s.vendors[vendorKey]?.tiers
+  const runtime = tierMap[mapKey]
+  if (!declared || !runtime) continue
+  for (const tier of ['fast', 'balanced', 'thorough']) {
+    if (declared[tier] !== runtime[tier]) {
+      errors.push(`tier map drift: review-strategy vendors.${vendorKey}.tiers.${tier} is "${declared[tier]}" but review-model-tiers ${mapKey}.${tier} is "${runtime[tier]}"`)
+    }
+  }
+}
+
 // ---- 2. freshness -------------------------------------------------------
 const ageDays = Math.floor((Date.now() - Date.parse(s.updated)) / 86_400_000)
 if (Number.isNaN(ageDays)) {

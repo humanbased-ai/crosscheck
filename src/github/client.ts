@@ -259,6 +259,10 @@ export interface OpenPR {
   headRef: string
   headRepo: string | null   // null for deleted-fork PRs; use as head.repo.full_name
   baseRef: string
+  // Feed the review strategy's `risky` class. Optional because not every
+  // listing path populates them; absent means those rules simply cannot match.
+  labels?: string[]
+  defaultBranch?: string
   body: string | null
   createdAt: string
   updatedAt: string
@@ -281,6 +285,19 @@ export interface ScanIssueComment {
 export interface ScanRepo {
   owner: string
   name: string
+}
+
+/**
+ * The paged listing types are narrower than the API response: both fields are
+ * present on the wire and feed the review strategy's `risky` class. Spread into
+ * the result so an absent field stays absent rather than becoming `undefined`.
+ */
+function widenPRListing(pr: unknown): { labels?: string[]; defaultBranch?: string } {
+  const wide = pr as { labels?: Array<{ name: string }>; base?: { repo?: { default_branch?: string } } }
+  return {
+    ...(wide.labels !== undefined && { labels: wide.labels.map(l => l.name) }),
+    ...(wide.base?.repo?.default_branch !== undefined && { defaultBranch: wide.base.repo.default_branch }),
+  }
 }
 
 export async function listOpenPRs(
@@ -321,6 +338,7 @@ export async function listOpenPRs(
         headRef: pr.head.ref,
         headRepo: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref,
+        ...widenPRListing(pr),
         body: pr.body,
         createdAt: pr.created_at,
         updatedAt: pr.updated_at,
@@ -422,6 +440,7 @@ export async function listOpenPRsForScan(owner: string, repo: string, token: str
         headRef: pr.head.ref,
         headRepo: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref,
+        ...widenPRListing(pr),
         createdAt: pr.created_at,
         updatedAt: pr.updated_at,
         url: pr.html_url,
@@ -1011,6 +1030,9 @@ export interface ReviewCommentBodyInput {
   skills?: SkillMetadata[]
   /** Reasoning effort the reviewer CLI actually ran with (low/medium/high/xhigh/max/ultra). */
   effort?: string
+  /** Review strategy in force. Stamped into the annotation and quoted in the
+   *  attribution so a past review stays explicable after the policy changes. */
+  strategy?: { version: string; classId: string; tier: string | null; reason: string }
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -1037,6 +1059,17 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     effort: input.effort,
     skills: input.skills,
     override: brand.reviewer_attribution,
+    ...(input.strategy && {
+      // No tier segment when the strategy did not put one in force — the matched
+      // class selects none, or an explicit vendors.*.model outranks it. A review
+      // that ran is never described as skipped, and a tier that never reached
+      // the vendor is never named.
+      strategyNote: [
+        input.strategy.tier ? `${input.strategy.tier} tier` : null,
+        input.strategy.reason,
+        `strategy v${input.strategy.version}`,
+      ].filter(Boolean).join(' · '),
+    }),
   })}`
 
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
@@ -1053,6 +1086,11 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     ...(input.sha && { sha: input.sha }),
     ...(input.nextStep !== undefined && { next_step: input.nextStep }),
     ...(input.trigger !== undefined && { trigger: input.trigger }),
+    ...(input.strategy !== undefined && {
+      strategy: input.strategy.version,
+      class: input.strategy.classId,
+      ...(input.strategy.tier !== null && { tier: input.strategy.tier }),
+    }),
   })}`
 
   const replyPrefix = input.replyToCommentId
@@ -1082,6 +1120,7 @@ export async function postReviewComment(
   trigger?: string,
   skills: SkillMetadata[] = [],
   effort?: string,
+  strategy?: { version: string; classId: string; tier: string | null; reason: string },
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -1104,6 +1143,7 @@ export async function postReviewComment(
       trigger,
       skills,
       effort,
+      ...(strategy !== undefined && { strategy }),
     }),
   })
   return comment.id

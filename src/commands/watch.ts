@@ -283,6 +283,9 @@ export async function runWatch(opts: WatchOpts = {}) {
     owner: string; repoName: string; prNumber: number; title: string;
     body: string | null; author: string; headSha: string; headRef: string;
     headRepo: string | null; baseRef: string; action: string;
+    // Feed the review strategy's `risky` class: without these its `or_labels`
+    // (risk:T3) and `or_hotfix_to_default_branch` rules can never fire.
+    labels?: string[]; defaultBranch?: string;
   }): Promise<void> {
     lastActivityAt = Date.now()  // reset idle timer on any PR event
     const { owner, repoName, prNumber } = params
@@ -331,9 +334,16 @@ export async function runWatch(opts: WatchOpts = {}) {
         title: params.title,
         body: params.body ?? '',
         head: { ref: params.headRef, sha: params.headSha, repo: params.headRepo ? { full_name: params.headRepo } : null },
-        base: { ref: params.baseRef, repo: { full_name: `${owner}/${repoName}` } },
+        base: {
+          ref: params.baseRef,
+          repo: {
+            full_name: `${owner}/${repoName}`,
+            ...(params.defaultBranch !== undefined && { default_branch: params.defaultBranch }),
+          },
+        },
         html_url: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
         user: { login: params.author },
+        ...(params.labels !== undefined && { labels: params.labels.map(name => ({ name })) }),
       }
 
       if (!acquirePRLock(owner, repoName, prNumber, params.headSha)) {
@@ -580,7 +590,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         board.updatePR(key, { prLoc })
         stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
-        const { verdict, fixAppliedCount } = await runWorkflow({
+        const { verdict, fixAppliedCount, strategySkipped } = await runWorkflow({
           owner, repoName, prNumber, pr,
           tmpDir, token, config: effectiveConfig, origin,
           linearAuth,
@@ -602,9 +612,16 @@ export async function runWatch(opts: WatchOpts = {}) {
         })
 
         void verdict
-        reviewedPRKeys.add(prKey)
-        reviewedPRShaKeys.add(key)  // key = "owner/repo#pr@sha"
-        prRoundCounts.set(prKey, round)
+        // A strategy-skipped PR never ran a review, so it must stay out of the
+        // session caches. reviewedPRKeys is what makes the next event on this PR
+        // an `isRecheckRun`, and a review coerced to a recheck is deliberately
+        // never gated by max_rounds — so a lockfile-only PR that later gains
+        // source files would be "rechecked" against findings never posted.
+        if (strategySkipped === undefined) {
+          reviewedPRKeys.add(prKey)
+          reviewedPRShaKeys.add(key)  // key = "owner/repo#pr@sha"
+          prRoundCounts.set(prKey, round)
+        }
         // Recompute the diff hash AFTER runWorkflow — workflow steps such as
         // `conflict-resolve` or `fix` followed by `recheck` can mutate the checkout,
         // so the pre-workflow hash may not represent the content that was actually
@@ -622,7 +639,10 @@ export async function runWatch(opts: WatchOpts = {}) {
             if (headSha !== params.headSha) fixCommitSha = headSha
           } catch { /* fall back — skip auto-loop this cycle */ }
         }
-        if (newDiffHash) {
+        // Same gate as the session caches above: caching the diff of a PR that was
+        // never reviewed would make the first event that *should* review it get
+        // skipped as `no_diff_change`.
+        if (newDiffHash && strategySkipped === undefined) {
           // For non-commit delivery with an applied fix the checkout may be on a fix
           // branch; computeDiffHash would return the post-fix diff, not the original PR
           // diff. Caching that under prKey corrupts future no_diff_change checks for the
@@ -642,9 +662,15 @@ export async function runWatch(opts: WatchOpts = {}) {
             }
           }
         }
+        // A class-skipped PR (e.g. lockfile-only) never ran a review, so say so
+        // rather than reporting it as a completed one.
+        if (strategySkipped) {
+          bLog(`${chalk.dim(fmtTime())}  ${chalk.dim(`PR #${prNumber} skipped — ${strategySkipped} class, nothing to review`)}`)
+        }
         board.completePR(key, {
           elapsedMs: Date.now() - reviewStart,
           url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
+          ...(strategySkipped !== undefined && { label: `skipped · ${strategySkipped}` }),
         })
         // Smart-switch recovery confirmation: if a restore attempt is pending and
         // this reviewer matches the previously-degraded vendor, announce full restoration.
@@ -778,6 +804,8 @@ export async function runWatch(opts: WatchOpts = {}) {
         title: pr.title, body: pr.body, author: pr.user.login,
         headSha: pr.head.sha, headRef: pr.head.ref, headRepo: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref, action: event.action,
+        ...(pr.labels !== undefined && { labels: pr.labels.map(l => l.name) }),
+        ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
       })
     },
     (msg: string) => bLog(chalk.dim(fmtTime()) + '  ' + msg),
@@ -883,6 +911,11 @@ export async function runWatch(opts: WatchOpts = {}) {
             headRepo: prData.head.repo?.full_name ?? null,
             baseRef: prData.base.ref,
             action: 'comment',
+            // Same fields the webhook path forwards: without them the risky
+            // class's label and hotfix rules classify this PR differently
+            // depending on which trigger ran it.
+            ...(prData.labels !== undefined && { labels: prData.labels.map((l: { name: string }) => l.name) }),
+            ...(prData.base.repo?.default_branch !== undefined && { defaultBranch: prData.base.repo.default_branch }),
           })
           break
         }
@@ -1186,6 +1219,8 @@ export async function runWatch(opts: WatchOpts = {}) {
           title: pr.title, body: pr.body, author: pr.author,
           headSha: pr.headSha, headRef: pr.headRef, headRepo: pr.headRepo,
           baseRef: pr.baseRef, action: 'backtrace',
+          ...(pr.labels !== undefined && { labels: pr.labels }),
+          ...(pr.defaultBranch !== undefined && { defaultBranch: pr.defaultBranch }),
         })))
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)

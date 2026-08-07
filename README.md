@@ -200,7 +200,8 @@ Config lives at `~/.crosscheck/config.yml`. A `./crosscheck.config.yml` in the w
 
 ```yaml
 quality:
-  tier: balanced    # fast | balanced | thorough
+  mode: smart       # smart (default) | fixed
+  tier: balanced    # fast | balanced | thorough — the fallback under smart
 
 skills:
   enabled:
@@ -214,11 +215,55 @@ Existing configs keep skills disabled on upgrade; use `crosscheck onboard` to op
 
 For review and recheck, Crosscheck also applies repository-defined review practices from `AGENTS.md` and `CLAUDE.md`. In monorepos it combines root guidance with the files scoped to changed paths, using the trusted base-branch versions so a PR cannot rewrite its own review rules.
 
-| Tier | Claude | Codex | Latency |
+| Tier | Claude | Codex | Cost per review¹ |
 |---|---|---|---|
-| `fast` | Haiku 4.5 | GPT-5.6 Luna | ~10s |
-| `balanced` | Sonnet 5 | GPT-5.6 Terra | ~30s |
-| `thorough` | Opus 5 | GPT-5.6 Sol | ~60s |
+| `fast` | Haiku 4.5 | GPT-5.6 Luna | $0.24 · $0.06 |
+| `balanced` | Sonnet 5 | GPT-5.6 Terra | $0.72 · $0.58 |
+| `thorough` | **Opus 5** | GPT-5.6 Sol | $1.20 · $1.44 |
+
+¹ Output-token cost at 48k output tokens, the measured median for one review. A review is an agentic session, not a single call — expect **10–16 minutes** of wall clock (median 643s, p90 984s across 43 logged runs). Tier changes depth and the subprocess timeout, not seconds-scale latency.
+
+`claude-fable-5` is **banned** from review: 2× Opus 5's price for a lower coding benchmark score.
+
+### Dynamic thoroughness (`mode: smart`)
+
+**On by default.** Instead of one tier for every call, Crosscheck classifies each PR from its changed-file list and adjusts model and effort to match. Classification runs on the already-cloned working copy, so it costs one `git diff` and no API call.
+
+| # | PR class | Detected by | Tier | Steps |
+|---|---|---|---|---|
+| 1 | Generated / vendored | every file is a lockfile or build output | — | **PR skipped** |
+| 2 | Security / data-critical | auth, crypto, payment, migration paths; `risk:T3`; hotfix→default | `thorough` | full loop |
+| 3 | Deletion-only | ≤ 5 additions with ≥ 20 deletions | `fast` | review |
+| 4 | Docs / spec | ≥ 50% Markdown | `balanced` | review |
+| 5 | Test-only | every file is a test | `fast` | review, fix |
+| 6 | Config / infra | ≥ 50% config, no source | `balanced` | full loop |
+| 7 | Trivial | ≤ 3 files, ≤ 150 lines | `fast` | review, fix |
+| 8 | Standard | everything else | `balanced` | full loop |
+
+**Order is the routing logic** — first match wins, and security sits second so it dominates every cheapening rule below it. A deletion that removes auth code, or a two-file migration, is never routed to `fast`.
+
+Classification may set a **floor**, or promote on **consequence** — a security path is reviewed thoroughly because a miss there is expensive. It may **not** predict that a PR will be hard: across a 400-PR census, diff size correlates only 0.51 with realized review cost (the largest one-call PR was 101k lines; the most expensive changed 2 files). So escalation responds to what the review actually found — round 2 raises effort, round 3 switches vendor, then it hands off to a human rather than looping.
+
+Class tier, effort, **and** step set are all applied. The class is resolved once per workflow, not per step — the fix step pushes commits, so re-classifying could make the review and recheck comments cite different tiers for the same PR.
+
+The step set **narrows** the configured pipeline and never widens it: a repo pinned to review-only with `crosscheck alter` stays review-only whatever the class says.
+
+Rounds beyond the first escalate on measured non-convergence rather than prediction — effort rises where the model supports it, the tier is promoted where it does not, and the model never weakens.
+
+Every comment says which policy produced it:
+
+```
+_thorough tier · touches a security or data-critical path, where a missed defect
+ is expensive · strategy v1.1.0_
+
+<!-- crosscheck: … model=claude-opus-5 verdict=BLOCK strategy=1.1.0 class=risky tier=thorough … -->
+```
+
+The rationale is the matched class's own `reason` field, not prose written per review, so the explanation and the routing decision cannot drift apart. A review from six weeks ago stays explicable after the policy changes.
+
+The policy is versioned in [`src/config/review-strategy.json`](./src/config/review-strategy.json), carries its own sources and a 60-day review interval, and is checked weekly by the [`Review Strategy`](./.github/workflows/review-strategy.yml) workflow — verify it any time with `npm run verify:strategy`. Full evidence: [docs/dynamic-thoroughness.md](./docs/dynamic-thoroughness.md).
+
+> **Leave `vendors.*.model` unset under smart mode.** An explicit model outranks the strategy, so pinning one makes per-PR selection a no-op. When that happens crosscheck **withholds** the tier from the comment rather than citing a routing decision that did not happen. `crosscheck onboard` clears the pin — and prints what it cleared — when you choose smart.
 
 ### Pipeline depth
 
@@ -289,6 +334,7 @@ Deployment mode decides scope: `personal` monitors your own repos and reviews on
 | | |
 |---|---|
 | **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, every flag, complete config reference, FAQ |
+| **[docs/dynamic-thoroughness.md](./docs/dynamic-thoroughness.md)** | How Crosscheck picks a model and effort per PR — and the 400-PR census behind it |
 | **[docs/linear-identity.md](./docs/linear-identity.md)** | Linear write-back and the attribution ladder |
 | **[docs/linear-identity-contract.md](./docs/linear-identity-contract.md)** | The identity contract, as a spec for other tools |
 | **[What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/)** | Field report on agentic PR quality and why crosscheck exists |

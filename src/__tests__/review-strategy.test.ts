@@ -12,6 +12,14 @@ import {
 } from '../lib/review-strategy.js'
 import { resolveClaudeModel, resolveCodexModel, effectiveTier } from '../lib/review-models.js'
 import type { CodexVendorConfig, QualityConfig } from '../config/schema.js'
+import { ConfigSchema, CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
+import { buildReviewCommentBody } from '../github/client.js'
+import { parseAnnotation } from '../lib/annotation.js'
+import { filterStepsByTypes } from '../lib/repo-workflow.js'
+import { strategyDeterminedModel, strategyVendor, resolveRoundExecution } from '../lib/runner.js'
+import { claudeEffort } from '../reviewers/claude.js'
+import { codexReasoningEffort } from '../reviewers/codex.js'
+import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 
 const pr = (files: string[], over: Partial<Parameters<typeof resolveReviewStrategy>[0]> = {}) =>
   resolveReviewStrategy({ files, additions: 100, deletions: 50, ...over })
@@ -58,6 +66,14 @@ describe('PR classification', () => {
   it('classifies a two-file migration as risky, not trivial', () => {
     const r = pr(['db/migrations/20260101_add.sql', 'src/x.ts'], { additions: 10, deletions: 2 })
     expect(r.classId).toBe('risky')
+  })
+
+  // Regression: `additions_max` alone matched a +2/-2 typo fix, because a small
+  // edit also has near-zero additions. Deletion-only needs a floor on deletions.
+  it('classifies a small edit as trivial, not deletion-only', () => {
+    const r = pr(['src/widget.ts'], { additions: 2, deletions: 2 })
+    expect(r.classId).toBe('trivial')
+    expect(r.steps).toContain('fix')
   })
 
   it('classifies a pure deletion as deletion-only with no fix loop', () => {
@@ -241,5 +257,221 @@ describe('ladder limits', () => {
     expect(l.maxRounds).toBe(3)
     expect(l.maxBlocking).toBe(5)
     expect(l.maxWallClockMin).toBeGreaterThan(0)
+  })
+})
+
+describe('strategy citation on the PR', () => {
+  it('stamps version, class, and tier into the annotation', () => {
+    const body = buildReviewCommentBody({
+      body: 'findings', reviewer: 'claude', origin: 'codex', verdict: 'BLOCK',
+      model: 'claude-opus-5', stepType: 'review', round: 1, sha: 'abc1234',
+      strategy: { version: '1.0.0', classId: 'risky', tier: 'thorough', reason: 'touches a security path' },
+    })
+    expect(body).toContain('strategy=1.0.0')
+    expect(body).toContain('class=risky')
+    expect(body).toContain('tier=thorough')
+    // Additive fields must not disturb the stable prefix other parsers read.
+    expect(body).toMatch(/<!-- crosscheck: origin=codex reviewer=claude model=claude-opus-5 type=review round=1 verdict=BLOCK service=crosscheck/)
+  })
+
+  it('quotes the matched class reason so the routing decision is auditable', () => {
+    const body = buildReviewCommentBody({
+      body: 'findings', reviewer: 'claude', verdict: 'APPROVE', model: 'claude-opus-5',
+      strategy: { version: '1.0.0', classId: 'risky', tier: 'thorough', reason: 'touches a security path' },
+    })
+    expect(body).toContain('thorough tier · touches a security path · strategy v1.0.0')
+  })
+
+  it('omits every strategy field under fixed mode', () => {
+    const body = buildReviewCommentBody({
+      body: 'findings', reviewer: 'claude', verdict: 'APPROVE', model: 'claude-sonnet-5',
+    })
+    expect(body).not.toContain('strategy=')
+    expect(body).not.toContain('class=')
+  })
+})
+
+describe('smart mode is the default', () => {
+  // Regression: this default was silently lost in a squash merge, leaving every
+  // config on `mode: undefined` while the docs advertised smart as the default.
+  it('defaults quality.mode to smart on an empty config', () => {
+    const quality = ConfigSchema.parse({}).quality
+    expect(quality.mode).toBe('smart')
+    expect(quality.tier).toBe('balanced')
+  })
+
+  it('lets an explicit fixed opt out', () => {
+    expect(ConfigSchema.parse({ quality: { mode: 'fixed' } }).quality.mode).toBe('fixed')
+  })
+})
+
+describe('citation only asserts what actually ran', () => {
+  const strat = { version: '1.0.0', classId: 'risky', tier: 'thorough' as const, reason: 'security path' }
+
+  // An explicit vendors.*.model outranks the tier map, so on a pinned config the
+  // strategy's tier is not what ran. Citing it would assert a routing decision
+  // that never happened — the property this feature exists to provide.
+  it('withholds the citation when a pinned vendor model overrode the tier', () => {
+    expect(strategyDeterminedModel({ model: 'gpt-5.6-terra' }, strat as never)).toBe(false)
+    expect(strategyDeterminedModel({ model: null }, strat as never)).toBe(true)
+  })
+
+  it('withholds the citation under fixed mode', () => {
+    expect(strategyDeterminedModel({ model: null }, null)).toBe(false)
+  })
+})
+
+describe('strategy applies effort, not just tier', () => {
+  // Regression: effort was resolved and logged but never sent, so the run line
+  // named a level the CLI was never given.
+  it('folds the class effort into the vendor config', () => {
+    const vendor = { effort: 'medium' }
+    const out = strategyVendor(vendor, { effort: 'high' } as never, CLAUDE_EFFORT_LEVELS)
+    expect(out.effort).toBe('high')
+  })
+
+  it('leaves the vendor untouched when the class sets no effort', () => {
+    const vendor = { effort: 'medium' }
+    expect(strategyVendor(vendor, null, CLAUDE_EFFORT_LEVELS).effort).toBe('medium')
+    expect(strategyVendor(vendor, { effort: null } as never, CLAUDE_EFFORT_LEVELS).effort).toBe('medium')
+  })
+})
+
+describe('effort stays inside the vocabulary each vendor CLI accepts', () => {
+  const roundStrategy = (round: number, model: string) => {
+    const e = escalate({ tier: 'balanced', effort: 'medium' }, round, model)
+    return { version: '1.0.0', classId: 'standard', reason: 'r', steps: [], domain: 'backend', ...e } as never
+  }
+
+  // Regression: round 3 asks for `xhigh`, which review-strategy.json lists as a
+  // capability of claude-opus-5 — but vendors.claude.effort has no such level,
+  // so claudeEffort() mapped the unknown value to `medium`. Round 3 then ran
+  // WEAKER than round 2's `high`, inverting the ladder's one invariant.
+  it('never sends claude a later round weaker than the round before', () => {
+    const r2 = strategyVendor({ effort: 'medium' }, roundStrategy(2, 'claude-opus-5'), CLAUDE_EFFORT_LEVELS)
+    const r3 = strategyVendor({ effort: 'medium' }, roundStrategy(3, 'claude-opus-5'), CLAUDE_EFFORT_LEVELS)
+    expect(claudeEffort(r2.effort)).toBe('high')
+    expect(claudeEffort(r3.effort)).toBe('high')
+  })
+
+  // Codex does expose xhigh, so clamping must not flatten it to claude's ceiling.
+  it('passes xhigh through to codex, which accepts it', () => {
+    const r3 = strategyVendor({ effort: 'medium' }, roundStrategy(3, 'gpt-5.6-sol'), CODEX_EFFORT_LEVELS)
+    expect(codexReasoningEffort(r3.effort ?? '')).toBe('xhigh')
+  })
+})
+
+describe('one round, one set of tier and effort decisions', () => {
+  const config = (over: Record<string, unknown> = {}) => ConfigSchema.parse({ quality: { tier: 'balanced', mode: 'smart' }, ...over })
+  const risky = { version: '1.0.0', classId: 'risky', reason: 'security path', tier: 'thorough', effort: 'high', steps: ['review', 'fix', 'recheck'], domain: 'backend' } as never
+
+  it('applies the class tier to the whole round, not just the review', () => {
+    const exec = resolveRoundExecution(config(), risky, 1)
+    expect(exec.quality.tier).toBe('thorough')
+    // The fix step reads its model AND its subprocess budget from this config;
+    // a thorough model on the balanced 600s cap is cut off mid-fix.
+    expect(tierTimeoutMs(exec.roundConfig.quality.tier)).toBe(tierTimeoutMs('thorough'))
+    expect(exec.roundConfig.vendors.claude.effort).toBe('high')
+  })
+
+  // Regression: the review step ran the escalated round strategy while the fix
+  // step re-folded the base class, so a promoted round fixed at the old tier.
+  it('carries an escalated round into the config the fix step runs under', () => {
+    const noEffortLadder = { ...(risky as unknown as Record<string, unknown>), tier: 'fast', effort: null } as never
+    const exec = resolveRoundExecution(config(), noEffortLadder, 2)
+    expect(exec.escalated).toBe(true)
+    expect(exec.quality.tier).toBe(exec.roundConfig.quality.tier)
+    expect(exec.strategy?.tier).toBe(exec.quality.tier)
+  })
+
+  it('leaves the config untouched under fixed mode', () => {
+    const cfg = config({ quality: { tier: 'fast', mode: 'fixed' } })
+    const exec = resolveRoundExecution(cfg, null, 3)
+    expect(exec.quality.tier).toBe('fast')
+    expect(exec.roundConfig).toBe(cfg)
+    expect(exec.escalated).toBe(false)
+  })
+})
+
+describe('annotation round-trips the citation', () => {
+  it('parses strategy, class, and tier back out', () => {
+    const body = buildReviewCommentBody({
+      body: 'findings', reviewer: 'claude', origin: 'codex', verdict: 'BLOCK',
+      model: 'claude-opus-5', stepType: 'review', round: 1,
+      strategy: { version: '1.0.0', classId: 'risky', tier: 'thorough', reason: 'security path' },
+    })
+    const parsed = parseAnnotation(body)
+    expect(parsed?.strategy).toBe('1.0.0')
+    expect(parsed?.class).toBe('risky')
+    expect(parsed?.tier).toBe('thorough')
+  })
+})
+
+describe('class step sets narrow the pipeline', () => {
+  const full: Array<{ name: string; type: string }> = [
+    { name: 'conflict-resolve', type: 'conflict-resolve' },
+    { name: 'review', type: 'review' },
+    { name: 'fix', type: 'fix' },
+    { name: 'recheck', type: 'recheck' },
+  ]
+
+  it('narrows a docs PR to review, dropping fix and recheck', () => {
+    const kept = filterStepsByTypes(full as never, ['review'])
+    expect(kept.map(s => s.type)).toEqual(['review'])
+  })
+
+  it('keeps conflict-resolve only when the depth permits code modification', () => {
+    // review-only must not touch the code, so conflict-resolve goes too.
+    expect(filterStepsByTypes(full as never, ['review']).map(s => s.type)).not.toContain('conflict-resolve')
+    expect(filterStepsByTypes(full as never, ['review', 'fix']).map(s => s.type)).toContain('conflict-resolve')
+  })
+
+  // The class narrows; it never widens. A repo pinned to review-only stays
+  // review-only however permissive the matched class is.
+  it('cannot add a step the configured pipeline does not have', () => {
+    const reviewOnly = [{ name: 'review', type: 'review' }]
+    const kept = filterStepsByTypes(reviewOnly as never, ['review', 'fix', 'recheck'])
+    expect(kept.map(s => s.type)).toEqual(['review'])
+  })
+})
+
+describe('rounds escalate on measured non-convergence', () => {
+  it('holds the class tier on round 1 and escalates after', () => {
+    const base = { tier: 'balanced' as const, effort: 'medium' }
+    expect(escalate(base, 1, 'claude-sonnet-5')).toEqual({ tier: 'balanced', effort: 'medium' })
+    expect(escalate(base, 2, 'claude-sonnet-5').effort).toBe('high')
+    expect(escalate(base, 3, 'claude-sonnet-5').effort).toBe('xhigh')
+  })
+
+  it('promotes the tier instead when the model has no effort ladder', () => {
+    expect(escalate({ tier: 'fast', effort: null }, 2, 'claude-haiku-4-5-20251001'))
+      .toEqual({ tier: 'balanced', effort: null })
+  })
+})
+
+describe('codex under subscription auth', () => {
+  const codex = (over: Partial<CodexVendorConfig> = {}): CodexVendorConfig =>
+    ({ enabled: true, model: null, auth: 'subscription', effort: 'medium', quality: 'medium', timeout_sec: null, ...over }) as CodexVendorConfig
+  const q = (tier: QualityConfig['tier']): QualityConfig => ({ tier, mode: 'smart', focus: [] }) as QualityConfig
+
+  // Without model_tiers every tier collapses to the CLI's own default, so the
+  // strategy's tier had no effect and must not be cited.
+  it('collapses every tier to default with no model_tiers', () => {
+    for (const tier of ['fast', 'balanced', 'thorough'] as const) {
+      expect(resolveCodexModel(q(tier), codex())).toBe('default')
+    }
+  })
+
+  it('withholds the citation when the resolved model is default', () => {
+    const strat = { version: '1.0.0', classId: 'risky', tier: 'thorough' } as never
+    expect(strategyDeterminedModel({ model: null }, strat, 'default')).toBe(false)
+    expect(strategyDeterminedModel({ model: null }, strat, 'gpt-5.6-sol')).toBe(true)
+  })
+
+  // What onboard writes under smart, so tiers actually differ.
+  it('varies by tier once model_tiers is written', () => {
+    const v = codex({ model_tiers: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol' } })
+    expect(resolveCodexModel(q('fast'), v)).toBe('gpt-5.6-luna')
+    expect(resolveCodexModel(q('thorough'), v)).toBe('gpt-5.6-sol')
   })
 })

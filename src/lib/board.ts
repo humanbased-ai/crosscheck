@@ -78,6 +78,9 @@ export interface PRUpdate {
 export interface PRCompletionData {
   elapsedMs: number
   url: string
+  /** Replaces the `done` label — for a PR that closed without a review having
+   *  run, such as one the review strategy short-circuited. */
+  label?: string
 }
 
 interface Stats {
@@ -334,7 +337,7 @@ export class PRBoard {
 
     slot.completedAt = Date.now()
     slot.url = data.url
-    slot.label = 'done'
+    slot.label = data.label ?? 'done'
 
     const verdict = slot.verdict ?? null
     const fixCount = slot.fixCount
@@ -513,7 +516,9 @@ export class PRBoard {
 
   private phaseLine1Label(slot: PRSlot, frame: string): string {
     const t = this.theme
-    if (slot.completedAt !== undefined) return t.dim('done')
+    // completePR always sets the label; it is 'done' unless the PR closed
+    // without a review running, in which case it says why.
+    if (slot.completedAt !== undefined) return t.dim(slot.label)
     switch (slot.phase) {
       case 'reviewing':
       case 'rechecking':

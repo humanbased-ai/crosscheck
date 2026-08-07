@@ -377,10 +377,17 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     },
     base: {
       ref: prData.base.ref,
-      repo: { full_name: `${owner}/${repo}` },
+      repo: {
+        full_name: `${owner}/${repo}`,
+        // Feeds the review strategy's `risky` class: without these its
+        // `or_hotfix_to_default_branch` and `or_labels` (risk:T3) rules cannot
+        // fire, leaving two security promotion paths inert.
+        ...(prData.base.repo?.default_branch !== undefined && { default_branch: prData.base.repo.default_branch }),
+      },
     },
     html_url: prData.html_url,
     user: { login: prData.user?.login ?? '' },
+    ...(prData.labels !== undefined && { labels: prData.labels.map((l: { name: string }) => ({ name: l.name })) }),
   }
 
   const { sha } = prData.head
@@ -552,9 +559,15 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       })
       let { verdict, fixAppliedCount } = workflowResult
       let latestReviewComment = workflowResult.latestReviewComment ?? initialReviewComment
+      // A class-skipped PR (e.g. lockfile-only) never ran a review. Both round
+      // loops below would still spin at least once — meetsCrazyStopCondition(null)
+      // is false — costing a pulls.get and a second full runWorkflow before the
+      // fixAppliedCount guard broke out. Gate them, and report the skip rather
+      // than a bare formatVerdict(null) with no reason.
+      const { strategySkipped } = workflowResult
 
       // Autonomous fix→recheck loop for --crazy / --halfcrazy
-      if (opts.roundMode) {
+      if (!strategySkipped && opts.roundMode) {
         const mode = opts.roundMode
         const fixRecheckSteps = buildFixRecheckSteps(filteredSteps, allSteps, assignedReviewer, stepVendorOverrides)
         let activeFixRecheckSteps = fixRecheckSteps
@@ -681,7 +694,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           console.log(`  round ${loopRound}  verdict ${verdict ?? '--'} — continuing...`)
         }
 
-      } else {
+      } else if (!strategySkipped) {
         // Autonomous fix→recheck cycling based on max_rounds from workflow.yml
         const allFixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
         const maxRounds = allFixRecheckSteps.length > 0
@@ -751,7 +764,11 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       }
 
       activeSpinner.stop()
-      console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
+      if (strategySkipped) {
+        console.log(chalk.dim(`\n  skipped — ${strategySkipped} class, nothing to review`))
+      } else {
+        console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
+      }
 
       console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
     } catch (err: unknown) {

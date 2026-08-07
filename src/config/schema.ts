@@ -1,10 +1,19 @@
 import { z } from 'zod'
 
+// The effort levels each vendor CLI accepts, in ascending order. Exported
+// because the review strategy reasons about what a MODEL supports, which is a
+// wider set — claude-opus-5 has an `xhigh` level the claude CLI has no flag
+// for. Anything the strategy picks is clamped to one of these before it is
+// written into a vendor config, so an escalation cannot land on a level that
+// silently degrades to the `medium` fallback in claudeEffort/codexReasoningEffort.
+export const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'max'] as const
+export const CODEX_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
+
 export const VendorConfigSchema = z.object({
   enabled: z.boolean().default(true),
   model: z.string().nullable().default(null),
   auth: z.enum(['subscription', 'api-key']).default('subscription'),
-  effort: z.enum(['low', 'medium', 'high', 'max']).default('medium'),
+  effort: z.enum(CLAUDE_EFFORT_LEVELS).default('medium'),
   // Max wall-clock seconds for a single CLI invocation before it is killed.
   // null = use the reviewer's built-in default, which is tier-based for both
   // claude and codex: 300s (fast) / 600s (balanced) / 1200s (thorough).
@@ -19,7 +28,7 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   // Codex exposes two tiers above the shared vocabulary: xhigh (Extra High) and
   // ultra. Ultra is only available on terra/sol; pre-5.6 models stop at xhigh —
   // the CLI rejects unsupported combinations at call time.
-  effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).default('medium'),
+  effort: z.enum(CODEX_EFFORT_LEVELS).default('medium'),
   // Optional per-tier model overrides, honored under both auth modes. When unset:
   // api-key auth falls back to the built-in tier mapping, subscription auth lets
   // the Codex CLI pick its default model.
@@ -32,12 +41,26 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
 })
 
 export const QualityConfigSchema = z.object({
+  // The tier when `mode: fixed`, and the fallback under `mode: smart` whenever a
+  // PR's file list cannot be read (one-shot commands, API failures).
   tier: z.enum(['fast', 'balanced', 'thorough']).default('balanced'),
-  // fixed: every agent call uses the same tier (legacy behaviour; applied when unset).
-  // smart: the effective tier is chosen per-call based on diff size, prior
-  //        BLOCK verdicts, and step type — reducing cost on small/low-risk PRs
-  //        while still promoting hard calls to stronger models.
-  mode: z.enum(['fixed', 'smart']).optional(),
+  // smart (default): dynamically adjust model + effort based on task type. The
+  //   PR is classified from its changed-file list against the versioned policy
+  //   in config/review-strategy.json, and the class's tier, effort, and step set
+  //   are all applied — a lockfile-only PR is skipped outright, a docs PR is
+  //   narrowed to review, a PR touching auth or a migration is promoted to
+  //   `thorough`. The class set NARROWS the configured pipeline and never widens
+  //   it, so a repo pinned to review-only stays review-only.
+  //
+  //   Rounds beyond the first escalate on measured non-convergence rather than
+  //   prediction: effort rises where the model supports it, and the tier is
+  //   promoted where it does not. The model never weakens across rounds.
+  //
+  //   An explicit vendors.*.model outranks all of this. Pin one and per-PR
+  //   selection becomes a no-op — crosscheck then withholds the tier from the
+  //   review comment rather than citing one that never reached the vendor.
+  // fixed: every agent call uses `tier` above, regardless of what changed.
+  mode: z.enum(['fixed', 'smart']).default('smart'),
   focus: z.array(z.string()).default([]),
   custom_prompt: z.string().optional(),
 })
