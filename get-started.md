@@ -1290,6 +1290,11 @@ First match wins, and security sits second so it dominates every cheapening rule
 below it — a deletion that removes auth code, or a two-file migration, is never
 routed to `fast`.
 
+The class's step set narrows the configured pipeline and never widens it, so a
+repo pinned to review-only with `crosscheck alter` stays review-only. Rounds past
+the first escalate on measured non-convergence: effort rises where the model
+supports it, the tier is promoted where it does not.
+
 Every comment cites the policy that produced it:
 
 ```

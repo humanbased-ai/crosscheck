@@ -3,7 +3,8 @@ import { randomUUID } from 'crypto'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import chalk from 'chalk'
-import type { Config } from '../config/schema.js'
+import type { Config, RepoWorkflowStep } from '../config/schema.js'
+import { filterStepsByTypes } from './repo-workflow.js'
 import type { PREvent } from '../github/webhook.js'
 import type { PROrigin } from '../github/detector.js'
 import type { Vendor } from '../lib/vendor.js'
@@ -21,7 +22,7 @@ import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js
 import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
-import { resolveReviewStrategy, type PRContext, type ResolvedStrategy } from './review-strategy.js'
+import { resolveReviewStrategy, escalate, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
@@ -636,7 +637,7 @@ async function pushWithNonFastForwardHandling(params: {
 export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult> {
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange, trigger } = ctx
   const triggerField = trigger !== undefined ? { trigger } : {}
-  const steps = (ctx.steps ?? loadWorkflow(process.cwd())).map(step => {
+  const configuredSteps = (ctx.steps ?? loadWorkflow(process.cwd())).map(step => {
     if (!step.harness || step.instructions) return step
     const resolved = loadHarnessSection(step.harness, process.cwd())
     return resolved ? { ...step, instructions: resolved } : step
@@ -651,6 +652,27 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   } else if (strategy) {
     fileLog({ level: 'info', event: 'strategy_resolved', repo: `${owner}/${repoName}`, pr: prNumber, strategy_version: strategy.version, pr_class: strategy.classId, tier: strategy.tier, effort: strategy.effort, steps: strategy.steps, domain: strategy.domain })
   }
+
+  // The class's step set NARROWS the configured pipeline; it never widens it.
+  // A repo set to review-only stays review-only whatever the class says, which
+  // matches how per-repo `crosscheck alter` overrides compose. Reuses
+  // filterStepsByTypes so the conflict-resolve rule (orthogonal to the depth
+  // ladder, kept only when the depth permits code modification) stays in one
+  // place rather than being re-derived here.
+  const steps = ((): typeof configuredSteps => {
+    if (!strategy || strategy.steps.length === 0) return configuredSteps
+    const classTypes = strategy.steps.filter(
+      (t): t is RepoWorkflowStep => t === 'review' || t === 'fix' || t === 'recheck',
+    )
+    if (classTypes.length === 0) return configuredSteps
+    const narrowed = filterStepsByTypes(configuredSteps, classTypes)
+    const dropped = configuredSteps.length - narrowed.length
+    if (dropped > 0) {
+      log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${classTypes.join(', ')} (${dropped} step${dropped === 1 ? '' : 's'} dropped)`))
+      fileLog({ level: 'info', event: 'strategy_steps_narrowed', repo: `${owner}/${repoName}`, pr: prNumber, pr_class: strategy.classId, configured: configuredSteps.map((x: { type: string }) => x.type), applied: narrowed.map((x: { type: string }) => x.type), strategy_version: strategy.version })
+    }
+    return narrowed
+  })()
 
   if (strategy && strategy.tier === null) {
     log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → skipped (${strategy.reason})`))
@@ -824,9 +846,27 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // Under `quality.mode: smart` the PR's class picks the tier; under fixed
       // this is config.quality untouched.
       // Class picks tier AND effort under smart; untouched config under fixed.
-      const quality = strategyQuality(config.quality, strategy)
-      const claudeVendor = strategyVendor(config.vendors.claude, strategy)
-      const codexVendor = strategyVendor(config.vendors.codex, strategy)
+      // Rounds beyond the first escalate: the class tier was already tried and
+      // did not resolve the PR, so difficulty is now measured rather than
+      // predicted. escalate() raises effort where the model supports it and
+      // promotes a tier where it does not, and never weakens the model.
+      const escalated = strategy
+        ? escalate(
+            { tier: strategy.tier ?? config.quality.tier, effort: strategy.effort },
+            ctx.round ?? 1,
+            resolveClaudeModel(strategyQuality(config.quality, strategy), config.vendors.claude),
+          )
+        : null
+      const roundStrategy = strategy && escalated
+        ? { ...strategy, tier: escalated.tier, effort: escalated.effort }
+        : strategy
+      if (escalated && strategy && (escalated.tier !== strategy.tier || escalated.effort !== strategy.effort)) {
+        log(chalk.dim(`  strategy v${strategy.version}: round ${ctx.round} → ${escalated.tier} tier${escalated.effort ? ` (${escalated.effort})` : ''}`))
+        fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: escalated.tier, from_effort: strategy.effort, to_effort: escalated.effort, strategy_version: strategy.version })
+      }
+      const quality = strategyQuality(config.quality, roundStrategy)
+      const claudeVendor = strategyVendor(config.vendors.claude, roundStrategy)
+      const codexVendor = strategyVendor(config.vendors.codex, roundStrategy)
       if (strategy) log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${strategy.tier ?? 'skip'}${strategy.effort ? ` (${strategy.effort})` : ''}`))
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
@@ -977,8 +1017,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           // Withheld when an explicit vendors.*.model overrode the tier map:
           // citing a tier the run did not use would assert a routing decision
           // that never happened.
-          strategyDeterminedModel(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, strategy) && strategy?.tier
-            ? { version: strategy.version, classId: strategy.classId, tier: strategy.tier, reason: strategy.reason }
+          strategyDeterminedModel(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, roundStrategy) && roundStrategy?.tier
+            ? { version: roundStrategy.version, classId: roundStrategy.classId, tier: roundStrategy.tier, reason: roundStrategy.reason }
             : undefined,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`

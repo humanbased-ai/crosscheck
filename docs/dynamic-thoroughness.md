@@ -17,14 +17,12 @@ working copy, folds the result into the quality config the reviewers receive,
 and stamps the version, class, and tier into each annotation. When they disagree, the JSON wins and this document is
 stale — the weekly `Review Strategy` workflow files an issue when either drifts.
 
-**What is enforced today:** the `Tier` and `Effort` columns below both reach the
-vendor call, and a class resolving to a null tier (class 1) skips the workflow
-outright rather than being reviewed at the configured tier.
-
-**What is not yet enforced:** the per-class `Steps` column. Pipeline depth still
-comes from `workflow.yml`, so class 4 runs whatever steps that file configures
-rather than review-only. `escalate()` is likewise not yet called from the runner,
-so §6.4's round ladder describes the design rather than current behaviour.
+**Enforced today:** the `Tier`, `Effort`, and `Steps` columns below all reach the
+run. A class resolving to a null tier (class 1) skips the workflow outright; the
+per-class step set narrows the configured pipeline (never widens it — a repo
+pinned to review-only stays review-only); and rounds past the first escalate via
+`escalate()`, raising effort where the model supports it and promoting the tier
+where it does not.
 
 Comments cite only what actually applied — no tier is named when the class
 selects none, or when an explicit `vendors.*.model` outranks the strategy — so

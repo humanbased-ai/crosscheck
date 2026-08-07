@@ -377,10 +377,17 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     },
     base: {
       ref: prData.base.ref,
-      repo: { full_name: `${owner}/${repo}` },
+      repo: {
+        full_name: `${owner}/${repo}`,
+        // Feeds the review strategy's `risky` class: without these its
+        // `or_hotfix_to_default_branch` and `or_labels` (risk:T3) rules cannot
+        // fire, leaving two security promotion paths inert.
+        ...(prData.base.repo?.default_branch !== undefined && { default_branch: prData.base.repo.default_branch }),
+      },
     },
     html_url: prData.html_url,
     user: { login: prData.user?.login ?? '' },
+    ...(prData.labels !== undefined && { labels: prData.labels.map((l: { name: string }) => ({ name: l.name })) }),
   }
 
   const { sha } = prData.head

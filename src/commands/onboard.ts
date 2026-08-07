@@ -272,7 +272,7 @@ async function promptQualityTier(
     {
       label: 'smart',
       description: 'adjust model + effort per PR  (recommended)',
-      hint: 'skips lockfiles · docs get review only · auth and migrations get the strongest model',
+      hint: 'skips lockfiles · docs get review only · auth and migrations get the strongest model · escalates when a round does not resolve',
     },
     ...tiers.map(tier => ({
       label: tier,

@@ -15,6 +15,7 @@ import type { CodexVendorConfig, QualityConfig } from '../config/schema.js'
 import { ConfigSchema } from '../config/schema.js'
 import { buildReviewCommentBody } from '../github/client.js'
 import { parseAnnotation } from '../lib/annotation.js'
+import { filterStepsByTypes } from '../lib/repo-workflow.js'
 import { strategyDeterminedModel, strategyVendor } from '../lib/runner.js'
 
 const pr = (files: string[], over: Partial<Parameters<typeof resolveReviewStrategy>[0]> = {}) =>
@@ -344,5 +345,47 @@ describe('annotation round-trips the citation', () => {
     expect(parsed?.strategy).toBe('1.0.0')
     expect(parsed?.class).toBe('risky')
     expect(parsed?.tier).toBe('thorough')
+  })
+})
+
+describe('class step sets narrow the pipeline', () => {
+  const full: Array<{ name: string; type: string }> = [
+    { name: 'conflict-resolve', type: 'conflict-resolve' },
+    { name: 'review', type: 'review' },
+    { name: 'fix', type: 'fix' },
+    { name: 'recheck', type: 'recheck' },
+  ]
+
+  it('narrows a docs PR to review, dropping fix and recheck', () => {
+    const kept = filterStepsByTypes(full as never, ['review'])
+    expect(kept.map(s => s.type)).toEqual(['review'])
+  })
+
+  it('keeps conflict-resolve only when the depth permits code modification', () => {
+    // review-only must not touch the code, so conflict-resolve goes too.
+    expect(filterStepsByTypes(full as never, ['review']).map(s => s.type)).not.toContain('conflict-resolve')
+    expect(filterStepsByTypes(full as never, ['review', 'fix']).map(s => s.type)).toContain('conflict-resolve')
+  })
+
+  // The class narrows; it never widens. A repo pinned to review-only stays
+  // review-only however permissive the matched class is.
+  it('cannot add a step the configured pipeline does not have', () => {
+    const reviewOnly = [{ name: 'review', type: 'review' }]
+    const kept = filterStepsByTypes(reviewOnly as never, ['review', 'fix', 'recheck'])
+    expect(kept.map(s => s.type)).toEqual(['review'])
+  })
+})
+
+describe('rounds escalate on measured non-convergence', () => {
+  it('holds the class tier on round 1 and escalates after', () => {
+    const base = { tier: 'balanced' as const, effort: 'medium' }
+    expect(escalate(base, 1, 'claude-sonnet-5')).toEqual({ tier: 'balanced', effort: 'medium' })
+    expect(escalate(base, 2, 'claude-sonnet-5').effort).toBe('high')
+    expect(escalate(base, 3, 'claude-sonnet-5').effort).toBe('xhigh')
+  })
+
+  it('promotes the tier instead when the model has no effort ladder', () => {
+    expect(escalate({ tier: 'fast', effort: null }, 2, 'claude-haiku-4-5-20251001'))
+      .toEqual({ tier: 'balanced', effort: null })
   })
 })

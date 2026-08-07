@@ -244,9 +244,11 @@ For review and recheck, Crosscheck also applies repository-defined review practi
 
 Classification may set a **floor**, or promote on **consequence** — a security path is reviewed thoroughly because a miss there is expensive. It may **not** predict that a PR will be hard: across a 400-PR census, diff size correlates only 0.51 with realized review cost (the largest one-call PR was 101k lines; the most expensive changed 2 files). So escalation responds to what the review actually found — round 2 raises effort, round 3 switches vendor, then it hands off to a human rather than looping.
 
-Class tier **and** effort are applied to the run. The class is resolved once per workflow, not per step — the fix step pushes commits, so re-classifying could make the review and recheck comments cite different tiers for the same PR.
+Class tier, effort, **and** step set are all applied. The class is resolved once per workflow, not per step — the fix step pushes commits, so re-classifying could make the review and recheck comments cite different tiers for the same PR.
 
-The **Steps** column above describes the policy in `review-strategy.json`. Today the `generated` class short-circuits the whole workflow; the remaining per-class step sets are resolved and logged but do not yet gate which steps run — pipeline depth still comes from `workflow.yml`.
+The step set **narrows** the configured pipeline and never widens it: a repo pinned to review-only with `crosscheck alter` stays review-only whatever the class says.
+
+Rounds beyond the first escalate on measured non-convergence rather than prediction — effort rises where the model supports it, the tier is promoted where it does not, and the model never weakens.
 
 Every comment says which policy produced it:
 

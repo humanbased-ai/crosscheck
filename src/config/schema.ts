@@ -35,12 +35,21 @@ export const QualityConfigSchema = z.object({
   // The tier when `mode: fixed`, and the fallback under `mode: smart` whenever a
   // PR's file list cannot be read (one-shot commands, API failures).
   tier: z.enum(['fast', 'balanced', 'thorough']).default('balanced'),
-  // smart (default): dynamically adjust model + effort based on task type. The PR
-  //   is classified from its changed-file list against the versioned policy in
-  //   config/review-strategy.json — a lockfile-only PR is skipped, a docs PR gets
-  //   review with no fix loop, a PR touching auth or a migration is promoted to
-  //   `thorough`. Escalation is evidence-driven, never predicted: round 2 raises
-  //   effort, round 3 switches vendor, then it hands off to a human.
+  // smart (default): dynamically adjust model + effort based on task type. The
+  //   PR is classified from its changed-file list against the versioned policy
+  //   in config/review-strategy.json, and the class's tier, effort, and step set
+  //   are all applied — a lockfile-only PR is skipped outright, a docs PR is
+  //   narrowed to review, a PR touching auth or a migration is promoted to
+  //   `thorough`. The class set NARROWS the configured pipeline and never widens
+  //   it, so a repo pinned to review-only stays review-only.
+  //
+  //   Rounds beyond the first escalate on measured non-convergence rather than
+  //   prediction: effort rises where the model supports it, and the tier is
+  //   promoted where it does not. The model never weakens across rounds.
+  //
+  //   An explicit vendors.*.model outranks all of this. Pin one and per-PR
+  //   selection becomes a no-op — crosscheck then withholds the tier from the
+  //   review comment rather than citing one that never reached the vendor.
   // fixed: every agent call uses `tier` above, regardless of what changed.
   mode: z.enum(['fixed', 'smart']).default('smart'),
   focus: z.array(z.string()).default([]),
