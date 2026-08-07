@@ -76,7 +76,8 @@ feature branch → staging → main
 | `main` | Production — triggers `@latest` npm publish | Merge from `staging` only |
 
 - Merging to `staging` triggers CI and publishes `@beta` to npm.
-- Merging `staging` → `main` triggers the production workflow and publishes `@latest` (requires manual approval in GitHub Actions).
+- `staging` → `main` is promoted automatically every Friday at 18:00 UTC by the "Promote staging → main" workflow (or on demand via `workflow_dispatch`). It opens a PR — `main` is protected and rejects direct pushes — merges it, and dispatches the release.
+- Landing on `main` publishes `@latest` and emails yi@inductive.network. There is no manual approval gate.
 
 ### Enforcement
 
@@ -251,11 +252,11 @@ Follow semver strictly.
 
 Publishing is handled by CI/CD — do not run `npm publish` manually.
 
-- `@beta` publishes automatically when `staging` is merged to `main` via the staging workflow.
-- `@latest` publishes when a `v*` tag is pushed to `main` and approved in the production workflow:
+- `@beta` publishes automatically on every push to `staging`.
+- `@latest` publishes when `staging` lands on `main` — weekly, or on demand. `release.yml` derives the version from conventional commits, tags it, publishes, and emails yi@inductive.network. No approval step.
+
+To force a specific version instead of the conventional-commit bump, run the **Release** workflow manually with the `bump` or `exact_version` input:
 
 ```bash
-git checkout main && git pull
-npm version patch   # or minor / major — updates package.json and creates a git tag
-git push origin main --follow-tags
+gh workflow run release.yml --ref main -f exact_version=0.9.0
 ```

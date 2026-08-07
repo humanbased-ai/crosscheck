@@ -74,7 +74,7 @@ jobs:
         if: steps.ver.outputs.new_tag == ''
         run: echo "No version-worthy commits since last tag — skipping publish."
 
-  # ── Job 2: publish — gated by the production environment (manual approval) ──
+  # ── Job 2: publish — runs unattended; no approval gate (removed in 79893b5) ──
   publish:
     name: Publish to npm
     needs: compute
@@ -119,12 +119,16 @@ jobs:
           fi
 
       - name: Publish to npm @latest
+        id: publish
         run: |
           VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           if npm view "@humanbased/crosscheck@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
             echo "Version ${VERSION} already on npm — skipping publish."
+            echo "published=false" >> "$GITHUB_OUTPUT"
           else
             npm publish --access public
+            echo "published=true" >> "$GITHUB_OUTPUT"
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -138,6 +142,9 @@ jobs:
           generate_release_notes: true
 
       - name: Notify release published
+        # The package is already on npm by this point — an SMTP outage must not
+        # turn a successful release into a red run.
+        continue-on-error: true
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -145,15 +152,17 @@ jobs:
           secure: true
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "[crosscheck] ${{ needs.compute.outputs.new_tag }} published to npm"
-          to: ${{ secrets.MAIL_USERNAME }}
+          subject: "[crosscheck] ${{ needs.compute.outputs.new_tag }} ${{ steps.publish.outputs.published == 'true' && 'published to npm' || 'released — version was already on npm' }}"
+          to: yi@inductive.network, ${{ secrets.MAIL_USERNAME }}
           from: crosscheck-ci <${{ secrets.MAIL_USERNAME }}>
           body: |
-            crosscheck ${{ needs.compute.outputs.new_tag }} has been published to npm as @latest.
+            crosscheck ${{ needs.compute.outputs.new_tag }} ${{ steps.publish.outputs.published == 'true' && 'has been published to npm as @latest.' || 'was already on npm — the registry was left untouched and the rest of the release completed.' }}
 
-            Install: npm install -g @humanbased/crosscheck@${{ needs.compute.outputs.new_tag }}
+            Version: ${{ steps.publish.outputs.version }}
+            Install: npm install -g @humanbased/crosscheck@${{ steps.publish.outputs.version }}
 
             GitHub Release: https://github.com/${{ github.repository }}/releases/tag/${{ needs.compute.outputs.new_tag }}
+            Workflow run:   https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
             Changes:
             ${{ needs.compute.outputs.changelog }}
