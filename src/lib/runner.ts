@@ -421,14 +421,26 @@ function diffBucket(totalLines: number): string {
  * Returns null when the diff can't be read. Callers then fall back to the
  * configured tier, which is why `quality.tier` stays meaningful under smart mode.
  */
+function unreadableDiff(ctx: WorkflowContext, reason: string): null {
+  // Without this, a smart-mode install that quietly behaves as fixed — shallow
+  // clone whose merge base sits deeper than --depth, unreadable diff — looks
+  // identical to one that is classifying correctly.
+  fileLog({ level: 'info', event: 'strategy_unresolved', repo: `${ctx.owner}/${ctx.repoName}`, pr: ctx.prNumber, reason })
+  return null
+}
+
 export function buildPRContext(ctx: WorkflowContext): PRContext | null {
   const { tmpDir, pr } = ctx
   try {
-    const raw = execSync(
-      `git diff --numstat origin/${pr.base.ref}...HEAD`,
+    // execFileSync, not execSync: a git ref may legally contain `;`, `$( )` and
+    // backticks, and this call drives routing rather than best-effort logging.
+    // Same reason countCrosscheckCommitsForPRDetailed avoids the shell.
+    const raw = execFileSync(
+      'git',
+      ['diff', '--numstat', `origin/${pr.base.ref}...HEAD`],
       { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     ).trim()
-    if (!raw) return null
+    if (!raw) return unreadableDiff(ctx, 'empty_diff')
 
     const files: string[] = []
     let additions = 0
@@ -442,7 +454,7 @@ export function buildPRContext(ctx: WorkflowContext): PRContext | null {
       additions += parseInt(add, 10) || 0
       deletions += parseInt(del, 10) || 0
     }
-    if (files.length === 0) return null
+    if (files.length === 0) return unreadableDiff(ctx, 'no_files')
 
     return {
       files,
@@ -454,7 +466,7 @@ export function buildPRContext(ctx: WorkflowContext): PRContext | null {
       ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
     }
   } catch {
-    return null
+    return unreadableDiff(ctx, 'git_diff_failed')
   }
 }
 
@@ -463,8 +475,13 @@ export function buildPRContext(ctx: WorkflowContext): PRContext | null {
  * every downstream `quality.tier` read picks up the per-PR decision without
  * threading a new parameter through each vendor signature.
  *
+ * Only `tier` is folded. The class's `effort`, `steps` and `focus` are declared
+ * by the policy but are not yet wired into the vendor calls — effort still comes
+ * from `vendors.*.effort`, and every class runs the configured step list.
+ *
  * A null strategy — fixed mode, or an unreadable diff — returns the config
- * untouched, which is why `quality.tier` remains the documented fallback.
+ * untouched, and so does a class with no tier (`generated`), which is why
+ * `quality.tier` remains the documented fallback in both cases.
  */
 export function strategyQuality(
   quality: WorkflowContext['config']['quality'],
@@ -472,6 +489,28 @@ export function strategyQuality(
 ): WorkflowContext['config']['quality'] {
   if (!strategy?.tier) return quality
   return { ...quality, tier: strategy.tier }
+}
+
+/**
+ * The strategy fields a posted comment may cite.
+ *
+ * `tier` is null whenever the strategy did not actually put one in force: the
+ * matched class selects none (the configured `quality.tier` runs instead), or an
+ * explicit `vendors.*.model` outranks the tier and pins the model regardless.
+ * Naming a tier in either case would assert a routing decision that never
+ * happened — precisely the drift the citation exists to prevent.
+ */
+export function strategyCitation(
+  strategy: ResolvedStrategy | null,
+  vendor: { model?: string | null },
+): { version: string; classId: string; tier: string | null; reason: string } | undefined {
+  if (!strategy) return undefined
+  return {
+    version: strategy.version,
+    classId: strategy.classId,
+    tier: vendor.model ? null : strategy.tier,
+    reason: strategy.reason,
+  }
 }
 
 /**
@@ -696,6 +735,18 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
   emitPRComplexity(ctx, triggerField)
 
+  // Resolved once for the whole workflow, not per step. The fix step pushes
+  // commits before the recheck runs, so re-classifying mid-run can land in a
+  // different class and leave two comments on one PR citing different tiers.
+  const strategy = resolveStrategyForPR(ctx)
+  const quality = strategyQuality(config.quality, strategy)
+  if (strategy) {
+    // Only the tier is in force — `effort` and `steps` are recorded because the
+    // policy declares them, not because the reviewers receive them.
+    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${quality.tier} tier`))
+    fileLog({ level: 'info', event: 'strategy_resolved', repo: `${owner}/${repoName}`, pr: prNumber, strategy_version: strategy.version, pr_class: strategy.classId, tier: strategy.tier, applied_tier: quality.tier, effort: strategy.effort, effort_applied: false, steps_applied: false, domain: strategy.domain })
+  }
+
   try {
   // Inside the try so a preflight failure still reaches the completion handler in
   // the finally — resolving above it meant a failed mint skipped workflow_complete
@@ -773,14 +824,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let effort: string | undefined
       let retried: { timeoutMs: number; delayMs: number } | undefined
       const skillSession = skillSessionFor(step.name, effectiveType)
-      // Under `quality.mode: smart` the PR's class picks the tier; under fixed
-      // this is config.quality untouched.
-      const strategy = resolveStrategyForPR(ctx)
-      const quality = strategyQuality(config.quality, strategy)
-      if (strategy) {
-        log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${strategy.tier ?? 'skip'}${strategy.effort ? ` (${strategy.effort})` : ''}`))
-        fileLog({ level: 'info', event: 'strategy_resolved', repo: `${owner}/${repoName}`, pr: prNumber, strategy_version: strategy.version, pr_class: strategy.classId, tier: strategy.tier, effort: strategy.effort, domain: strategy.domain, ...stepIdentity })
-      }
+      // `quality` is the workflow-wide strategy fold resolved above: under
+      // `quality.mode: smart` the PR's class picked the tier, under fixed it is
+      // config.quality untouched.
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
           ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext, skillSession))
@@ -927,7 +973,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           ctx.trigger === 'kickass' ? 'kickass' : undefined,
           activatedSkills,
           effort,
-          strategy ? { version: strategy.version, classId: strategy.classId, tier: strategy.tier, reason: strategy.reason } : undefined,
+          strategyCitation(strategy, config.vendors[reviewer]),
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
@@ -1017,14 +1063,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
       if (!vendor) { skipFix('no_vendor'); continue }
 
-      // The fix step runs one tier below the review that produced the findings:
-      // it is generation against an explicit list, the task models are strongest
-      // at. Recheck deliberately does NOT step down — it decides whether to
-      // spend another round, and a weak judge there is how loops run away.
-      const fixStrategy = resolveStrategyForPR(ctx)
-      const fixQuality = strategyQuality(config.quality, fixStrategy)
-      const claudeFixModel = resolveClaudeModel(fixQuality, config.vendors.claude)
-      const codexFixModel = resolveCodexModel(fixQuality, config.vendors.codex)
+      // The fix step runs at the SAME tier as the review that produced the
+      // findings — there is no step-down. It reuses the strategy resolved once
+      // at the top of the workflow rather than re-classifying, so a fix that
+      // pushes commits cannot move the PR into another class mid-run.
+      const claudeFixModel = resolveClaudeModel(quality, config.vendors.claude)
+      const codexFixModel = resolveCodexModel(quality, config.vendors.codex)
 
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
       // Scope to commits ahead of base so long-lived branches (e.g. staging)

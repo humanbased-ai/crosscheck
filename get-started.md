@@ -1057,7 +1057,9 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 
 On re-runs, `onboard` updates only the fields it collected answers for. Everything else survives unchanged.
 
-**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `skills.enabled`, `tunnel.*`, `post_review.auto_fix.*`
+**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `quality.mode`, `skills.enabled`, `tunnel.*`, `post_review.auto_fix.*`
+
+**Deleted when you choose `smart`:** `vendors.codex.model` and `vendors.claude.model`. A pinned model outranks the per-PR tier, so leaving it would make smart mode a silent no-op. Onboard prints a line naming what it cleared. Choose a fixed tier instead if you want one model on every PR — `fixed` re-pins `vendors.codex.model` from the tier. A config written before `quality.mode` existed is treated as `fixed` and keeps its pins, so upgrading never rewrites them on its own.
 
 **Never touched by onboard:** per-repo overrides in `~/.crosscheck/workflows/` (owned by `crosscheck alter`), and `~/.crosscheck/workflow.yml` after its first write
 
@@ -1119,7 +1121,15 @@ vendors:
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:
+  mode: smart               # smart (default) | fixed
+  #   smart — the PR is classified from its changed-file list against
+  #           src/config/review-strategy.json and the matched class picks the
+  #           tier for that PR. Leave vendors.*.model unset: an explicit model
+  #           outranks the tier and makes per-PR selection a no-op.
+  #   fixed — every agent call uses `tier` below, whatever changed.
   tier: balanced            # fast | balanced | thorough
+  #   The tier under `fixed`, and the fallback under `smart` whenever a PR's
+  #   file list cannot be read (one-shot commands, shallow clones, API errors).
   focus:                    # narrows review scope (optional)
     - security
     - types

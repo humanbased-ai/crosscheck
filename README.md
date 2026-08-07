@@ -227,24 +227,26 @@ For review and recheck, Crosscheck also applies repository-defined review practi
 
 ### Dynamic thoroughness (`mode: smart`)
 
-**On by default.** Instead of one tier for every call, Crosscheck classifies each PR from its changed-file list and adjusts model and effort to match. Classification runs on the already-cloned working copy, so it costs one `git diff` and no API call.
+**On by default.** Instead of one tier for every call, Crosscheck classifies each PR from its changed-file list and picks the tier to match. Classification runs on the already-cloned working copy, so it costs one `git diff` and no API call.
 
-| # | PR class | Detected by | Tier | Steps |
-|---|---|---|---|---|
-| 1 | Generated / vendored | every file is a lockfile or build output | — | **skipped** |
-| 2 | Security / data-critical | auth, crypto, payment, migration paths; `risk:T3`; hotfix→default | `thorough` | full loop |
-| 3 | Deletion-only | ≤ 5 additions with ≥ 20 deletions | `fast` | review |
-| 4 | Docs / spec | ≥ 50% Markdown | `balanced` | **review only** |
-| 5 | Test-only | every file is a test | `fast` | review, fix |
-| 6 | Config / infra | ≥ 50% config, no source | `balanced` | full loop |
-| 7 | Trivial | ≤ 3 files, ≤ 150 lines | `fast` | review, fix |
-| 8 | Standard | everything else | `balanced` | full loop |
+| # | PR class | Detected by | Tier |
+|---|---|---|---|
+| 1 | Generated / vendored | every file is a lockfile or build output | — |
+| 2 | Security / data-critical | auth, crypto, payment, migration paths; `risk:T3`; hotfix→default | `thorough` |
+| 3 | Deletion-only | ≤ 5 additions with ≥ 20 deletions | `fast` |
+| 4 | Docs / spec | ≥ 50% Markdown | `balanced` |
+| 5 | Test-only | every file is a test | `fast` | 
+| 6 | Config / infra | ≥ 50% config, no source | `balanced` |
+| 7 | Trivial | ≤ 3 files, ≤ 150 lines | `fast` |
+| 8 | Standard | everything else | `balanced` |
+
+A `—` selects no tier, so the configured `quality.tier` applies to that PR unchanged.
 
 **Order is the routing logic** — first match wins, and security sits second so it dominates every cheapening rule below it. A deletion that removes auth code, or a two-file migration, is never routed to `fast`.
 
-Classification may set a **floor**, or promote on **consequence** — a security path is reviewed thoroughly because a miss there is expensive. It may **not** predict that a PR will be hard: across a 400-PR census, diff size correlates only 0.51 with realized review cost (the largest one-call PR was 101k lines; the most expensive changed 2 files). So escalation responds to what the review actually found — round 2 raises effort, round 3 switches vendor, then it hands off to a human rather than looping.
+**What is wired today: the tier, and nothing else.** The policy also declares a per-class `effort`, step set, and review focus, and [`review-strategy.ts`](./src/lib/review-strategy.ts) resolves all of them — but only the tier reaches the reviewers. Effort still comes from `vendors.*.effort`, every class runs the configured pipeline (a lockfile-only PR is reviewed, not skipped), and evidence-driven escalation across rounds is designed but not yet called from the runner. Comments cite only what actually applied, so a review is never described as skipped or as running at a tier that never reached the vendor.
 
-Where a model exposes no effort control (Haiku 4.5 has none, nor do most open-weight models), the effort step degrades to a tier promotion so escalation never silently no-ops.
+Classification may set a **floor**, or promote on **consequence** — a security path is reviewed thoroughly because a miss there is expensive. It may **not** predict that a PR will be hard: across a 400-PR census, diff size correlates only 0.51 with realized review cost (the largest one-call PR was 101k lines; the most expensive changed 2 files). This is why escalation is designed to respond to what a review actually found rather than to what the diff looks like.
 
 Every comment says which policy produced it:
 

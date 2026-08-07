@@ -1041,7 +1041,15 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     skills: input.skills,
     override: brand.reviewer_attribution,
     ...(input.strategy && {
-      strategyNote: `${input.strategy.tier ?? 'skipped'} tier · ${input.strategy.reason} · strategy v${input.strategy.version}`,
+      // No tier segment when the strategy did not put one in force — the matched
+      // class selects none, or an explicit vendors.*.model outranks it. A review
+      // that ran is never described as skipped, and a tier that never reached
+      // the vendor is never named.
+      strategyNote: [
+        input.strategy.tier ? `${input.strategy.tier} tier` : null,
+        input.strategy.reason,
+        `strategy v${input.strategy.version}`,
+      ].filter(Boolean).join(' · '),
     }),
   })}`
 

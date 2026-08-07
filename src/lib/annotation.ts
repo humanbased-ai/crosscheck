@@ -71,6 +71,11 @@ export function parseAnnotation(body: string): CrosscheckAnnotationInput | null 
     ...(fields.has('sha') && { sha: fields.get('sha') }),
     ...(fields.has('next_step') && { next_step: fields.get('next_step') }),
     ...(fields.has('trigger') && { trigger: fields.get('trigger') }),
+    // Read back out, not just written: otherwise the strategy fields are
+    // write-only and no reader can aggregate which policy produced a review.
+    ...(fields.has('strategy') && { strategy: fields.get('strategy') }),
+    ...(fields.has('class') && { class: fields.get('class') }),
+    ...(fields.has('tier') && { tier: fields.get('tier') }),
   }
 }
 

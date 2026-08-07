@@ -233,6 +233,23 @@ export interface ThoroughnessChoice {
 }
 
 /**
+ * `quality.mode` exactly as written in the file — undefined when the key is
+ * absent. loadConfig() runs ConfigSchema.parse, which defaults mode to `smart`;
+ * that is right at runtime but erases the one distinction onboard needs, so
+ * reading the parsed config here would make every migration guard below dead
+ * code and silently rewrite configs written before the field existed.
+ */
+function readRawQualityMode(configPath: string): string | undefined {
+  try {
+    const raw = yaml.load(readFileSync(configPath, 'utf8')) as { quality?: { mode?: unknown } } | null
+    const mode = raw?.quality?.mode
+    return typeof mode === 'string' ? mode : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * One question covering both knobs. `smart` leads because it is the default and
  * the better answer for most repos; the three fixed tiers stay available for
  * anyone who wants one model on everything.
@@ -278,10 +295,12 @@ async function promptQualityTier(
     })),
   ]
 
+  // `+ 1` offsets the leading `smart` entry. fallbackTier is always one of
+  // `tiers`, so indexOf never returns -1 and there is no negative case to guard.
   const defaultIdx = fallbackMode === 'smart' ? 0 : tiers.indexOf(fallbackTier) + 1
   const idx = await promptSinglePicker(items, {
     title: 'Review thoroughness — how should crosscheck spend its budget?',
-    defaultIndex: defaultIdx >= 0 ? defaultIdx : 0,
+    defaultIndex: defaultIdx,
   })
   console.log()
 
@@ -680,6 +699,12 @@ export function applyOnboardConfig(
   vendors.claude.effort = tierCfg.claude.effort
   vendors.codex.effort = tierCfg.codex.effort
   if (qualityMode === 'smart') {
+    // Say so before discarding user-authored config. A `--yes` re-run is
+    // non-interactive, so this line is the only notice the pin is gone.
+    const pinned = (['codex', 'claude'] as const).filter(v => (vendors[v] as Record<string, unknown>).model)
+    if (pinned.length > 0) {
+      console.log(chalk.yellow(`  cleared ${pinned.map(v => `vendors.${v}.model`).join(' and ')} — a pinned model outranks smart mode and would make per-PR selection a no-op`))
+    }
     delete (vendors.codex as Record<string, unknown>).model
     delete (vendors.claude as Record<string, unknown>).model
   } else {
@@ -1003,7 +1028,10 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     vendorConfig.claudeEnabled,
     vendorConfig.codexEnabled,
     existingConfig?.quality?.tier,
-    existingConfig?.quality?.mode,
+    // Raw, not existingConfig.quality.mode: the schema default would report
+    // `smart` for a config that never chose one, and the guard inside would
+    // never fire.
+    existsSync(configPath) ? readRawQualityMode(configPath) : undefined,
     opts,
   )
   const qualityTier = thoroughness.tier

@@ -39,15 +39,33 @@ vendors:
 
 # ─── Quality & Focus ─────────────────────────────────────────────────────────
 quality:
+  mode: smart               # smart (default) | fixed
+  #
+  # smart: the PR is classified from its changed-file list against the versioned
+  #   policy in src/config/review-strategy.json, and the matched class picks the
+  #   tier for that PR — auth, crypto, payment and migration paths are promoted
+  #   to `thorough`; a small or deletion-only change drops to `fast`. Each
+  #   comment cites the class and version that produced it.
+  #   Leave vendors.*.model unset under smart: an explicit model outranks the
+  #   tier, which makes per-PR selection a silent no-op. `crosscheck onboard`
+  #   clears the pin when you choose smart.
+  # fixed: every agent call uses `tier` below, whatever changed.
+  #
   tier: balanced            # fast | balanced | thorough
   #
+  # The tier under `fixed`, and the fallback under `smart` whenever a PR's file
+  # list cannot be read (one-shot commands, shallow clones, API failures).
   # Tier determines the model and effort level used for each vendor:
   #
-  #   tier       claude               codex        time     cost
-  #   ─────────  ───────────────────  ───────────  ───────  ──────
-  #   fast       Haiku 4.5 · low      GPT-5.6 Luna · low    ~10s  lowest
-  #   balanced   Sonnet 5 · medium    GPT-5.6 Terra · med   ~30s  standard
-  #   thorough   Opus 5 · max         GPT-5.6 Sol · high    ~60s  higher
+  #   tier       claude               codex                 cost per review
+  #   ─────────  ───────────────────  ───────────────────   ───────────────
+  #   fast       Haiku 4.5 · low      GPT-5.6 Luna · low    ~$0.24
+  #   balanced   Sonnet 5 · medium    GPT-5.6 Terra · med   ~$0.72
+  #   thorough   Opus 5 · max         GPT-5.6 Sol · high    ~$1.20
+  #
+  # A review is an agentic session, not one call: expect 10-16 minutes of wall
+  # clock at any tier. Tier changes depth and the subprocess timeout, not
+  # seconds-scale latency.
   #
   # crosscheck onboard writes these automatically when you pick a tier.
   # You can override individual vendor settings in the vendors: block below.
