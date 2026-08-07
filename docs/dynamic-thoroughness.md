@@ -10,21 +10,25 @@
 | **Next review due** | 2026-10-06 (60-day interval) |
 | **Re-verify** | `npm run verify:strategy` |
 
-Status: **adopted; partially wired**. This document is the evidence behind
+Status: **adopted and active**. This document is the evidence behind
 [`review-strategy.json`](../src/config/review-strategy.json); the JSON is what
 crosscheck reads at runtime. The runner classifies every PR from its cloned
 working copy, folds the result into the quality config the reviewers receive,
 and stamps the version, class, and tier into each annotation. When they disagree, the JSON wins and this document is
 stale — the weekly `Review Strategy` workflow files an issue when either drifts.
 
-**Only the `Tier` column below is enforced today.** `Effort` and `Steps` are
-resolved and logged but never applied: effort still comes from
-`vendors.*.effort`, and every class runs the configured pipeline — so class 1
-gets a review at the configured tier rather than being skipped, and class 4
-still runs its fix and recheck steps. `escalate()` is likewise not yet called
-from the runner, so §6.8's round ladder describes the design and not current
-behaviour. Comments cite only the tier that actually applied, so the citation
-never claims more than the runtime does.
+**What is enforced today:** the `Tier` and `Effort` columns below both reach the
+vendor call, and a class resolving to a null tier (class 1) skips the workflow
+outright rather than being reviewed at the configured tier.
+
+**What is not yet enforced:** the per-class `Steps` column. Pipeline depth still
+comes from `workflow.yml`, so class 4 runs whatever steps that file configures
+rather than review-only. `escalate()` is likewise not yet called from the runner,
+so §6.4's round ladder describes the design rather than current behaviour.
+
+Comments cite only what actually applied — no tier is named when the class
+selects none, or when an explicit `vendors.*.model` outranks the strategy — so
+the citation never claims more than the runtime does.
 
 Every crosscheck comment cites the strategy version it ran under, so a review from
 last month can be explained by the policy in force when it ran rather than the policy

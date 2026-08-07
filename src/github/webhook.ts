@@ -55,7 +55,6 @@ export function createWebhookServer(
   config: Config,
   webhookSecret: string,
   onPR: (event: PREvent) => void,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   onLog: (msg: string) => void,
   onFileLog?: (entry: WebhookFileLogEntry) => void,
   onComment?: (event: IssueCommentEvent) => void,

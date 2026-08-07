@@ -928,8 +928,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
-        ? { recheckVerdict: verdict, phase: donePhase, recheckTokens: tokensUsed, recheckReviewer: reviewer, qualityTier: config.quality.tier }
-        : { verdict, commentCount, phase: donePhase, crTokens: tokensUsed, crReviewer: reviewer, qualityTier: config.quality.tier }
+        ? { recheckVerdict: verdict, phase: donePhase, recheckTokens: tokensUsed, recheckReviewer: reviewer, qualityTier: quality.tier }
+        : { verdict, commentCount, phase: donePhase, crTokens: tokensUsed, crReviewer: reviewer, qualityTier: quality.tier }
 
       if (ctx.dryRun) {
         onPhaseChange('dry-run — comment not posted', phaseUpdate)
@@ -1645,7 +1645,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       failedStep,
       round: ctx.round,
       trigger: ctx.trigger,
-      qualityTier: config.quality.tier,
+      // The tier that actually ran, not the configured one — under smart mode
+      // they differ, and telemetry naming the wrong one is the same class of
+      // problem as a comment citing a tier that never reached the vendor.
+      qualityTier: strategyQuality(config.quality, strategy).tier,
     }) as Parameters<typeof fileLog>[0])
   }
 }
