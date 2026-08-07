@@ -1010,6 +1010,8 @@ export interface ReviewCommentBodyInput {
   trigger?: string
   /** Skills the reviewer activated for this step. Rendered under the attribution line. */
   skills?: SkillMetadata[]
+  /** Reasoning effort the reviewer CLI actually ran with (low/medium/high/xhigh/max/ultra). */
+  effort?: string
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -1029,7 +1031,11 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
   const defaultAttribution = isClaude
     ? `_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
     : `_Reviewed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
-  const attribution = brand.reviewer_attribution || defaultAttribution
+  // Model and effort ride the attribution rather than the body: they say how the
+  // review was produced. Rendered as its own italic run so a branded attribution
+  // (arbitrary markdown) still gets the run details without being rewritten.
+  const runDetail = [modelDisplay, input.effort ? `${input.effort} effort` : null].filter(Boolean).join(' · ')
+  const attribution = `${brand.reviewer_attribution || defaultAttribution}${runDetail ? ` _(${runDetail})_` : ''}`
   // Skill receipt sits directly beneath the attribution, not in the review body —
   // it is provenance for the run, and the body belongs to the findings.
   const skillsLine = renderSkillAttributionLine(input.skills ?? [])
@@ -1077,6 +1083,7 @@ export async function postReviewComment(
   nextStep?: string,
   trigger?: string,
   skills: SkillMetadata[] = [],
+  effort?: string,
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -1098,6 +1105,7 @@ export async function postReviewComment(
       nextStep,
       trigger,
       skills,
+      effort,
     }),
   })
   return comment.id
