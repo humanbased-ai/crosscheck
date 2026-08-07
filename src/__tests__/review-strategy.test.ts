@@ -12,6 +12,7 @@ import {
 } from '../lib/review-strategy.js'
 import { resolveClaudeModel, resolveCodexModel, effectiveTier } from '../lib/review-models.js'
 import type { CodexVendorConfig, QualityConfig } from '../config/schema.js'
+import { ConfigSchema } from '../config/schema.js'
 import { buildReviewCommentBody } from '../github/client.js'
 
 const pr = (files: string[], over: Partial<Parameters<typeof resolveReviewStrategy>[0]> = {}) =>
@@ -281,5 +282,19 @@ describe('strategy citation on the PR', () => {
     })
     expect(body).not.toContain('strategy=')
     expect(body).not.toContain('class=')
+  })
+})
+
+describe('smart mode is the default', () => {
+  // Regression: this default was silently lost in a squash merge, leaving every
+  // config on `mode: undefined` while the docs advertised smart as the default.
+  it('defaults quality.mode to smart on an empty config', () => {
+    const quality = ConfigSchema.parse({}).quality
+    expect(quality.mode).toBe('smart')
+    expect(quality.tier).toBe('balanced')
+  })
+
+  it('lets an explicit fixed opt out', () => {
+    expect(ConfigSchema.parse({ quality: { mode: 'fixed' } }).quality.mode).toBe('fixed')
   })
 })

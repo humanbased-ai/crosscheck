@@ -32,12 +32,17 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
 })
 
 export const QualityConfigSchema = z.object({
+  // The tier when `mode: fixed`, and the fallback under `mode: smart` whenever a
+  // PR's file list cannot be read (one-shot commands, API failures).
   tier: z.enum(['fast', 'balanced', 'thorough']).default('balanced'),
-  // fixed: every agent call uses the same tier (legacy behaviour; applied when unset).
-  // smart: the effective tier is chosen per-call based on diff size, prior
-  //        BLOCK verdicts, and step type — reducing cost on small/low-risk PRs
-  //        while still promoting hard calls to stronger models.
-  mode: z.enum(['fixed', 'smart']).optional(),
+  // smart (default): dynamically adjust model + effort based on task type. The PR
+  //   is classified from its changed-file list against the versioned policy in
+  //   config/review-strategy.json — a lockfile-only PR is skipped, a docs PR gets
+  //   review with no fix loop, a PR touching auth or a migration is promoted to
+  //   `thorough`. Escalation is evidence-driven, never predicted: round 2 raises
+  //   effort, round 3 switches vendor, then it hands off to a human.
+  // fixed: every agent call uses `tier` above, regardless of what changed.
+  mode: z.enum(['fixed', 'smart']).default('smart'),
   focus: z.array(z.string()).default([]),
   custom_prompt: z.string().optional(),
 })
