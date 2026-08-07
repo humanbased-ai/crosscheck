@@ -12,6 +12,7 @@ jobs:
     permissions:
       contents: write
       actions: write
+      pull-requests: write
 
     steps:
       - uses: actions/checkout@v4
@@ -43,16 +44,64 @@ jobs:
             fi
           fi
 
-      - name: Merge staging into main
+      # `main` is protected with "Changes must be made through a pull request"
+      # and enforce_admins on, so `git push origin main` is rejected for every
+      # token — a PAT included. That GH006 rejection failed every weekly run
+      # that actually had something to promote. Promotion goes through a PR now,
+      # like any other change to main.
+      #
+      # The PR head is a throwaway branch rather than `staging` itself: this repo
+      # has delete_branch_on_merge, and a merged PR whose head is `staging` asks
+      # GitHub to delete the integration branch. Branch protection currently
+      # refuses that deletion, but nothing should depend on it.
+      - name: Open promotion PR
+        id: pr
         if: steps.check.outputs.ahead != '0'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
         run: |
-          git checkout -B main origin/main
-          git merge origin/staging --no-ff \
-            -m "chore: weekly staging → main promotion ($(date -u +%Y-%m-%d))"
-          git push origin main
+          # Close any promotion PR left open by an earlier failed run so stale
+          # ones don't pile up, then branch from the staging tip.
+          for STALE in $(gh pr list --base main --state open --json number,headRefName \
+              -q '.[] | select(.headRefName | startswith("ci/promote-staging-")) | .number'); do
+            gh pr close "$STALE" --comment "Superseded by a newer promotion run." --delete-branch || true
+          done
+
+          BRANCH="ci/promote-staging-$(date -u +%Y%m%d-%H%M%S)"
+          git checkout -B "$BRANCH" origin/staging
+          git push origin "$BRANCH"
+
+          PR_URL=$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: weekly staging → main promotion ($(date -u +%Y-%m-%d))" \
+            --body "Automated weekly promotion — ${{ steps.check.outputs.ahead }} commits from \`staging\`.")
+          echo "url=$PR_URL" >> $GITHUB_OUTPUT
+
+      - name: Merge promotion PR
+        id: merge
+        if: steps.check.outputs.ahead != '0'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          # main requires no approvals and has no required status checks, so this
+          # merges immediately. --auto is the fallback if a future protection rule
+          # makes the PR wait: the merge then happens once that rule is satisfied,
+          # and this run reports the PR as still open.
+          gh pr merge "$PR_URL" --merge --delete-branch \
+            || gh pr merge "$PR_URL" --merge --auto --delete-branch
+          STATE=$(gh pr view "$PR_URL" --json state -q .state)
+          echo "state=$STATE" >> $GITHUB_OUTPUT
+          if [ "$STATE" = "MERGED" ]; then
+            echo "promoted staging → main via $PR_URL"
+          else
+            echo "::warning::$PR_URL is queued rather than merged (state: $STATE) — the release will start when it lands"
+          fi
 
       - name: Check token availability
         id: token_check
+        if: steps.merge.outputs.state == 'MERGED'
         run: |
           if [ -z "$RELEASE_TOKEN" ]; then
             echo "has_release_token=false" >> $GITHUB_OUTPUT
@@ -62,8 +111,12 @@ jobs:
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
+      # A merge performed with GITHUB_TOKEN does not raise a `push` event, so
+      # release.yml would never see the promotion. Dispatch it by hand. With a
+      # RELEASE_TOKEN the push event fires on its own and dispatching here would
+      # run the release twice.
       - name: Dispatch release workflow
-        if: steps.check.outputs.ahead != '0' && steps.token_check.outputs.has_release_token == 'false'
+        if: steps.merge.outputs.state == 'MERGED' && steps.token_check.outputs.has_release_token == 'false'
         run: gh workflow run release.yml --ref main
         env:
           GH_TOKEN: ${{ github.token }}
