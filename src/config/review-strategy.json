@@ -5,8 +5,8 @@
   "generated_at": "2026-08-07T05:00:00Z",
   "review_interval_days": 60,
   "report": "docs/dynamic-thoroughness.md",
-  "runtime_status": "defined_not_wired",
-  "_runtime_status_note": "This file is the adopted policy, but no runtime code reads it yet — resolveClaudeModel/resolveCodexModel still apply the single quality.tier. Verification, documentation, and the citation contract are in place ahead of the resolver so the policy is settled before it is enforced.",
+  "runtime_status": "active",
+  "_runtime_status_note": "Read at runtime by src/lib/review-strategy.ts. The runner classifies each PR from the cloned working copy and folds the result into the quality config the reviewers receive; the version, class, and tier are stamped into every annotation.",
   "_comment": "Single source of truth for how crosscheck picks a model, effort, and step set. Every review comment cites `version` so a past review can be explained by the policy in force when it ran. Supersedes review-model-tiers.json, which is retained for backwards compat. Re-verify every review_interval_days with `npm run verify:strategy`.",
 
   "sources": [
@@ -119,7 +119,7 @@
     },
     {
       "id": "deletion_only", "label": "Deletion-only",
-      "match": { "additions_max": 5, "requires_deletions": true },
+      "match": { "additions_max": 5, "deletions_min": 20 },
       "tier": "fast", "effort": "medium", "steps": ["review"],
       "focus": "dangling references only: imports, call sites, config keys, route registrations, docs pointing at removed symbols",
       "reason": "removal-only, so the risk is reference breakage rather than defect density; a wrong deletion is reverted, not patched"

@@ -15,6 +15,13 @@ export interface CrosscheckAnnotationInput {
   next_step?: string
   /** Workflow trigger that produced this annotation (e.g. 'kickass'). */
   trigger?: string
+  /** Review-strategy version in force. Lets a past review be explained by the
+   *  policy that produced it rather than the policy current at read time. */
+  strategy?: string
+  /** PR class the strategy matched (e.g. 'risky', 'docs'). */
+  class?: string
+  /** Tier that class selected. */
+  tier?: string
 }
 
 export interface CrosscheckCommitTrailerInput {
@@ -35,7 +42,12 @@ export function buildAnnotation(input: CrosscheckAnnotationInput): string {
   const sha = input.sha ? ` sha=${fieldValue(input.sha)}` : ''
   const nextStep = input.next_step ? ` next_step=${fieldValue(input.next_step)}` : ''
   const trigger = input.trigger ? ` trigger=${fieldValue(input.trigger)}` : ''
-  return `<!-- crosscheck: origin=${fieldValue(input.origin)} reviewer=${fieldValue(input.reviewer)} model=${fieldValue(input.model)} type=${fieldValue(input.type)} round=${input.round} verdict=${fieldValue(input.verdict)} service=${fieldValue(input.service)}${sha}${nextStep}${trigger} -->`
+  // Additive fields — parsers already tolerate unknown names, so appending
+  // these is a minor change, not a break in the annotation contract.
+  const strategy = input.strategy ? ` strategy=${fieldValue(input.strategy)}` : ''
+  const cls = input.class ? ` class=${fieldValue(input.class)}` : ''
+  const tier = input.tier ? ` tier=${fieldValue(input.tier)}` : ''
+  return `<!-- crosscheck: origin=${fieldValue(input.origin)} reviewer=${fieldValue(input.reviewer)} model=${fieldValue(input.model)} type=${fieldValue(input.type)} round=${input.round} verdict=${fieldValue(input.verdict)} service=${fieldValue(input.service)}${sha}${strategy}${cls}${tier}${nextStep}${trigger} -->`
 }
 
 export function parseAnnotation(body: string): CrosscheckAnnotationInput | null {

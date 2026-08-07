@@ -1011,6 +1011,9 @@ export interface ReviewCommentBodyInput {
   skills?: SkillMetadata[]
   /** Reasoning effort the reviewer CLI actually ran with (low/medium/high/xhigh/max/ultra). */
   effort?: string
+  /** Review strategy in force. Stamped into the annotation and quoted in the
+   *  attribution so a past review stays explicable after the policy changes. */
+  strategy?: { version: string; classId: string; tier: string | null; reason: string }
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -1037,6 +1040,9 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     effort: input.effort,
     skills: input.skills,
     override: brand.reviewer_attribution,
+    ...(input.strategy && {
+      strategyNote: `${input.strategy.tier ?? 'skipped'} tier · ${input.strategy.reason} · strategy v${input.strategy.version}`,
+    }),
   })}`
 
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
@@ -1053,6 +1059,11 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     ...(input.sha && { sha: input.sha }),
     ...(input.nextStep !== undefined && { next_step: input.nextStep }),
     ...(input.trigger !== undefined && { trigger: input.trigger }),
+    ...(input.strategy !== undefined && {
+      strategy: input.strategy.version,
+      class: input.strategy.classId,
+      ...(input.strategy.tier !== null && { tier: input.strategy.tier }),
+    }),
   })}`
 
   const replyPrefix = input.replyToCommentId
@@ -1082,6 +1093,7 @@ export async function postReviewComment(
   trigger?: string,
   skills: SkillMetadata[] = [],
   effort?: string,
+  strategy?: { version: string; classId: string; tier: string | null; reason: string },
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -1104,6 +1116,7 @@ export async function postReviewComment(
       trigger,
       skills,
       effort,
+      ...(strategy !== undefined && { strategy }),
     }),
   })
   return comment.id
