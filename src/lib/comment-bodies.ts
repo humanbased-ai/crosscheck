@@ -23,6 +23,8 @@ export interface AttributionFooterInput {
   skills?: SkillMetadata[]
   /** brand.reviewer_attribution — replaces the sentence, keeps the run details. */
   override?: string
+  /** One line naming the tier, why the PR earned it, and the strategy version. */
+  strategyNote?: string
 }
 
 export function buildAttributionFooter(input: AttributionFooterInput): string {
@@ -37,7 +39,11 @@ export function buildAttributionFooter(input: AttributionFooterInput): string {
     input.effort ? `${input.effort} effort` : null,
   ].filter(Boolean).join(' · ')
   const skillsLine = renderSkillAttributionLine(input.skills ?? [])
-  return `---\n${sentence}${runDetail ? ` _(${runDetail})_` : ''}${skillsLine ? `\n\n${skillsLine}` : ''}`
+  // Why this model ran, in the reviewer's own words — the matched class's
+  // reason, not prose written per review, so the explanation and the routing
+  // decision cannot drift apart.
+  const strategyLine = input.strategyNote ? `\n_${input.strategyNote}_` : ''
+  return `---\n${sentence}${runDetail ? ` _(${runDetail})_` : ''}${strategyLine}${skillsLine ? `\n\n${skillsLine}` : ''}`
 }
 
 // Cap the file list at this length to keep comment bodies readable when a

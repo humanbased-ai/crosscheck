@@ -12,6 +12,7 @@ import {
 } from '../lib/review-strategy.js'
 import { resolveClaudeModel, resolveCodexModel, effectiveTier } from '../lib/review-models.js'
 import type { CodexVendorConfig, QualityConfig } from '../config/schema.js'
+import { buildReviewCommentBody } from '../github/client.js'
 
 const pr = (files: string[], over: Partial<Parameters<typeof resolveReviewStrategy>[0]> = {}) =>
   resolveReviewStrategy({ files, additions: 100, deletions: 50, ...over })
@@ -58,6 +59,14 @@ describe('PR classification', () => {
   it('classifies a two-file migration as risky, not trivial', () => {
     const r = pr(['db/migrations/20260101_add.sql', 'src/x.ts'], { additions: 10, deletions: 2 })
     expect(r.classId).toBe('risky')
+  })
+
+  // Regression: `additions_max` alone matched a +2/-2 typo fix, because a small
+  // edit also has near-zero additions. Deletion-only needs a floor on deletions.
+  it('classifies a small edit as trivial, not deletion-only', () => {
+    const r = pr(['src/widget.ts'], { additions: 2, deletions: 2 })
+    expect(r.classId).toBe('trivial')
+    expect(r.steps).toContain('fix')
   })
 
   it('classifies a pure deletion as deletion-only with no fix loop', () => {
@@ -241,5 +250,36 @@ describe('ladder limits', () => {
     expect(l.maxRounds).toBe(3)
     expect(l.maxBlocking).toBe(5)
     expect(l.maxWallClockMin).toBeGreaterThan(0)
+  })
+})
+
+describe('strategy citation on the PR', () => {
+  it('stamps version, class, and tier into the annotation', () => {
+    const body = buildReviewCommentBody({
+      body: 'findings', reviewer: 'claude', origin: 'codex', verdict: 'BLOCK',
+      model: 'claude-opus-5', stepType: 'review', round: 1, sha: 'abc1234',
+      strategy: { version: '1.0.0', classId: 'risky', tier: 'thorough', reason: 'touches a security path' },
+    })
+    expect(body).toContain('strategy=1.0.0')
+    expect(body).toContain('class=risky')
+    expect(body).toContain('tier=thorough')
+    // Additive fields must not disturb the stable prefix other parsers read.
+    expect(body).toMatch(/<!-- crosscheck: origin=codex reviewer=claude model=claude-opus-5 type=review round=1 verdict=BLOCK service=crosscheck/)
+  })
+
+  it('quotes the matched class reason so the routing decision is auditable', () => {
+    const body = buildReviewCommentBody({
+      body: 'findings', reviewer: 'claude', verdict: 'APPROVE', model: 'claude-opus-5',
+      strategy: { version: '1.0.0', classId: 'risky', tier: 'thorough', reason: 'touches a security path' },
+    })
+    expect(body).toContain('thorough tier · touches a security path · strategy v1.0.0')
+  })
+
+  it('omits every strategy field under fixed mode', () => {
+    const body = buildReviewCommentBody({
+      body: 'findings', reviewer: 'claude', verdict: 'APPROVE', model: 'claude-sonnet-5',
+    })
+    expect(body).not.toContain('strategy=')
+    expect(body).not.toContain('class=')
   })
 })

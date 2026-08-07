@@ -21,6 +21,7 @@ import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js
 import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
+import { resolveReviewStrategy, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
@@ -412,6 +413,78 @@ function diffBucket(totalLines: number): string {
   return 'xlarge'
 }
 
+/**
+ * Builds the input the review strategy classifies on, from the already-cloned
+ * working copy rather than the API — the runner has the repo on disk, so this
+ * costs one `git diff` instead of a round trip.
+ *
+ * Returns null when the diff can't be read. Callers then fall back to the
+ * configured tier, which is why `quality.tier` stays meaningful under smart mode.
+ */
+export function buildPRContext(ctx: WorkflowContext): PRContext | null {
+  const { tmpDir, pr } = ctx
+  try {
+    const raw = execSync(
+      `git diff --numstat origin/${pr.base.ref}...HEAD`,
+      { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim()
+    if (!raw) return null
+
+    const files: string[] = []
+    let additions = 0
+    let deletions = 0
+    for (const line of raw.split('\n')) {
+      // numstat: <added>\t<deleted>\t<path>. Binary files report '-' for both.
+      const [add, del, ...rest] = line.split('\t')
+      const path = rest.join('\t').trim()
+      if (!path) continue
+      files.push(path)
+      additions += parseInt(add, 10) || 0
+      deletions += parseInt(del, 10) || 0
+    }
+    if (files.length === 0) return null
+
+    return {
+      files,
+      additions,
+      deletions,
+      labels: pr.labels?.map(l => l.name) ?? [],
+      title: pr.title,
+      baseRef: pr.base.ref,
+      ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Folds a resolved strategy into the quality config the reviewers receive, so
+ * every downstream `quality.tier` read picks up the per-PR decision without
+ * threading a new parameter through each vendor signature.
+ *
+ * A null strategy — fixed mode, or an unreadable diff — returns the config
+ * untouched, which is why `quality.tier` remains the documented fallback.
+ */
+export function strategyQuality(
+  quality: WorkflowContext['config']['quality'],
+  strategy: ResolvedStrategy | null,
+): WorkflowContext['config']['quality'] {
+  if (!strategy?.tier) return quality
+  return { ...quality, tier: strategy.tier }
+}
+
+/**
+ * Classifies the PR and resolves the strategy, or returns null under
+ * `quality.mode: fixed` so the single configured tier applies unchanged.
+ */
+export function resolveStrategyForPR(ctx: WorkflowContext): ResolvedStrategy | null {
+  if (ctx.config.quality.mode !== 'smart') return null
+  const prContext = buildPRContext(ctx)
+  if (!prContext) return null
+  return resolveReviewStrategy(prContext)
+}
+
 function emitPRComplexity(ctx: WorkflowContext, triggerField: Record<string, unknown>): void {
   const { owner, repoName, prNumber, tmpDir, pr, config } = ctx
   try {
@@ -700,13 +773,21 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let effort: string | undefined
       let retried: { timeoutMs: number; delayMs: number } | undefined
       const skillSession = skillSessionFor(step.name, effectiveType)
+      // Under `quality.mode: smart` the PR's class picks the tier; under fixed
+      // this is config.quality untouched.
+      const strategy = resolveStrategyForPR(ctx)
+      const quality = strategyQuality(config.quality, strategy)
+      if (strategy) {
+        log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${strategy.tier ?? 'skip'}${strategy.effort ? ` (${strategy.effort})` : ''}`))
+        fileLog({ level: 'info', event: 'strategy_resolved', repo: `${owner}/${repoName}`, pr: prNumber, strategy_version: strategy.version, pr_class: strategy.classId, tier: strategy.tier, effort: strategy.effort, domain: strategy.domain, ...stepIdentity })
+      }
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext, skillSession))
+          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext, skillSession))
           inputTokens = undefined
           outputTokens = undefined
         } else {
-          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, effort, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, ctx.issueContext, skillSession))
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, effort, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, ctx.issueContext, skillSession))
         }
       }
 
@@ -846,6 +927,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           ctx.trigger === 'kickass' ? 'kickass' : undefined,
           activatedSkills,
           effort,
+          strategy ? { version: strategy.version, classId: strategy.classId, tier: strategy.tier, reason: strategy.reason } : undefined,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
@@ -935,8 +1017,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
       if (!vendor) { skipFix('no_vendor'); continue }
 
-      const claudeFixModel = resolveClaudeModel(config.quality, config.vendors.claude)
-      const codexFixModel = resolveCodexModel(config.quality, config.vendors.codex)
+      // The fix step runs one tier below the review that produced the findings:
+      // it is generation against an explicit list, the task models are strongest
+      // at. Recheck deliberately does NOT step down — it decides whether to
+      // spend another round, and a weak judge there is how loops run away.
+      const fixStrategy = resolveStrategyForPR(ctx)
+      const fixQuality = strategyQuality(config.quality, fixStrategy)
+      const claudeFixModel = resolveClaudeModel(fixQuality, config.vendors.claude)
+      const codexFixModel = resolveCodexModel(fixQuality, config.vendors.codex)
 
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
       // Scope to commits ahead of base so long-lived branches (e.g. staging)
@@ -1262,7 +1350,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
       if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
-      const conflictResolveModel = resolveClaudeModel(config.quality, config.vendors.claude)
+      // Conflict-resolve is mechanical text surgery bounded by the markers —
+      // measured at 37s against ~643s for a review — so it always runs fast.
+      const conflictResolveModel = resolveClaudeModel(
+        { ...config.quality, tier: config.quality.mode === 'smart' ? 'fast' : config.quality.tier },
+        config.vendors.claude,
+      )
 
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
       if (isFork) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }

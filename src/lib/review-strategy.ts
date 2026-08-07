@@ -25,7 +25,7 @@ const MatchSchema = z.object({
   or_labels: z.array(z.string()).optional(),
   or_hotfix_to_default_branch: z.boolean().optional(),
   additions_max: z.number().optional(),
-  requires_deletions: z.boolean().optional(),
+  deletions_min: z.number().optional(),
   doc_fraction_min: z.number().optional(),
   config_fraction_min: z.number().optional(),
   source_files_max: z.number().optional(),
@@ -152,7 +152,9 @@ function matches(cls: z.infer<typeof PRClassSchema>, pr: PRContext): boolean {
   }
 
   if (m.additions_max !== undefined && additions > m.additions_max) return false
-  if (m.requires_deletions === true && deletions <= 0) return false
+  // A floor on deletions, not merely "some deletions": a +2/-2 typo fix has
+  // near-zero additions too, and is a modification rather than a removal.
+  if (m.deletions_min !== undefined && deletions < m.deletions_min) return false
 
   const frac = srcChurnFraction(files)
   if (m.doc_fraction_min !== undefined && frac.doc < m.doc_fraction_min) return false

@@ -10,9 +10,14 @@ export interface PREvent {
     title: string
     body: string
     head: { ref: string; sha: string; repo: { full_name: string } | null }
-    base: { ref: string; repo: { full_name: string } }
+    // `default_branch` lets the review strategy tell a hotfix aimed at the
+    // trunk from one aimed at a release branch. Optional: it is absent from
+    // hand-built events in tests and from some third-party redeliveries.
+    base: { ref: string; repo: { full_name: string; default_branch?: string } }
     html_url: string
     user: { login: string }
+    // Present on real webhook deliveries; used by the strategy's risk class.
+    labels?: Array<{ name: string }>
   }
   repository: {
     name: string
