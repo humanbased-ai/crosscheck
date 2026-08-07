@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-repo workflow depth moved from config to files.** It is no longer a `repos[].steps` field in `crosscheck.config.yml`; each override lives in `~/.crosscheck/workflows/<owner>__<repo>.yml` (written by `crosscheck alter`) and *narrows* the global `~/.crosscheck/workflow.yml`. Overrides are read per PR event — live-reloaded, no `watch` restart.
 - **Default pipeline is now `review → fix → recheck`.** The built-in default and the `crosscheck onboard` default are the full loop; scope down per repo with `crosscheck alter`.
 
+### Changed
+
+- **`quality.mode` now defaults to `smart`.** ⚠️ On upgrade this is a **silent behavior change** for existing installs: a config that sets `quality.tier` but no `quality.mode` switches from one fixed tier to **per-PR selection**. The tier, effort, and step set now come from the class each PR matches against the versioned policy in `src/config/review-strategy.json` — a lockfile-only PR is skipped outright, a docs PR narrows to review with no fix loop, a PR touching auth or a migration is promoted to `thorough` — and rounds past the first escalate on measured non-convergence. To keep the previous behavior, add `mode: fixed` under `quality:`, or re-run `crosscheck onboard`, which reads the raw yaml and preserves a tier that was written before `mode` existed. Every review comment cites the strategy version, class, and tier it ran under.
+
 ### Added
 
 - **`crosscheck alter <repo>`** (alias `alter-workflow`) — set a per-repo workflow override: `--steps review,fix,recheck`, `--review-only`, `--show`, `--reset`.

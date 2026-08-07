@@ -232,9 +232,40 @@ export function ladderLimits(): { maxRounds: number; maxBlocking: number; maxWal
 }
 
 /**
- * Escalation for round N. Raises effort where the model supports it; where it
- * does not (most open-weight models expose no effort ladder), degrades to a
- * tier promotion instead — `ladder.effort_fallback`.
+ * True when the strategy's model map has an entry for this ID — i.e. its effort
+ * ladder is known at all. Distinct from an entry whose ladder is empty: haiku's
+ * `[]` means "no effort control", while a pinned ID or codex under subscription
+ * auth (where the CLI picks the model) means "capability unknown".
+ */
+function modelIsKnown(model: string): boolean {
+  return Object.prototype.hasOwnProperty.call(STRATEGY.models, model)
+}
+
+/** One vendor that may review this round. */
+export interface EscalationLane {
+  /** The model that would run for this vendor at the class tier. */
+  model: string
+  /** The vendor CLI's effort flags. Omitted = judge on model capability alone. */
+  accepted?: readonly string[]
+}
+
+/**
+ * Escalation for round N. Raises effort where the vendor that will actually run
+ * can deliver a higher one; where it cannot, degrades to a tier promotion
+ * instead — `ladder.effort_fallback`.
+ *
+ * `lanes` are the vendors in play, not claude alone. Collapsing them produced
+ * two separate no-ops:
+ *   - judging by the claude tier model on a codex-only install promoted a tier
+ *     every round (haiku exposes no effort ladder) while codex — which accepts
+ *     none…max — sat at the effort it started on;
+ *   - judging by MODEL capability alone made round 3 identical to round 2 on
+ *     claude: claude-opus-5 reasons at `xhigh`, the claude CLI has no flag for
+ *     it, so the wire effort clamped straight back down to round 2's `high`.
+ *
+ * So each lane is judged post-clamp, at the wire, and effort rises only when
+ * EVERY lane rises there. Otherwise the tier is promoted, which every lane can
+ * express.
  *
  * The model never weakens across rounds. Scope narrows instead: a recheck
  * examines the delta plus the open findings, not the whole PR again.
@@ -242,26 +273,41 @@ export function ladderLimits(): { maxRounds: number; maxBlocking: number; maxWal
 export function escalate(
   base: { tier: Tier; effort: string | null },
   round: number,
-  model: string,
+  lanes: string | readonly EscalationLane[],
 ): { tier: Tier; effort: string | null } {
   if (round <= 1) return base
 
-  // Clamp the target to what the model accepts, then compare it against what the
-  // round before already asked for. An exact `levels.includes(target)` test made
-  // round 3 miss on any model whose ladder tops out below xhigh (deepseek:
-  // none/high/max) and return base.effort — weaker than round 2.
-  const target = round >= 3 ? 'xhigh' : 'high'
-  const clamped = clampEffort(model, target)
-  const previous = round >= 3 ? clampEffort(model, 'high') ?? base.effort : base.effort
-  if (clamped !== null && effortIndex(clamped) > effortIndex(previous)) {
-    return { tier: base.tier, effort: clamped }
+  const list: readonly EscalationLane[] = typeof lanes === 'string' ? [{ model: lanes }] : lanes
+  // Both clamps, in order: what the MODEL can reason at, then what the CLI has a
+  // flag for. Only the second reaches the wire.
+  const wire = (lane: EscalationLane, effort: string | null): string | null => {
+    const atModel = modelIsKnown(lane.model) ? clampToLevels(effort, effortLevelsFor(lane.model)) : effort
+    return lane.accepted ? clampToLevels(atModel, lane.accepted) : atModel
   }
 
-  // Effort cannot rise on this model — promote a tier instead (the strategy's
-  // ladder.effort_fallback), capped at thorough.
+  // Compare the target against what the round before already asked for. An exact
+  // `levels.includes(target)` test made round 3 miss on any model whose ladder
+  // tops out below xhigh (deepseek: none/high/max) and return base.effort —
+  // weaker than round 2.
+  const target = round >= 3 ? 'xhigh' : 'high'
+  const previousTarget = round >= 3 ? 'high' : base.effort
+  const clamped = list.map(lane => wire(lane, target))
+  const rises = list.length > 0 && list.every((lane, i) => {
+    const now = clamped[i]
+    return now !== null && effortIndex(now) > effortIndex(wire(lane, previousTarget) ?? base.effort)
+  })
+  // The strongest level any lane accepts; each vendor config is clamped back down
+  // to its own vocabulary downstream (strategyVendor), so a lane that cannot
+  // reach it is not sent it.
+  const best = clamped.reduce<string | null>((a, b) => (effortIndex(b) > effortIndex(a) ? b : a), null)
+
+  if (rises) return { tier: base.tier, effort: best }
+
+  // Effort cannot rise on at least one lane — promote a tier instead (the
+  // strategy's ladder.effort_fallback), capped at thorough.
   const idx = TIER_LADDER.indexOf(base.tier)
   const promoted = TIER_LADDER[Math.min(idx + 1, TIER_LADDER.length - 1)]
-  return { tier: promoted, effort: clamped ?? base.effort }
+  return { tier: promoted, effort: best ?? base.effort }
 }
 
 /** Clamps a requested effort to what the model actually accepts. */

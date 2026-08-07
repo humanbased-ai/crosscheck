@@ -1295,6 +1295,13 @@ repo pinned to review-only with `crosscheck alter` stays review-only. Rounds pas
 the first escalate on measured non-convergence: effort rises where the model
 supports it, the tier is promoted where it does not.
 
+Note that classes 3 and 4 narrow to `review` alone, which also drops
+`conflict-resolve` — review-only never touches code, and auto-conflict-resolve
+is code modification. That rule normally follows an operator's explicit
+`crosscheck alter --review-only`; under smart mode the *classifier* can reach it
+too, so a docs-only or deletion-only PR with a merge conflict is reviewed but not
+auto-resolved. Set `mode: fixed` if you want auto-conflict-resolve on every PR.
+
 Every comment cites the policy that produced it:
 
 ```

@@ -287,6 +287,19 @@ export interface ScanRepo {
   name: string
 }
 
+/**
+ * The paged listing types are narrower than the API response: both fields are
+ * present on the wire and feed the review strategy's `risky` class. Spread into
+ * the result so an absent field stays absent rather than becoming `undefined`.
+ */
+function widenPRListing(pr: unknown): { labels?: string[]; defaultBranch?: string } {
+  const wide = pr as { labels?: Array<{ name: string }>; base?: { repo?: { default_branch?: string } } }
+  return {
+    ...(wide.labels !== undefined && { labels: wide.labels.map(l => l.name) }),
+    ...(wide.base?.repo?.default_branch !== undefined && { defaultBranch: wide.base.repo.default_branch }),
+  }
+}
+
 export async function listOpenPRs(
   owner: string,
   repo: string,
@@ -325,15 +338,7 @@ export async function listOpenPRs(
         headRef: pr.head.ref,
         headRepo: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref,
-        ...(() => {
-          // The paged listing type is narrower than the API response; both
-          // fields are present on the wire and feed the risky class.
-          const wide = pr as unknown as { labels?: Array<{ name: string }>; base?: { repo?: { default_branch?: string } } }
-          return {
-            ...(wide.labels !== undefined && { labels: wide.labels.map(l => l.name) }),
-            ...(wide.base?.repo?.default_branch !== undefined && { defaultBranch: wide.base.repo.default_branch }),
-          }
-        })(),
+        ...widenPRListing(pr),
         body: pr.body,
         createdAt: pr.created_at,
         updatedAt: pr.updated_at,
@@ -435,15 +440,7 @@ export async function listOpenPRsForScan(owner: string, repo: string, token: str
         headRef: pr.head.ref,
         headRepo: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref,
-        ...(() => {
-          // The paged listing type here is narrower than the API response;
-          // both fields are present on the wire and feed the risky class.
-          const wide = pr as unknown as { labels?: Array<{ name: string }>; base?: { repo?: { default_branch?: string } } }
-          return {
-            ...(wide.labels !== undefined && { labels: wide.labels.map(l => l.name) }),
-            ...(wide.base?.repo?.default_branch !== undefined && { defaultBranch: wide.base.repo.default_branch }),
-          }
-        })(),
+        ...widenPRListing(pr),
         createdAt: pr.created_at,
         updatedAt: pr.updated_at,
         url: pr.html_url,

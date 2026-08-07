@@ -22,7 +22,7 @@ import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js
 import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
-import { resolveReviewStrategy, escalate, clampToLevels, type PRContext, type ResolvedStrategy } from './review-strategy.js'
+import { resolveReviewStrategy, escalate, clampToLevels, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
@@ -584,10 +584,24 @@ export function resolveRoundExecution(
     }
   }
 
+  // The vendors that may actually run this round, each with the model it would
+  // use and the vocabulary its CLI accepts. Keyed to the enabled vendors rather
+  // than to claude alone: on a codex-only install the claude tier model is never
+  // called, so judging escalation by its effort ladder promoted a tier every
+  // round while codex sat at the effort it started on.
+  const baseQuality = strategyQuality(config.quality, strategy)
+  const lanes: EscalationLane[] = []
+  if (config.vendors.claude.enabled) {
+    lanes.push({ model: resolveClaudeModel(baseQuality, config.vendors.claude), accepted: CLAUDE_EFFORT_LEVELS })
+  }
+  if (config.vendors.codex.enabled) {
+    lanes.push({ model: resolveCodexModel(baseQuality, config.vendors.codex), accepted: CODEX_EFFORT_LEVELS })
+  }
+
   const escalated = escalate(
     { tier: strategy.tier ?? config.quality.tier, effort: strategy.effort },
     round,
-    resolveClaudeModel(strategyQuality(config.quality, strategy), config.vendors.claude),
+    lanes,
   )
   const roundStrategy = { ...strategy, tier: escalated.tier, effort: escalated.effort }
   const quality = strategyQuality(config.quality, roundStrategy)
@@ -605,7 +619,7 @@ export function resolveRoundExecution(
 }
 
 function emitPRComplexity(ctx: WorkflowContext, triggerField: Record<string, unknown>, effectiveTierForRun: Config['quality']['tier']): void {
-  const { owner, repoName, prNumber, tmpDir, pr, config } = ctx
+  const { owner, repoName, prNumber, tmpDir, pr } = ctx
   try {
     const raw = execSync(
       `git diff --stat origin/${pr.base.ref}...HEAD`,
@@ -745,9 +759,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     // A config written before `mode` existed parses as smart on upgrade, so a
     // hand-set `quality.tier` can be silently overridden. onboard preserves the
     // old tier by reading raw yaml, but that only helps users who re-run it —
-    // so say it here for everyone else.
+    // so record it here for everyone else.
+    //
+    // info, not warn: `config.quality.tier` carries a schema default of
+    // `balanced` on every install, so the parsed config cannot tell a hand-set
+    // tier from an unset one. Five of the eight classes resolve to something
+    // other than balanced, which made this fire on the majority of PRs — and
+    // recommend a `mode: fixed` opt-out to users who never chose a tier at all.
+    // Only the raw yaml can draw that distinction (thoroughnessDefaults), and it
+    // is not available on this path.
     if (strategy.tier && strategy.tier !== config.quality.tier) {
-      fileLog({ level: 'warn', event: 'strategy_overrode_configured_tier', repo: `${owner}/${repoName}`, pr: prNumber, configured_tier: config.quality.tier, applied_tier: strategy.tier, pr_class: strategy.classId, hint: 'set quality.mode: fixed to keep one tier for every PR' })
+      fileLog({ level: 'info', event: 'strategy_overrode_configured_tier', repo: `${owner}/${repoName}`, pr: prNumber, configured_tier: config.quality.tier, applied_tier: strategy.tier, pr_class: strategy.classId })
     }
     fileLog({ level: 'info', event: 'strategy_resolved', repo: `${owner}/${repoName}`, pr: prNumber, strategy_version: strategy.version, pr_class: strategy.classId, tier: strategy.tier, effort: strategy.effort, steps: strategy.steps, domain: strategy.domain })
   }
@@ -890,10 +912,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // Logged once per run, not per step: nothing here depends on `step`, and
   // recomputing inside the loop printed the same line for review and recheck.
   if (strategy && roundStrategy) {
+    // Report the effort each vendor was actually GIVEN, not the level the round
+    // asked for. The two CLI vocabularies differ, so one round can send codex
+    // `xhigh` and claude `high`; printing the request names a level nobody ran.
+    const appliedEffort = [...new Set([
+      ...(config.vendors.claude.enabled ? [claudeVendor.effort] : []),
+      ...(config.vendors.codex.enabled ? [codexVendor.effort] : []),
+    ])].join('/')
     const escalatedNote = escalated ? ` · round ${ctx.round} escalated` : ''
-    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${roundStrategy.tier ?? 'skip'} tier${roundStrategy.effort ? ` (${roundStrategy.effort})` : ''}${escalatedNote}`))
+    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${roundStrategy.tier ?? 'skip'} tier${appliedEffort ? ` (${appliedEffort})` : ''}${escalatedNote}`))
     if (escalatedNote) {
-      fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, strategy_version: strategy.version })
+      fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, applied_effort_claude: config.vendors.claude.enabled ? claudeVendor.effort : null, applied_effort_codex: config.vendors.codex.enabled ? codexVendor.effort : null, strategy_version: strategy.version })
     }
   }
 

@@ -612,9 +612,16 @@ export async function runWatch(opts: WatchOpts = {}) {
         })
 
         void verdict
-        reviewedPRKeys.add(prKey)
-        reviewedPRShaKeys.add(key)  // key = "owner/repo#pr@sha"
-        prRoundCounts.set(prKey, round)
+        // A strategy-skipped PR never ran a review, so it must stay out of the
+        // session caches. reviewedPRKeys is what makes the next event on this PR
+        // an `isRecheckRun`, and a review coerced to a recheck is deliberately
+        // never gated by max_rounds — so a lockfile-only PR that later gains
+        // source files would be "rechecked" against findings never posted.
+        if (strategySkipped === undefined) {
+          reviewedPRKeys.add(prKey)
+          reviewedPRShaKeys.add(key)  // key = "owner/repo#pr@sha"
+          prRoundCounts.set(prKey, round)
+        }
         // Recompute the diff hash AFTER runWorkflow — workflow steps such as
         // `conflict-resolve` or `fix` followed by `recheck` can mutate the checkout,
         // so the pre-workflow hash may not represent the content that was actually
@@ -632,7 +639,10 @@ export async function runWatch(opts: WatchOpts = {}) {
             if (headSha !== params.headSha) fixCommitSha = headSha
           } catch { /* fall back — skip auto-loop this cycle */ }
         }
-        if (newDiffHash) {
+        // Same gate as the session caches above: caching the diff of a PR that was
+        // never reviewed would make the first event that *should* review it get
+        // skipped as `no_diff_change`.
+        if (newDiffHash && strategySkipped === undefined) {
           // For non-commit delivery with an applied fix the checkout may be on a fix
           // branch; computeDiffHash would return the post-fix diff, not the original PR
           // diff. Caching that under prKey corrupts future no_diff_change checks for the

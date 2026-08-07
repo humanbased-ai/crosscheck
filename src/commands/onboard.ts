@@ -1030,16 +1030,17 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log()
 
   // ── Step 5: Primary author (cross-vendor + personal only) ───────────────────
-  console.log(chalk.bold('Step 5 — your coding agent'))
-  console.log(chalk.dim('  Routes your PRs to the other vendor even when the attribution footer is missing.'))
-
+  // Header and description live inside the branch: printing them unconditionally
+  // and then skipping the prompt left a heading describing a question never asked.
   let authorVendor: 'claude' | 'codex' | 'both' = 'both'
   if (vendorConfig.mode === 'cross-vendor' && deployment === 'personal') {
+    console.log(chalk.bold('Step 5 — your coding agent'))
+    console.log(chalk.dim('  Routes your PRs to the other vendor even when the attribution footer is missing.'))
     const existingRoutes = (existingConfig?.routing?.author_routes as Record<string, string> | undefined) ?? null
     authorVendor = await promptAuthorVendor(login, existingRoutes, opts)
   } else {
     const reason = vendorConfig.mode === 'single-vendor' ? 'single-vendor mode' : 'team mode'
-    console.log(chalk.dim(`  Skipped — not applicable in ${reason}.`))
+    console.log(chalk.bold('Step 5 — your coding agent') + chalk.dim(` — skipped, not applicable in ${reason}.`))
     console.log()
   }
 
