@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { appendSkillAttribution, formatSkillAttribution, renderSkillAttributionLine } from '../skills/attribution.js'
+import { formatSkillAttribution, renderSkillAttributionLine } from '../skills/attribution.js'
 import { buildReviewCommentBody } from '../github/client.js'
 import type { SkillMetadata } from '../skills/broker.js'
 import { callSkillBrokerTool, createSkillActivationSession } from '../skills/broker.js'
@@ -28,14 +28,7 @@ describe('skill attribution', () => {
     )
   })
 
-  it('appends the receipt as a subtle trailing line', () => {
-    expect(appendSkillAttribution('Review body', [SKILL])).toBe(
-      'Review body\n\n_Skills: code-review-skill (by @awesome-skills, MIT)_',
-    )
-  })
-
-  it('does not add attribution when no skill activated', () => {
-    expect(appendSkillAttribution('Review body', [])).toBe('Review body')
+  it('renders nothing when no skill activated', () => {
     expect(renderSkillAttributionLine([])).toBe('')
   })
 
@@ -58,9 +51,9 @@ describe('skill attribution', () => {
   it('uses the step receipt rather than the enabled catalog', () => {
     const session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
     try {
-      expect(appendSkillAttribution('Review body', session.activations())).toBe('Review body')
+      expect(renderSkillAttributionLine(session.activations())).toBe('')
       callSkillBrokerTool(session.path, 'activate_skill', { name: 'code-review-skill' })
-      expect(appendSkillAttribution('Review body', session.activations()))
+      expect(renderSkillAttributionLine(session.activations()))
         .toContain('code-review-skill (by @awesome-skills, MIT)')
     } finally {
       session.close()

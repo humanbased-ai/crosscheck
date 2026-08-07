@@ -14,6 +14,14 @@ const EFFORT_MAP: Record<string, string> = {
   max: 'max',
 }
 
+// Whitelist rather than translation — anything outside the schema's vocabulary
+// falls back to medium instead of reaching the CLI as an arbitrary string.
+// Shared with the fix and conflict-resolve steps so every Claude call in a run
+// uses the same effort, and the comment can report it.
+export function claudeEffort(effort?: string): string {
+  return (effort && EFFORT_MAP[effort]) ?? 'medium'
+}
+
 // Detect transient Claude API errors that should be retried:
 // - 429 session limit: "You've hit your session limit"
 // - Socket disconnect: "socket connection was closed unexpectedly"
@@ -72,7 +80,7 @@ export async function runClaudeReview(
   skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
   const model = resolveClaudeModel(quality, vendor)
-  const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
+  const effort = claudeEffort(vendor.effort)
   const focusLine = quality.focus.length > 0
     ? `Focus areas: ${quality.focus.join(', ')}.`
     : ''

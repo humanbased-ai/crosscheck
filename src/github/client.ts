@@ -2,8 +2,7 @@ import { Octokit } from 'octokit'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { buildAnnotation, parseAnnotation, parseAnnotationFields, type CrosscheckStepType } from '../lib/annotation.js'
 import { modelDisplayName } from '../lib/review-models.js'
-import { CROSSCHECK_REPO_URL } from '../lib/product.js'
-import { renderSkillAttributionLine } from '../skills/attribution.js'
+import { buildAttributionFooter } from '../lib/comment-bodies.js'
 import type { SkillMetadata } from '../skills/broker.js'
 
 export function createGithubClient(token: string) {
@@ -1028,18 +1027,17 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
   const modelSegment = modelDisplay ? ` · ${modelDisplay}` : ''
   const header = `### ${stepVerb(stepType)} by ${vendorLabel}${modelSegment}${serviceSegment}\n\n`
 
-  const defaultAttribution = isClaude
-    ? `_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
-    : `_Reviewed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
-  // Model and effort ride the attribution rather than the body: they say how the
-  // review was produced. Rendered as its own italic run so a branded attribution
-  // (arbitrary markdown) still gets the run details without being rewritten.
-  const runDetail = [modelDisplay, input.effort ? `${input.effort} effort` : null].filter(Boolean).join(' · ')
-  const attribution = `${brand.reviewer_attribution || defaultAttribution}${runDetail ? ` _(${runDetail})_` : ''}`
-  // Skill receipt sits directly beneath the attribution, not in the review body —
-  // it is provenance for the run, and the body belongs to the findings.
-  const skillsLine = renderSkillAttributionLine(input.skills ?? [])
-  const footer = `\n\n---\n${attribution}${skillsLine ? `\n\n${skillsLine}` : ''}`
+  // Model, effort and the skill receipt ride the attribution rather than the
+  // body: they say how the review was produced, and the body belongs to the
+  // findings. Same builder as the fix and conflict-resolve cards.
+  const footer = `\n\n${buildAttributionFooter({
+    action: 'Reviewed',
+    vendor: reviewer,
+    model,
+    effort: input.effort,
+    skills: input.skills,
+    override: brand.reviewer_attribution,
+  })}`
 
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''

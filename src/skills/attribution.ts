@@ -14,7 +14,3 @@ export function renderSkillAttributionLine(skills: SkillMetadata[]): string {
   return `_Skills: ${formatSkillAttribution(skills)}_`
 }
 
-export function appendSkillAttribution(body: string, skills: SkillMetadata[]): string {
-  const line = renderSkillAttributionLine(skills)
-  return line ? `${body}\n\n${line}` : body
-}
