@@ -227,26 +227,26 @@ For review and recheck, Crosscheck also applies repository-defined review practi
 
 ### Dynamic thoroughness (`mode: smart`)
 
-**On by default.** Instead of one tier for every call, Crosscheck classifies each PR from its changed-file list and picks the tier to match. Classification runs on the already-cloned working copy, so it costs one `git diff` and no API call.
+**On by default.** Instead of one tier for every call, Crosscheck classifies each PR from its changed-file list and adjusts model and effort to match. Classification runs on the already-cloned working copy, so it costs one `git diff` and no API call.
 
-| # | PR class | Detected by | Tier |
-|---|---|---|---|
-| 1 | Generated / vendored | every file is a lockfile or build output | — |
-| 2 | Security / data-critical | auth, crypto, payment, migration paths; `risk:T3`; hotfix→default | `thorough` |
-| 3 | Deletion-only | ≤ 5 additions with ≥ 20 deletions | `fast` |
-| 4 | Docs / spec | ≥ 50% Markdown | `balanced` |
-| 5 | Test-only | every file is a test | `fast` | 
-| 6 | Config / infra | ≥ 50% config, no source | `balanced` |
-| 7 | Trivial | ≤ 3 files, ≤ 150 lines | `fast` |
-| 8 | Standard | everything else | `balanced` |
-
-A `—` selects no tier, so the configured `quality.tier` applies to that PR unchanged.
+| # | PR class | Detected by | Tier | Steps |
+|---|---|---|---|---|
+| 1 | Generated / vendored | every file is a lockfile or build output | — | **PR skipped** |
+| 2 | Security / data-critical | auth, crypto, payment, migration paths; `risk:T3`; hotfix→default | `thorough` | full loop |
+| 3 | Deletion-only | ≤ 5 additions with ≥ 20 deletions | `fast` | review |
+| 4 | Docs / spec | ≥ 50% Markdown | `balanced` | review |
+| 5 | Test-only | every file is a test | `fast` | review, fix |
+| 6 | Config / infra | ≥ 50% config, no source | `balanced` | full loop |
+| 7 | Trivial | ≤ 3 files, ≤ 150 lines | `fast` | review, fix |
+| 8 | Standard | everything else | `balanced` | full loop |
 
 **Order is the routing logic** — first match wins, and security sits second so it dominates every cheapening rule below it. A deletion that removes auth code, or a two-file migration, is never routed to `fast`.
 
-**What is wired today: the tier, and nothing else.** The policy also declares a per-class `effort`, step set, and review focus, and [`review-strategy.ts`](./src/lib/review-strategy.ts) resolves all of them — but only the tier reaches the reviewers. Effort still comes from `vendors.*.effort`, every class runs the configured pipeline (a lockfile-only PR is reviewed, not skipped), and evidence-driven escalation across rounds is designed but not yet called from the runner. Comments cite only what actually applied, so a review is never described as skipped or as running at a tier that never reached the vendor.
+Classification may set a **floor**, or promote on **consequence** — a security path is reviewed thoroughly because a miss there is expensive. It may **not** predict that a PR will be hard: across a 400-PR census, diff size correlates only 0.51 with realized review cost (the largest one-call PR was 101k lines; the most expensive changed 2 files). So escalation responds to what the review actually found — round 2 raises effort, round 3 switches vendor, then it hands off to a human rather than looping.
 
-Classification may set a **floor**, or promote on **consequence** — a security path is reviewed thoroughly because a miss there is expensive. It may **not** predict that a PR will be hard: across a 400-PR census, diff size correlates only 0.51 with realized review cost (the largest one-call PR was 101k lines; the most expensive changed 2 files). This is why escalation is designed to respond to what a review actually found rather than to what the diff looks like.
+Class tier **and** effort are applied to the run. The class is resolved once per workflow, not per step — the fix step pushes commits, so re-classifying could make the review and recheck comments cite different tiers for the same PR.
+
+The **Steps** column above describes the policy in `review-strategy.json`. Today the `generated` class short-circuits the whole workflow; the remaining per-class step sets are resolved and logged but do not yet gate which steps run — pipeline depth still comes from `workflow.yml`.
 
 Every comment says which policy produced it:
 
@@ -261,7 +261,7 @@ The rationale is the matched class's own `reason` field, not prose written per r
 
 The policy is versioned in [`src/config/review-strategy.json`](./src/config/review-strategy.json), carries its own sources and a 60-day review interval, and is checked weekly by the [`Review Strategy`](./.github/workflows/review-strategy.yml) workflow — verify it any time with `npm run verify:strategy`. Full evidence: [docs/dynamic-thoroughness.md](./docs/dynamic-thoroughness.md).
 
-> **Leave `vendors.*.model` unset under smart mode.** An explicit model outranks the strategy, so pinning one makes per-PR selection a no-op. `crosscheck onboard` clears it when you choose smart.
+> **Leave `vendors.*.model` unset under smart mode.** An explicit model outranks the strategy, so pinning one makes per-PR selection a no-op. When that happens crosscheck **withholds** the tier from the comment rather than citing a routing decision that did not happen. `crosscheck onboard` clears the pin — and prints what it cleared — when you choose smart.
 
 ### Pipeline depth
 

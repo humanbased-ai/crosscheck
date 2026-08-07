@@ -14,6 +14,8 @@ import { resolveClaudeModel, resolveCodexModel, effectiveTier } from '../lib/rev
 import type { CodexVendorConfig, QualityConfig } from '../config/schema.js'
 import { ConfigSchema } from '../config/schema.js'
 import { buildReviewCommentBody } from '../github/client.js'
+import { parseAnnotation } from '../lib/annotation.js'
+import { strategyDeterminedModel, strategyVendor } from '../lib/runner.js'
 
 const pr = (files: string[], over: Partial<Parameters<typeof resolveReviewStrategy>[0]> = {}) =>
   resolveReviewStrategy({ files, additions: 100, deletions: 50, ...over })
@@ -296,5 +298,51 @@ describe('smart mode is the default', () => {
 
   it('lets an explicit fixed opt out', () => {
     expect(ConfigSchema.parse({ quality: { mode: 'fixed' } }).quality.mode).toBe('fixed')
+  })
+})
+
+describe('citation only asserts what actually ran', () => {
+  const strat = { version: '1.0.0', classId: 'risky', tier: 'thorough' as const, reason: 'security path' }
+
+  // An explicit vendors.*.model outranks the tier map, so on a pinned config the
+  // strategy's tier is not what ran. Citing it would assert a routing decision
+  // that never happened — the property this feature exists to provide.
+  it('withholds the citation when a pinned vendor model overrode the tier', () => {
+    expect(strategyDeterminedModel({ model: 'gpt-5.6-terra' }, strat as never)).toBe(false)
+    expect(strategyDeterminedModel({ model: null }, strat as never)).toBe(true)
+  })
+
+  it('withholds the citation under fixed mode', () => {
+    expect(strategyDeterminedModel({ model: null }, null)).toBe(false)
+  })
+})
+
+describe('strategy applies effort, not just tier', () => {
+  // Regression: effort was resolved and logged but never sent, so the run line
+  // named a level the CLI was never given.
+  it('folds the class effort into the vendor config', () => {
+    const vendor = { effort: 'medium' }
+    const out = strategyVendor(vendor, { effort: 'high' } as never)
+    expect(out.effort).toBe('high')
+  })
+
+  it('leaves the vendor untouched when the class sets no effort', () => {
+    const vendor = { effort: 'medium' }
+    expect(strategyVendor(vendor, null).effort).toBe('medium')
+    expect(strategyVendor(vendor, { effort: null } as never).effort).toBe('medium')
+  })
+})
+
+describe('annotation round-trips the citation', () => {
+  it('parses strategy, class, and tier back out', () => {
+    const body = buildReviewCommentBody({
+      body: 'findings', reviewer: 'claude', origin: 'codex', verdict: 'BLOCK',
+      model: 'claude-opus-5', stepType: 'review', round: 1,
+      strategy: { version: '1.0.0', classId: 'risky', tier: 'thorough', reason: 'security path' },
+    })
+    const parsed = parseAnnotation(body)
+    expect(parsed?.strategy).toBe('1.0.0')
+    expect(parsed?.class).toBe('risky')
+    expect(parsed?.tier).toBe('thorough')
   })
 })

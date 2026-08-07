@@ -233,23 +233,6 @@ export interface ThoroughnessChoice {
 }
 
 /**
- * `quality.mode` exactly as written in the file — undefined when the key is
- * absent. loadConfig() runs ConfigSchema.parse, which defaults mode to `smart`;
- * that is right at runtime but erases the one distinction onboard needs, so
- * reading the parsed config here would make every migration guard below dead
- * code and silently rewrite configs written before the field existed.
- */
-function readRawQualityMode(configPath: string): string | undefined {
-  try {
-    const raw = yaml.load(readFileSync(configPath, 'utf8')) as { quality?: { mode?: unknown } } | null
-    const mode = raw?.quality?.mode
-    return typeof mode === 'string' ? mode : undefined
-  } catch {
-    return undefined
-  }
-}
-
-/**
  * One question covering both knobs. `smart` leads because it is the default and
  * the better answer for most repos; the three fixed tiers stay available for
  * anyone who wants one model on everything.
@@ -262,8 +245,11 @@ async function promptQualityTier(
   opts: OnboardOpts,
 ): Promise<ThoroughnessChoice> {
   const fallbackTier = (currentTier ?? 'balanced') as QualityTier
-  // Unset mode means a config written before smart existed — those keep their
-  // fixed tier rather than being silently switched on upgrade.
+  // `currentMode` is read from the RAW yaml, not the parsed config: the schema
+  // defaults `mode` to 'smart', so a parsed value can never distinguish "the
+  // user chose smart" from "this config predates the field". A config written
+  // before smart existed keeps its fixed tier rather than being switched during
+  // an upgrade.
   const fallbackMode: 'smart' | 'fixed' = currentMode === 'fixed' ? 'fixed'
     : currentMode === 'smart' ? 'smart'
     : currentTier ? 'fixed' : 'smart'
@@ -295,8 +281,7 @@ async function promptQualityTier(
     })),
   ]
 
-  // `+ 1` offsets the leading `smart` entry. fallbackTier is always one of
-  // `tiers`, so indexOf never returns -1 and there is no negative case to guard.
+  // smart is index 0; the three fixed tiers follow, so this is always >= 0.
   const defaultIdx = fallbackMode === 'smart' ? 0 : tiers.indexOf(fallbackTier) + 1
   const idx = await promptSinglePicker(items, {
     title: 'Review thoroughness — how should crosscheck spend its budget?',
@@ -699,14 +684,16 @@ export function applyOnboardConfig(
   vendors.claude.effort = tierCfg.claude.effort
   vendors.codex.effort = tierCfg.codex.effort
   if (qualityMode === 'smart') {
-    // Say so before discarding user-authored config. A `--yes` re-run is
-    // non-interactive, so this line is the only notice the pin is gone.
-    const pinned = (['codex', 'claude'] as const).filter(v => (vendors[v] as Record<string, unknown>).model)
-    if (pinned.length > 0) {
-      console.log(chalk.yellow(`  cleared ${pinned.map(v => `vendors.${v}.model`).join(' and ')} — a pinned model outranks smart mode and would make per-PR selection a no-op`))
+    // A pinned model outranks the strategy, so smart mode cannot work while one
+    // is set. Report every removal — silently discarding user-authored config
+    // (especially under `--yes`) is worse than leaving smart mode inert.
+    for (const vendor of ['codex', 'claude'] as const) {
+      const pinned = (vendors[vendor] as Record<string, unknown>).model
+      if (pinned) {
+        console.log(chalk.yellow(`  cleared vendors.${vendor}.model (${String(pinned)}) — a pinned model overrides smart mode`))
+        delete (vendors[vendor] as Record<string, unknown>).model
+      }
     }
-    delete (vendors.codex as Record<string, unknown>).model
-    delete (vendors.claude as Record<string, unknown>).model
   } else {
     vendors.codex.model = tierCfg.codex.model
   }
@@ -819,6 +806,16 @@ export async function runOnboard(opts: OnboardOpts = {}) {
 
   const configPath = opts.config ?? resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
   const existingConfig = existsSync(configPath) ? loadConfig(configPath) : null
+  // Parsed config always carries a `mode` (schema default), so read the raw file
+  // to tell an explicit choice from a pre-`mode` config.
+  const rawQualityMode = ((): string | undefined => {
+    if (!existsSync(configPath)) return undefined
+    try {
+      const raw = yaml.load(readFileSync(configPath, 'utf8')) as { quality?: { mode?: unknown } } | null
+      const mode = raw?.quality?.mode
+      return typeof mode === 'string' ? mode : undefined
+    } catch { return undefined }
+  })()
   const currentDeployment = existingConfig?.deployment
 
   let deployment: 'personal' | 'team'
@@ -1028,10 +1025,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     vendorConfig.claudeEnabled,
     vendorConfig.codexEnabled,
     existingConfig?.quality?.tier,
-    // Raw, not existingConfig.quality.mode: the schema default would report
-    // `smart` for a config that never chose one, and the guard inside would
-    // never fire.
-    existsSync(configPath) ? readRawQualityMode(configPath) : undefined,
+    rawQualityMode,
     opts,
   )
   const qualityTier = thoroughness.tier

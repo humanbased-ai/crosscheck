@@ -283,6 +283,9 @@ export async function runWatch(opts: WatchOpts = {}) {
     owner: string; repoName: string; prNumber: number; title: string;
     body: string | null; author: string; headSha: string; headRef: string;
     headRepo: string | null; baseRef: string; action: string;
+    // Feed the review strategy's `risky` class: without these its `or_labels`
+    // (risk:T3) and `or_hotfix_to_default_branch` rules can never fire.
+    labels?: string[]; defaultBranch?: string;
   }): Promise<void> {
     lastActivityAt = Date.now()  // reset idle timer on any PR event
     const { owner, repoName, prNumber } = params
@@ -331,9 +334,16 @@ export async function runWatch(opts: WatchOpts = {}) {
         title: params.title,
         body: params.body ?? '',
         head: { ref: params.headRef, sha: params.headSha, repo: params.headRepo ? { full_name: params.headRepo } : null },
-        base: { ref: params.baseRef, repo: { full_name: `${owner}/${repoName}` } },
+        base: {
+          ref: params.baseRef,
+          repo: {
+            full_name: `${owner}/${repoName}`,
+            ...(params.defaultBranch !== undefined && { default_branch: params.defaultBranch }),
+          },
+        },
         html_url: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
         user: { login: params.author },
+        ...(params.labels !== undefined && { labels: params.labels.map(name => ({ name })) }),
       }
 
       if (!acquirePRLock(owner, repoName, prNumber, params.headSha)) {
@@ -778,6 +788,8 @@ export async function runWatch(opts: WatchOpts = {}) {
         title: pr.title, body: pr.body, author: pr.user.login,
         headSha: pr.head.sha, headRef: pr.head.ref, headRepo: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref, action: event.action,
+        ...(pr.labels !== undefined && { labels: pr.labels.map(l => l.name) }),
+        ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
       })
     },
     (msg: string) => bLog(chalk.dim(fmtTime()) + '  ' + msg),

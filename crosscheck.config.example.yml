@@ -41,34 +41,41 @@ vendors:
 quality:
   mode: smart               # smart (default) | fixed
   #
-  # smart: the PR is classified from its changed-file list against the versioned
-  #   policy in src/config/review-strategy.json, and the matched class picks the
-  #   tier for that PR — auth, crypto, payment and migration paths are promoted
-  #   to `thorough`; a small or deletion-only change drops to `fast`. Each
-  #   comment cites the class and version that produced it.
-  #   Leave vendors.*.model unset under smart: an explicit model outranks the
-  #   tier, which makes per-PR selection a silent no-op. `crosscheck onboard`
-  #   clears the pin when you choose smart.
-  # fixed: every agent call uses `tier` below, whatever changed.
+  # smart  - dynamically adjust model + effort based on task type. The PR is
+  #          classified from its changed-file list against the versioned policy
+  #          in src/config/review-strategy.json: a lockfile-only PR is skipped
+  #          entirely, a docs PR gets review with no fix loop, a PR touching
+  #          auth or a migration is promoted to `thorough`.
   #
+  #          Every comment cites the strategy version, class, and tier it ran
+  #          under, so a past review stays explicable after the policy changes.
+  #          Full rationale: docs/dynamic-thoroughness.md
+  #
+  # fixed  - every agent call uses `tier` below, regardless of what changed.
+  #
+  # NOTE: leave vendors.*.model unset under smart. An explicit model outranks
+  # the strategy, so pinning one makes per-PR selection a no-op — and crosscheck
+  # then withholds the tier from the comment rather than citing one that did not
+  # run. `crosscheck onboard` clears the pin (and says so) when you pick smart.
+
   tier: balanced            # fast | balanced | thorough
   #
-  # The tier under `fixed`, and the fallback under `smart` whenever a PR's file
-  # list cannot be read (one-shot commands, shallow clones, API failures).
-  # Tier determines the model and effort level used for each vendor:
+  # Under `fixed` this is the tier for every call. Under `smart` it is the
+  # fallback used when a PR's file list cannot be read.
   #
-  #   tier       claude               codex                 cost per review
-  #   ─────────  ───────────────────  ───────────────────   ───────────────
-  #   fast       Haiku 4.5 · low      GPT-5.6 Luna · low    ~$0.24
-  #   balanced   Sonnet 5 · medium    GPT-5.6 Terra · med   ~$0.72
-  #   thorough   Opus 5 · max         GPT-5.6 Sol · high    ~$1.20
+  # Cost is output-token cost at 48k output tokens, the measured median for one
+  # review. A review is an agentic session, so it takes 10-16 minutes of wall
+  # clock (median 643s over 43 logged runs) - the tier changes depth and the
+  # subprocess timeout, not seconds-scale latency.
   #
-  # A review is an agentic session, not one call: expect 10-16 minutes of wall
-  # clock at any tier. Tier changes depth and the subprocess timeout, not
-  # seconds-scale latency.
+  #   tier       claude          codex           claude $   codex $
+  #   ---------  --------------  --------------  ---------  --------
+  #   fast       Haiku 4.5       GPT-5.6 Luna        0.24      0.06
+  #   balanced   Sonnet 5        GPT-5.6 Terra       0.72      0.58
+  #   thorough   Opus 5          GPT-5.6 Sol         1.20      1.44
   #
-  # crosscheck onboard writes these automatically when you pick a tier.
-  # You can override individual vendor settings in the vendors: block below.
+  # claude-fable-5 is banned from review: 2x Opus 5's price for a lower coding
+  # benchmark score. See src/config/review-strategy.json.
 
   focus:                    # optional — narrows review scope
     - security
