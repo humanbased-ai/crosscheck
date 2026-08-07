@@ -233,6 +233,27 @@ export interface ThoroughnessChoice {
 }
 
 /**
+ * What a re-run of onboard proposes, from the `quality` block as it is WRITTEN.
+ *
+ * Both fields must come from the raw yaml, never the parsed config: the schema
+ * defaults `mode` to smart and `tier` to balanced, so a parsed value can never
+ * distinguish "the user chose this" from "this config predates the field".
+ * Reading the parsed tier made every existing config look hand-set, so any
+ * re-onboard — silently, under `--yes` — opted the user out of the new default.
+ *
+ * A config that named a tier before smart existed keeps it, on the reasoning
+ * that it was a deliberate choice; one that never mentioned quality does not.
+ */
+export function thoroughnessDefaults(rawQuality: { tier?: string; mode?: string }): ThoroughnessChoice {
+  return {
+    tier: (rawQuality.tier ?? 'balanced') as QualityTier,
+    mode: rawQuality.mode === 'fixed' ? 'fixed'
+      : rawQuality.mode === 'smart' ? 'smart'
+      : rawQuality.tier ? 'fixed' : 'smart',
+  }
+}
+
+/**
  * One question covering both knobs. `smart` leads because it is the default and
  * the better answer for most repos; the three fixed tiers stay available for
  * anyone who wants one model on everything.
@@ -240,19 +261,10 @@ export interface ThoroughnessChoice {
 async function promptQualityTier(
   claudeEnabled: boolean,
   codexEnabled: boolean,
-  currentTier: string | undefined,
-  currentMode: string | undefined,
+  rawQuality: { tier?: string; mode?: string },
   opts: OnboardOpts,
 ): Promise<ThoroughnessChoice> {
-  const fallbackTier = (currentTier ?? 'balanced') as QualityTier
-  // `currentMode` is read from the RAW yaml, not the parsed config: the schema
-  // defaults `mode` to 'smart', so a parsed value can never distinguish "the
-  // user chose smart" from "this config predates the field". A config written
-  // before smart existed keeps its fixed tier rather than being switched during
-  // an upgrade.
-  const fallbackMode: 'smart' | 'fixed' = currentMode === 'fixed' ? 'fixed'
-    : currentMode === 'smart' ? 'smart'
-    : currentTier ? 'fixed' : 'smart'
+  const { tier: fallbackTier, mode: fallbackMode } = thoroughnessDefaults(rawQuality)
 
   if (opts.yes) {
     console.log(`  Thoroughness: ${chalk.cyan(fallbackMode === 'smart' ? 'smart' : fallbackTier)}`)
@@ -817,15 +829,18 @@ export async function runOnboard(opts: OnboardOpts = {}) {
 
   const configPath = opts.config ?? resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
   const existingConfig = existsSync(configPath) ? loadConfig(configPath) : null
-  // Parsed config always carries a `mode` (schema default), so read the raw file
-  // to tell an explicit choice from a pre-`mode` config.
-  const rawQualityMode = ((): string | undefined => {
-    if (!existsSync(configPath)) return undefined
+  // Parsed config always carries a `tier` and a `mode` (schema defaults), so
+  // read the raw file to tell an explicit choice from a pre-`mode` config.
+  const rawQuality = ((): { tier?: string; mode?: string } => {
+    if (!existsSync(configPath)) return {}
     try {
-      const raw = yaml.load(readFileSync(configPath, 'utf8')) as { quality?: { mode?: unknown } } | null
-      const mode = raw?.quality?.mode
-      return typeof mode === 'string' ? mode : undefined
-    } catch { return undefined }
+      const raw = yaml.load(readFileSync(configPath, 'utf8')) as { quality?: { tier?: unknown; mode?: unknown } } | null
+      const quality = raw?.quality
+      return {
+        ...(typeof quality?.tier === 'string' && { tier: quality.tier }),
+        ...(typeof quality?.mode === 'string' && { mode: quality.mode }),
+      }
+    } catch { return {} }
   })()
   const currentDeployment = existingConfig?.deployment
 
@@ -1035,8 +1050,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   const thoroughness = await promptQualityTier(
     vendorConfig.claudeEnabled,
     vendorConfig.codexEnabled,
-    existingConfig?.quality?.tier,
-    rawQualityMode,
+    rawQuality,
     opts,
   )
   const qualityTier = thoroughness.tier

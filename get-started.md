@@ -1298,7 +1298,7 @@ supports it, the tier is promoted where it does not.
 Every comment cites the policy that produced it:
 
 ```
-<!-- crosscheck: … verdict=BLOCK strategy=1.0.0 class=risky tier=thorough … -->
+<!-- crosscheck: … verdict=BLOCK strategy=1.1.0 class=risky tier=thorough … -->
 ```
 
 > **Leave `vendors.*.model` unset under smart mode.** An explicit model outranks

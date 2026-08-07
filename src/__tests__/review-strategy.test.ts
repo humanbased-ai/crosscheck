@@ -12,11 +12,14 @@ import {
 } from '../lib/review-strategy.js'
 import { resolveClaudeModel, resolveCodexModel, effectiveTier } from '../lib/review-models.js'
 import type { CodexVendorConfig, QualityConfig } from '../config/schema.js'
-import { ConfigSchema } from '../config/schema.js'
+import { ConfigSchema, CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
 import { buildReviewCommentBody } from '../github/client.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { filterStepsByTypes } from '../lib/repo-workflow.js'
-import { strategyDeterminedModel, strategyVendor } from '../lib/runner.js'
+import { strategyDeterminedModel, strategyVendor, resolveRoundExecution } from '../lib/runner.js'
+import { claudeEffort } from '../reviewers/claude.js'
+import { codexReasoningEffort } from '../reviewers/codex.js'
+import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 
 const pr = (files: string[], over: Partial<Parameters<typeof resolveReviewStrategy>[0]> = {}) =>
   resolveReviewStrategy({ files, additions: 100, deletions: 50, ...over })
@@ -323,14 +326,70 @@ describe('strategy applies effort, not just tier', () => {
   // named a level the CLI was never given.
   it('folds the class effort into the vendor config', () => {
     const vendor = { effort: 'medium' }
-    const out = strategyVendor(vendor, { effort: 'high' } as never)
+    const out = strategyVendor(vendor, { effort: 'high' } as never, CLAUDE_EFFORT_LEVELS)
     expect(out.effort).toBe('high')
   })
 
   it('leaves the vendor untouched when the class sets no effort', () => {
     const vendor = { effort: 'medium' }
-    expect(strategyVendor(vendor, null).effort).toBe('medium')
-    expect(strategyVendor(vendor, { effort: null } as never).effort).toBe('medium')
+    expect(strategyVendor(vendor, null, CLAUDE_EFFORT_LEVELS).effort).toBe('medium')
+    expect(strategyVendor(vendor, { effort: null } as never, CLAUDE_EFFORT_LEVELS).effort).toBe('medium')
+  })
+})
+
+describe('effort stays inside the vocabulary each vendor CLI accepts', () => {
+  const roundStrategy = (round: number, model: string) => {
+    const e = escalate({ tier: 'balanced', effort: 'medium' }, round, model)
+    return { version: '1.0.0', classId: 'standard', reason: 'r', steps: [], domain: 'backend', ...e } as never
+  }
+
+  // Regression: round 3 asks for `xhigh`, which review-strategy.json lists as a
+  // capability of claude-opus-5 — but vendors.claude.effort has no such level,
+  // so claudeEffort() mapped the unknown value to `medium`. Round 3 then ran
+  // WEAKER than round 2's `high`, inverting the ladder's one invariant.
+  it('never sends claude a later round weaker than the round before', () => {
+    const r2 = strategyVendor({ effort: 'medium' }, roundStrategy(2, 'claude-opus-5'), CLAUDE_EFFORT_LEVELS)
+    const r3 = strategyVendor({ effort: 'medium' }, roundStrategy(3, 'claude-opus-5'), CLAUDE_EFFORT_LEVELS)
+    expect(claudeEffort(r2.effort)).toBe('high')
+    expect(claudeEffort(r3.effort)).toBe('high')
+  })
+
+  // Codex does expose xhigh, so clamping must not flatten it to claude's ceiling.
+  it('passes xhigh through to codex, which accepts it', () => {
+    const r3 = strategyVendor({ effort: 'medium' }, roundStrategy(3, 'gpt-5.6-sol'), CODEX_EFFORT_LEVELS)
+    expect(codexReasoningEffort(r3.effort ?? '')).toBe('xhigh')
+  })
+})
+
+describe('one round, one set of tier and effort decisions', () => {
+  const config = (over: Record<string, unknown> = {}) => ConfigSchema.parse({ quality: { tier: 'balanced', mode: 'smart' }, ...over })
+  const risky = { version: '1.0.0', classId: 'risky', reason: 'security path', tier: 'thorough', effort: 'high', steps: ['review', 'fix', 'recheck'], domain: 'backend' } as never
+
+  it('applies the class tier to the whole round, not just the review', () => {
+    const exec = resolveRoundExecution(config(), risky, 1)
+    expect(exec.quality.tier).toBe('thorough')
+    // The fix step reads its model AND its subprocess budget from this config;
+    // a thorough model on the balanced 600s cap is cut off mid-fix.
+    expect(tierTimeoutMs(exec.roundConfig.quality.tier)).toBe(tierTimeoutMs('thorough'))
+    expect(exec.roundConfig.vendors.claude.effort).toBe('high')
+  })
+
+  // Regression: the review step ran the escalated round strategy while the fix
+  // step re-folded the base class, so a promoted round fixed at the old tier.
+  it('carries an escalated round into the config the fix step runs under', () => {
+    const noEffortLadder = { ...(risky as unknown as Record<string, unknown>), tier: 'fast', effort: null } as never
+    const exec = resolveRoundExecution(config(), noEffortLadder, 2)
+    expect(exec.escalated).toBe(true)
+    expect(exec.quality.tier).toBe(exec.roundConfig.quality.tier)
+    expect(exec.strategy?.tier).toBe(exec.quality.tier)
+  })
+
+  it('leaves the config untouched under fixed mode', () => {
+    const cfg = config({ quality: { tier: 'fast', mode: 'fixed' } })
+    const exec = resolveRoundExecution(cfg, null, 3)
+    expect(exec.quality.tier).toBe('fast')
+    expect(exec.roundConfig).toBe(cfg)
+    expect(exec.escalated).toBe(false)
   })
 })
 

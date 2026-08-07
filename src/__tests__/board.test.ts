@@ -167,6 +167,19 @@ describe('PRBoard — TTY workspace retention', () => {
     expect(output).toContain('https://github.com/acme/api/pull/142')
   })
 
+  // A lockfile-only PR is short-circuited by the review strategy before any
+  // reviewer runs. Labelling it `done` reads as a completed review.
+  it('shows the skip reason instead of done when the strategy short-circuited the PR', () => {
+    board.addPR('k1', 88, 'acme/api', 'chore/lockfile')
+    board.completePR('k1', {
+      elapsedMs: 900,
+      url: 'https://github.com/acme/api/pull/88',
+      label: 'skipped · generated',
+    })
+
+    expect(stripAnsi(invokeRender())).toContain('skipped · generated')
+  })
+
   it('evicts the prior-round completed slot when round 2 starts for the same PR', () => {
     // Round 1 — BLOCK, fix skipped, recheck skipped (the stale slot the user saw)
     board.addPR('k1@sha1', 214, 'owner/repo', 'fix/branch', 1)

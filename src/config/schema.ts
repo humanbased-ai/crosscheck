@@ -1,10 +1,19 @@
 import { z } from 'zod'
 
+// The effort levels each vendor CLI accepts, in ascending order. Exported
+// because the review strategy reasons about what a MODEL supports, which is a
+// wider set — claude-opus-5 has an `xhigh` level the claude CLI has no flag
+// for. Anything the strategy picks is clamped to one of these before it is
+// written into a vendor config, so an escalation cannot land on a level that
+// silently degrades to the `medium` fallback in claudeEffort/codexReasoningEffort.
+export const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'max'] as const
+export const CODEX_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
+
 export const VendorConfigSchema = z.object({
   enabled: z.boolean().default(true),
   model: z.string().nullable().default(null),
   auth: z.enum(['subscription', 'api-key']).default('subscription'),
-  effort: z.enum(['low', 'medium', 'high', 'max']).default('medium'),
+  effort: z.enum(CLAUDE_EFFORT_LEVELS).default('medium'),
   // Max wall-clock seconds for a single CLI invocation before it is killed.
   // null = use the reviewer's built-in default, which is tier-based for both
   // claude and codex: 300s (fast) / 600s (balanced) / 1200s (thorough).
@@ -19,7 +28,7 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   // Codex exposes two tiers above the shared vocabulary: xhigh (Extra High) and
   // ultra. Ultra is only available on terra/sol; pre-5.6 models stop at xhigh —
   // the CLI rejects unsupported combinations at call time.
-  effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).default('medium'),
+  effort: z.enum(CODEX_EFFORT_LEVELS).default('medium'),
   // Optional per-tier model overrides, honored under both auth modes. When unset:
   // api-key auth falls back to the built-in tier mapping, subscription auth lets
   // the Codex CLI pick its default model.

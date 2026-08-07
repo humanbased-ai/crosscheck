@@ -266,13 +266,24 @@ export function escalate(
 
 /** Clamps a requested effort to what the model actually accepts. */
 export function clampEffort(model: string, effort: string | null): string | null {
-  if (effort === null) return null
-  const levels = effortLevelsFor(model)
-  if (levels.length === 0) return null
+  return clampToLevels(effort, effortLevelsFor(model))
+}
+
+/**
+ * Clamps a requested effort to an accepted vocabulary.
+ *
+ * Applied twice on the way to a CLI, against two different sets: what the MODEL
+ * can reason at (`models[].effort_levels` here) and what the VENDOR CLI has a
+ * flag for (CLAUDE_EFFORT_LEVELS / CODEX_EFFORT_LEVELS in the config schema).
+ * They are not the same — claude-opus-5 reasons at `xhigh` and the claude CLI
+ * cannot ask for it — and only the second reaches the wire.
+ */
+export function clampToLevels(effort: string | null, levels: readonly string[]): string | null {
+  if (effort === null || levels.length === 0) return null
   if (levels.includes(effort)) return effort
   // Snap down to the nearest supported level rather than failing the call. When
-  // the model supports nothing at or below the request, snap UP to its lowest
-  // level instead — sending an effort the model rejects fails the call outright.
+  // the vocabulary has nothing at or below the request, snap UP to its lowest
+  // level instead — sending an effort that is rejected fails the call outright.
   const want = EFFORT_LADDER.indexOf(effort as (typeof EFFORT_LADDER)[number])
   for (let i = want; i >= 0; i--) {
     if (levels.includes(EFFORT_LADDER[i])) return EFFORT_LADDER[i]

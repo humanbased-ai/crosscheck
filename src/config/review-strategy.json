@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "_version_note": "1.1.0 — deletion_only gained a floor on deletions; `additions_max` alone also matched a small edit, so a +2/-2 typo fix was routed to a review-only class. Routing changed, so the version changes with it: a comment citing 1.0.0 has to stay explicable by 1.0.0.",
   "updated": "2026-08-07",
   "generated_at": "2026-08-07T05:00:00Z",
   "review_interval_days": 60,
@@ -196,8 +197,8 @@
   "citation": {
     "_comment": "Every crosscheck comment states the strategy it ran under, so a past review can be explained by the policy in force at the time.",
     "annotation_fields": ["strategy", "class", "tier"],
-    "annotation_example": "<!-- crosscheck: origin=claude reviewer=claude model=claude-opus-5 type=review round=1 verdict=BLOCK service=crosscheck sha=abc123 strategy=1.0.0 class=risky tier=thorough -->",
+    "annotation_example": "<!-- crosscheck: origin=claude reviewer=claude model=claude-opus-5 type=review round=1 verdict=BLOCK service=crosscheck sha=abc123 strategy=1.1.0 class=risky tier=thorough -->",
     "body_template": "{tier} tier · {reason} · strategy v{version}",
-    "body_example": "_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](https://github.com/humanbased-ai/crosscheck) with Opus 5 (high) — thorough tier · touches a security or data-critical path, where a missed defect is expensive · strategy v1.0.0_"
+    "body_example": "_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](https://github.com/humanbased-ai/crosscheck) with Opus 5 (high) — thorough tier · touches a security or data-critical path, where a missed defect is expensive · strategy v1.1.0_"
   }
 }

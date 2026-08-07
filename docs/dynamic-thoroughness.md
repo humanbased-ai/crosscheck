@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Strategy version** | `1.0.0` — [`src/config/review-strategy.json`](../src/config/review-strategy.json) |
+| **Strategy version** | `1.1.0` — [`src/config/review-strategy.json`](../src/config/review-strategy.json) |
 | **Analysis run** | 2026-08-07T05:00:00Z |
 | **Census window** | 2026-07-30 → 2026-08-07 |
 | **Corpus** | 400 merged PRs · 199 crosscheck-engaged · 597 agent calls · 43 locally-logged runs |
@@ -554,13 +554,13 @@ selected — in both the machine annotation and the human-readable line.
 
 ```
 <!-- crosscheck: origin=claude reviewer=claude model=claude-opus-5 type=review
-     round=1 verdict=BLOCK strategy=1.0.0 class=risky tier=thorough
+     round=1 verdict=BLOCK strategy=1.1.0 class=risky tier=thorough
      service=crosscheck sha=abc123 -->
 ```
 
 > _Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](https://github.com/humanbased-ai/crosscheck)
 > with Opus 5 (high) — thorough tier · touches a security or data-critical path, where a
-> missed defect is expensive · strategy v1.0.0_
+> missed defect is expensive · strategy v1.1.0_
 
 The rationale text is not written per review — it is the matched class's `reason` field,
 so the explanation and the routing decision cannot drift apart. `strategy`, `class`, and

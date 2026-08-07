@@ -22,7 +22,8 @@ import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js
 import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
-import { resolveReviewStrategy, escalate, type PRContext, type ResolvedStrategy } from './review-strategy.js'
+import { resolveReviewStrategy, escalate, clampToLevels, type PRContext, type ResolvedStrategy } from './review-strategy.js'
+import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
@@ -485,10 +486,22 @@ export function strategyQuality(
  * Applies the class's effort alongside its tier. Without this the strategy's
  * effort was resolved and logged but never sent, so the run line named a level
  * the CLI was never given.
+ *
+ * `accepted` is the vendor CLI's vocabulary, which is narrower than the model's:
+ * the strategy escalates to `xhigh` on round 3 and claude-opus-5 reasons at that
+ * level, but the claude CLI has no flag for it, so claudeEffort() mapped the
+ * unknown value to `medium` — a round 3 weaker than round 2. Clamp here, where
+ * the strategy meets the config, rather than at each CLI.
  */
-export function strategyVendor<T extends { effort?: string }>(vendor: T, strategy: ResolvedStrategy | null): T {
+export function strategyVendor<T extends { effort?: string }>(
+  vendor: T,
+  strategy: ResolvedStrategy | null,
+  accepted: readonly string[],
+): T {
   if (!strategy?.effort) return vendor
-  return { ...vendor, effort: strategy.effort }
+  const effort = clampToLevels(strategy.effort, accepted)
+  if (effort === null) return vendor
+  return { ...vendor, effort }
 }
 // NOTE on the asymmetry with `model`: an explicit vendors.*.model is honored
 // over the strategy, but vendors.*.effort is not. That is deliberate rather than
@@ -529,6 +542,66 @@ export function resolveStrategyForPR(ctx: WorkflowContext): ResolvedStrategy | n
   const prContext = buildPRContext(ctx)
   if (!prContext) return null
   return resolveReviewStrategy(prContext)
+}
+
+export interface RoundExecution {
+  /** The class as escalated for this round; null under fixed mode. */
+  strategy: ResolvedStrategy | null
+  quality: Config['quality']
+  claudeVendor: Config['vendors']['claude']
+  codexVendor: Config['vendors']['codex']
+  /** `config` with the above folded in, for callees that take the whole config. */
+  roundConfig: Config
+  escalated: boolean
+}
+
+/**
+ * The tier, effort, and vendor configs every step of one round runs under.
+ *
+ * One function rather than a fold at each use site: the review step ran the
+ * escalated strategy while the fix step re-folded the base class, so a promoted
+ * round reviewed with the stronger model and then fixed with the weaker one —
+ * and took the weaker tier's subprocess timeout with it.
+ *
+ * Rounds beyond the first escalate: the class tier was already tried and did not
+ * resolve the PR, so difficulty is now measured rather than predicted. escalate()
+ * raises effort where the model supports it and promotes a tier where it does
+ * not, and never weakens the model.
+ */
+export function resolveRoundExecution(
+  config: Config,
+  strategy: ResolvedStrategy | null,
+  round: number,
+): RoundExecution {
+  if (!strategy) {
+    return {
+      strategy: null,
+      quality: config.quality,
+      claudeVendor: config.vendors.claude,
+      codexVendor: config.vendors.codex,
+      roundConfig: config,
+      escalated: false,
+    }
+  }
+
+  const escalated = escalate(
+    { tier: strategy.tier ?? config.quality.tier, effort: strategy.effort },
+    round,
+    resolveClaudeModel(strategyQuality(config.quality, strategy), config.vendors.claude),
+  )
+  const roundStrategy = { ...strategy, tier: escalated.tier, effort: escalated.effort }
+  const quality = strategyQuality(config.quality, roundStrategy)
+  const claudeVendor = strategyVendor(config.vendors.claude, roundStrategy, CLAUDE_EFFORT_LEVELS)
+  const codexVendor = strategyVendor(config.vendors.codex, roundStrategy, CODEX_EFFORT_LEVELS)
+
+  return {
+    strategy: roundStrategy,
+    quality,
+    claudeVendor,
+    codexVendor,
+    roundConfig: { ...config, quality, vendors: { ...config.vendors, claude: claudeVendor, codex: codexVendor } },
+    escalated: escalated.tier !== strategy.tier || escalated.effort !== strategy.effort,
+  }
 }
 
 function emitPRComplexity(ctx: WorkflowContext, triggerField: Record<string, unknown>, effectiveTierForRun: Config['quality']['tier']): void {
@@ -790,7 +863,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const stepsRun: string[] = []
   let currentStepName: string | undefined
 
-  emitPRComplexity(ctx, triggerField, strategyQuality(config.quality, strategy).tier)
+  // Class picks tier AND effort under smart; untouched config under fixed.
+  // Every step of this round reads from here — review, fix, and recheck alike —
+  // so a promoted round cannot review with one model and fix with another.
+  //
+  // Above the try, and above emitPRComplexity, because both the complexity event
+  // and workflow_complete report the tier that ran: an escalated round reporting
+  // the base class tier is the same defect as a comment citing one.
+  const { strategy: roundStrategy, quality, claudeVendor, codexVendor, roundConfig, escalated } =
+    resolveRoundExecution(config, strategy, ctx.round ?? 1)
+
+  emitPRComplexity(ctx, triggerField, quality.tier)
 
   try {
   // Inside the try so a preflight failure still reaches the completion handler in
@@ -804,31 +887,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
   }
 
-  // Class picks tier AND effort under smart; untouched config under fixed.
-  // Rounds beyond the first escalate: the class tier was already tried and did
-  // not resolve the PR, so difficulty is now measured rather than predicted.
-  // escalate() raises effort where the model supports it and promotes a tier
-  // where it does not, and never weakens the model.
-  //
-  // Computed once per run, not per step: nothing here depends on `step`, and
-  // recomputing inside the loop logged the same line for review and recheck.
-  const escalated = strategy
-    ? escalate(
-        { tier: strategy.tier ?? config.quality.tier, effort: strategy.effort },
-        ctx.round ?? 1,
-        resolveClaudeModel(strategyQuality(config.quality, strategy), config.vendors.claude),
-      )
-    : null
-  const roundStrategy = strategy && escalated
-    ? { ...strategy, tier: escalated.tier, effort: escalated.effort }
-    : strategy
-  const quality = strategyQuality(config.quality, roundStrategy)
-  const claudeVendor = strategyVendor(config.vendors.claude, roundStrategy)
-  const codexVendor = strategyVendor(config.vendors.codex, roundStrategy)
+  // Logged once per run, not per step: nothing here depends on `step`, and
+  // recomputing inside the loop printed the same line for review and recheck.
   if (strategy && roundStrategy) {
-    const escalatedNote = escalated && (escalated.tier !== strategy.tier || escalated.effort !== strategy.effort)
-      ? ` · round ${ctx.round} escalated`
-      : ''
+    const escalatedNote = escalated ? ` · round ${ctx.round} escalated` : ''
     log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${roundStrategy.tier ?? 'skip'} tier${roundStrategy.effort ? ` (${roundStrategy.effort})` : ''}${escalatedNote}`))
     if (escalatedNote) {
       fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, strategy_version: strategy.version })
@@ -1143,14 +1205,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
       if (!vendor) { skipFix('no_vendor'); continue }
 
-      // The fix step holds the review's tier: it is generation against an
-      // explicit findings list, which models handle well, but a cheap fixer that
-      // introduces a regression costs a whole extra round. Recheck does not step
-      // down either — it decides whether to spend another round, and a weak
-      // judge there is how loops run away.
-      const fixQuality = strategyQuality(config.quality, strategy)
-      const claudeFixModel = resolveClaudeModel(fixQuality, config.vendors.claude)
-      const codexFixModel = resolveCodexModel(fixQuality, config.vendors.codex)
+      // The fix step holds the review's tier — this round's, escalation
+      // included: it is generation against an explicit findings list, which
+      // models handle well, but a cheap fixer that introduces a regression costs
+      // a whole extra round. Recheck does not step down either — it decides
+      // whether to spend another round, and a weak judge there is how loops run
+      // away.
+      const claudeFixModel = resolveClaudeModel(quality, claudeVendor)
+      const codexFixModel = resolveCodexModel(quality, codexVendor)
 
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
       // Scope to commits ahead of base so long-lived branches (e.g. staging)
@@ -1181,19 +1243,21 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       // The strategy tier, not the configured one: a risky PR runs the thorough
       // model here, and the balanced 600s budget would cut it off.
-      const tierMs = tierTimeoutMs(fixQuality.tier)
+      const tierMs = tierTimeoutMs(quality.tier)
       const skillSession = skillSessionFor(step.name, effectiveType)
       const runFix = async (v: 'claude' | 'codex') => {
         if (v === 'codex') {
           return runCodexFixStep(
             tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
             codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs, skillSession,
-            config.vendors.codex.effort,
+            codexVendor.effort,
           )
         }
+        // roundConfig, not config: runFixStep reads vendors.claude.effort and
+        // quality.tier out of it, and both must be this round's values.
         return runFixStep(
           tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-          config, claudeFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs, skillSession,
+          roundConfig, claudeFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs, skillSession,
         )
       }
 
@@ -1721,10 +1785,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       failedStep,
       round: ctx.round,
       trigger: ctx.trigger,
-      // The tier that actually ran, not the configured one — under smart mode
-      // they differ, and telemetry naming the wrong one is the same class of
-      // problem as a comment citing a tier that never reached the vendor.
-      qualityTier: strategyQuality(config.quality, strategy).tier,
+      // The tier that actually ran, not the configured one and not the base
+      // class tier — under smart mode all three differ, and telemetry naming the
+      // wrong one is the same class of problem as a comment citing a tier that
+      // never reached the vendor.
+      qualityTier: quality.tier,
     }) as Parameters<typeof fileLog>[0])
   }
 }

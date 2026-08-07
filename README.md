@@ -254,9 +254,9 @@ Every comment says which policy produced it:
 
 ```
 _thorough tier · touches a security or data-critical path, where a missed defect
- is expensive · strategy v1.0.0_
+ is expensive · strategy v1.1.0_
 
-<!-- crosscheck: … model=claude-opus-5 verdict=BLOCK strategy=1.0.0 class=risky tier=thorough … -->
+<!-- crosscheck: … model=claude-opus-5 verdict=BLOCK strategy=1.1.0 class=risky tier=thorough … -->
 ```
 
 The rationale is the matched class's own `reason` field, not prose written per review, so the explanation and the routing decision cannot drift apart. A review from six weeks ago stays explicable after the policy changes.

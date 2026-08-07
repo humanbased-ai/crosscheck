@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs
 import { join } from 'path'
 import { tmpdir } from 'os'
 import yaml from 'js-yaml'
-import { applyOnboardConfig, detectCurrentPreset, detectConflictResolveEnabled, type OnboardDecisions } from '../commands/onboard.js'
+import { applyOnboardConfig, detectCurrentPreset, detectConflictResolveEnabled, thoroughnessDefaults, type OnboardDecisions } from '../commands/onboard.js'
 import { mkdirSync } from 'fs'
 
 const BASE_DECISIONS: OnboardDecisions = {
@@ -40,6 +40,29 @@ afterEach(() => {
 function readConfig(): Record<string, unknown> {
   return (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>
 }
+
+describe('thoroughnessDefaults — what a re-run of onboard proposes', () => {
+  it('proposes smart for a first run', () => {
+    expect(thoroughnessDefaults({})).toEqual({ tier: 'balanced', mode: 'smart' })
+  })
+
+  // The distinction only survives if `tier` is read from the RAW yaml: the
+  // parsed config supplies tier: 'balanced' for every file, so a config that
+  // never mentioned quality looked identical to a hand-set one and was opted
+  // out of the new default — silently, under --yes.
+  it('proposes smart for a config that never set a quality tier', () => {
+    expect(thoroughnessDefaults({ tier: undefined, mode: undefined })).toEqual({ tier: 'balanced', mode: 'smart' })
+  })
+
+  it('keeps a hand-set tier fixed on a config written before smart existed', () => {
+    expect(thoroughnessDefaults({ tier: 'thorough' })).toEqual({ tier: 'thorough', mode: 'fixed' })
+  })
+
+  it('honors an explicit mode over the inference', () => {
+    expect(thoroughnessDefaults({ tier: 'thorough', mode: 'smart' })).toEqual({ tier: 'thorough', mode: 'smart' })
+    expect(thoroughnessDefaults({ mode: 'fixed' })).toEqual({ tier: 'balanced', mode: 'fixed' })
+  })
+})
 
 describe('applyOnboardConfig — first run', () => {
   it('creates config with routing defaults when no file exists', () => {
