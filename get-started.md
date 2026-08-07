@@ -1418,7 +1418,7 @@ Every comment crosscheck posts closes with the model and effort the step actuall
 
 ```
 ---
-_Reviewed with Claude Code via Crosscheck_ _(Opus 4.8 · high effort)_
+_Reviewed with Claude Code via Crosscheck_ _(Opus 5 · high effort)_
 
 _Skills: code-review-skill (by @awesome-skills, MIT)_
 ```

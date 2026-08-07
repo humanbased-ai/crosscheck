@@ -1,0 +1,99 @@
+name: Review Strategy
+
+# Keeps src/config/review-strategy.json honest. The strategy is a perishable
+# asset — review-model-tiers.json silently went stale pinning a legacy Opus
+# after its successor shipped at the same price. This job makes that loud.
+#
+#   - on PRs touching the strategy: verify before merge
+#   - weekly: verify against live provider docs; open an issue on drift
+#
+# It deliberately does NOT auto-edit the strategy. Model choice is a judgement
+# call backed by benchmarks that need reading; the job's job is to tell a human
+# when the inputs moved.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays 09:15 UTC — 15 min after model-tier-sources so the two don't race
+    # the same provider docs.
+    - cron: '15 9 * * 1'
+  pull_request:
+    paths:
+      - src/config/review-strategy.json
+      - scripts/verify-review-strategy.mjs
+      - docs/dynamic-thoroughness.md
+      - .github/workflows/review-strategy.yml
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  verify:
+    name: Verify review strategy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify strategy consistency, freshness, and source drift
+        id: verify
+        run: node scripts/verify-review-strategy.mjs 2>&1 | tee /tmp/strategy-report.txt
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo '### Review strategy verification'
+            echo ''
+            echo '```'
+            cat /tmp/strategy-report.txt || echo 'no output'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Scheduled runs only: a failure means the world moved, not that someone
+      # broke a build — so file an issue a human can act on.
+      - name: Open drift issue
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs')
+            let report = 'Verification failed; no report captured.'
+            try { report = fs.readFileSync('/tmp/strategy-report.txt', 'utf8') } catch {}
+
+            const title = 'Review strategy needs re-verification'
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'strategy-drift',
+            })
+            const body = [
+              'The weekly check on `src/config/review-strategy.json` failed.',
+              '',
+              '```',
+              report.trim(),
+              '```',
+              '',
+              '**To resolve**',
+              '1. Re-read the provider catalogs and coding benchmarks in `sources` / `benchmarks`.',
+              '2. Update prices, scores, and tier assignments in `src/config/review-strategy.json`.',
+              '3. Refresh the analysis in `docs/dynamic-thoroughness.md`.',
+              '4. Bump `version` and `updated`, then re-run `npm run verify:strategy`.',
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            ].join('\n')
+
+            if (existing.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: existing[0].number, body,
+              })
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['strategy-drift'],
+              })
+            }

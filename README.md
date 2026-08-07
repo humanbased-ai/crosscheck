@@ -218,7 +218,7 @@ For review and recheck, Crosscheck also applies repository-defined review practi
 |---|---|---|---|
 | `fast` | Haiku 4.5 | GPT-5.6 Luna | ~10s |
 | `balanced` | Sonnet 5 | GPT-5.6 Terra | ~30s |
-| `thorough` | Opus 4.8 | GPT-5.6 Sol | ~60s |
+| `thorough` | Opus 5 | GPT-5.6 Sol | ~60s |
 
 ### Pipeline depth
 
