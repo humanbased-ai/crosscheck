@@ -490,20 +490,34 @@ export function strategyVendor<T extends { effort?: string }>(vendor: T, strateg
   if (!strategy?.effort) return vendor
   return { ...vendor, effort: strategy.effort }
 }
+// NOTE on the asymmetry with `model`: an explicit vendors.*.model is honored
+// over the strategy, but vendors.*.effort is not. That is deliberate rather than
+// an oversight — `effort` carries a schema default, so a parsed config cannot
+// distinguish "the user chose medium" from "nobody set it", and treating the
+// default as a user choice would disable effort escalation for everyone. The
+// override is documented in crosscheck.config.example.yml next to the model
+// note; set `quality.mode: fixed` to keep a hand-set effort on every call.
 
 /**
- * True when the strategy actually determined the model for this vendor.
+ * True when the strategy actually determined the model that ran.
  *
- * An explicit `vendors.*.model` outranks the tier map, so on a config carrying
- * one the strategy's tier is *not* what ran. Citing it anyway would assert a
- * routing decision that never happened — the exact auditability property this
- * feature exists to provide — so the citation is withheld instead.
+ * Judged from the resolved model rather than from config shape, because two
+ * different configs defeat the tier map:
+ *   - an explicit `vendors.*.model` outranks it, and
+ *   - codex under subscription auth with no `model`/`model_tiers` resolves every
+ *     tier to the CLI's own `default`, so fast/balanced/thorough are the same run.
+ * In both cases the strategy's tier is not what happened, and citing it would
+ * assert a routing decision that never took place — the exact auditability
+ * property this feature exists to provide.
  */
 export function strategyDeterminedModel(
   vendor: { model?: string | null },
   strategy: ResolvedStrategy | null,
+  resolvedModel?: string,
 ): boolean {
-  return strategy !== null && !vendor.model
+  if (strategy === null || vendor.model) return false
+  // 'default' means the vendor CLI chose, not us.
+  return resolvedModel !== 'default'
 }
 
 /**
@@ -517,7 +531,7 @@ export function resolveStrategyForPR(ctx: WorkflowContext): ResolvedStrategy | n
   return resolveReviewStrategy(prContext)
 }
 
-function emitPRComplexity(ctx: WorkflowContext, triggerField: Record<string, unknown>): void {
+function emitPRComplexity(ctx: WorkflowContext, triggerField: Record<string, unknown>, effectiveTierForRun: Config['quality']['tier']): void {
   const { owner, repoName, prNumber, tmpDir, pr, config } = ctx
   try {
     const raw = execSync(
@@ -553,7 +567,7 @@ function emitPRComplexity(ctx: WorkflowContext, triggerField: Record<string, unk
       diff_bucket: diffBucket(insertions + deletions),
       file_mix: mix,
       languages: [...langSet],
-      quality_tier: config.quality.tier,
+      quality_tier: effectiveTierForRun,
       ...triggerField,
     })
   } catch { /* best-effort — never fail the workflow for a logging event */ }
@@ -642,14 +656,26 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     const resolved = loadHarnessSection(step.harness, process.cwd())
     return resolved ? { ...step, instructions: resolved } : step
   })
-  // Resolved once for the whole run: the fix step pushes commits, so
+  // Resolved once per runWorkflow call: the fix step pushes commits, so
   // re-classifying per step could yield a different class and make the review
   // and recheck comments cite different tiers for the same PR.
+  //
+  // Not once per PR: --crazy/--halfcrazy re-enter runWorkflow per round, and by
+  // then the diff includes crosscheck's own fix commits, so a later round can
+  // legitimately classify differently. Each comment cites the class that
+  // produced it, so the record stays accurate either way.
   const strategy = resolveStrategyForPR(ctx)
   if (config.quality.mode === 'smart' && !strategy) {
     // A smart-mode install quietly behaving as fixed is otherwise invisible.
     fileLog({ level: 'warn', event: 'strategy_unresolved', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'pr_context_unavailable', fallback_tier: config.quality.tier })
   } else if (strategy) {
+    // A config written before `mode` existed parses as smart on upgrade, so a
+    // hand-set `quality.tier` can be silently overridden. onboard preserves the
+    // old tier by reading raw yaml, but that only helps users who re-run it —
+    // so say it here for everyone else.
+    if (strategy.tier && strategy.tier !== config.quality.tier) {
+      fileLog({ level: 'warn', event: 'strategy_overrode_configured_tier', repo: `${owner}/${repoName}`, pr: prNumber, configured_tier: config.quality.tier, applied_tier: strategy.tier, pr_class: strategy.classId, hint: 'set quality.mode: fixed to keep one tier for every PR' })
+    }
     fileLog({ level: 'info', event: 'strategy_resolved', repo: `${owner}/${repoName}`, pr: prNumber, strategy_version: strategy.version, pr_class: strategy.classId, tier: strategy.tier, effort: strategy.effort, steps: strategy.steps, domain: strategy.domain })
   }
 
@@ -764,7 +790,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const stepsRun: string[] = []
   let currentStepName: string | undefined
 
-  emitPRComplexity(ctx, triggerField)
+  emitPRComplexity(ctx, triggerField, strategyQuality(config.quality, strategy).tier)
 
   try {
   // Inside the try so a preflight failure still reaches the completion handler in
@@ -776,6 +802,37 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   if (!ctx.dryRun && !linearAuth && linearWritePossible(config.linear, steps)) {
     linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
     fileLog({ level: 'info', event: 'linear_auth_resolved', repo: `${owner}/${repoName}`, pr: prNumber, mode: linearAuth.mode, actor: linearAuth.actor })
+  }
+
+  // Class picks tier AND effort under smart; untouched config under fixed.
+  // Rounds beyond the first escalate: the class tier was already tried and did
+  // not resolve the PR, so difficulty is now measured rather than predicted.
+  // escalate() raises effort where the model supports it and promotes a tier
+  // where it does not, and never weakens the model.
+  //
+  // Computed once per run, not per step: nothing here depends on `step`, and
+  // recomputing inside the loop logged the same line for review and recheck.
+  const escalated = strategy
+    ? escalate(
+        { tier: strategy.tier ?? config.quality.tier, effort: strategy.effort },
+        ctx.round ?? 1,
+        resolveClaudeModel(strategyQuality(config.quality, strategy), config.vendors.claude),
+      )
+    : null
+  const roundStrategy = strategy && escalated
+    ? { ...strategy, tier: escalated.tier, effort: escalated.effort }
+    : strategy
+  const quality = strategyQuality(config.quality, roundStrategy)
+  const claudeVendor = strategyVendor(config.vendors.claude, roundStrategy)
+  const codexVendor = strategyVendor(config.vendors.codex, roundStrategy)
+  if (strategy && roundStrategy) {
+    const escalatedNote = escalated && (escalated.tier !== strategy.tier || escalated.effort !== strategy.effort)
+      ? ` · round ${ctx.round} escalated`
+      : ''
+    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${roundStrategy.tier ?? 'skip'} tier${roundStrategy.effort ? ` (${roundStrategy.effort})` : ''}${escalatedNote}`))
+    if (escalatedNote) {
+      fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, strategy_version: strategy.version })
+    }
   }
 
   for (const step of steps) {
@@ -845,29 +902,6 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const skillSession = skillSessionFor(step.name, effectiveType)
       // Under `quality.mode: smart` the PR's class picks the tier; under fixed
       // this is config.quality untouched.
-      // Class picks tier AND effort under smart; untouched config under fixed.
-      // Rounds beyond the first escalate: the class tier was already tried and
-      // did not resolve the PR, so difficulty is now measured rather than
-      // predicted. escalate() raises effort where the model supports it and
-      // promotes a tier where it does not, and never weakens the model.
-      const escalated = strategy
-        ? escalate(
-            { tier: strategy.tier ?? config.quality.tier, effort: strategy.effort },
-            ctx.round ?? 1,
-            resolveClaudeModel(strategyQuality(config.quality, strategy), config.vendors.claude),
-          )
-        : null
-      const roundStrategy = strategy && escalated
-        ? { ...strategy, tier: escalated.tier, effort: escalated.effort }
-        : strategy
-      if (escalated && strategy && (escalated.tier !== strategy.tier || escalated.effort !== strategy.effort)) {
-        log(chalk.dim(`  strategy v${strategy.version}: round ${ctx.round} → ${escalated.tier} tier${escalated.effort ? ` (${escalated.effort})` : ''}`))
-        fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: escalated.tier, from_effort: strategy.effort, to_effort: escalated.effort, strategy_version: strategy.version })
-      }
-      const quality = strategyQuality(config.quality, roundStrategy)
-      const claudeVendor = strategyVendor(config.vendors.claude, roundStrategy)
-      const codexVendor = strategyVendor(config.vendors.codex, roundStrategy)
-      if (strategy) log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${strategy.tier ?? 'skip'}${strategy.effort ? ` (${strategy.effort})` : ''}`))
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
           ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, codexVendor, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext, skillSession))
@@ -1017,7 +1051,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           // Withheld when an explicit vendors.*.model overrode the tier map:
           // citing a tier the run did not use would assert a routing decision
           // that never happened.
-          strategyDeterminedModel(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, roundStrategy) && roundStrategy?.tier
+          strategyDeterminedModel(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, roundStrategy, model) && roundStrategy?.tier
             ? { version: roundStrategy.version, classId: roundStrategy.classId, tier: roundStrategy.tier, reason: roundStrategy.reason }
             : undefined,
         )
@@ -1145,7 +1179,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let fixErr: unknown = undefined
       let activeVendor = vendor
 
-      const tierMs = tierTimeoutMs(config.quality.tier)
+      // The strategy tier, not the configured one: a risky PR runs the thorough
+      // model here, and the balanced 600s budget would cut it off.
+      const tierMs = tierTimeoutMs(fixQuality.tier)
       const skillSession = skillSessionFor(step.name, effectiveType)
       const runFix = async (v: 'claude' | 'codex') => {
         if (v === 'codex') {

@@ -81,6 +81,18 @@ describe('applyOnboardConfig — first run', () => {
     expect(quality.tier).toBe('thorough')
   })
 
+  it('writes codex model_tiers under smart so tiers actually differ', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityMode: 'smart' }, workflowDir)
+
+    // Without this, resolveCodexModel returns the CLI's own default for every
+    // tier under subscription auth, so fast/balanced/thorough are the same run
+    // and smart mode is a no-op for codex.
+    const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
+    expect(vendors.codex.model_tiers).toEqual({
+      fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol',
+    })
+  })
+
   it('clears a model pinned by an earlier fixed-mode run when switching to smart', () => {
     writeFileSync(configPath, yaml.dump({ vendors: { codex: { model: 'gpt-5.6-terra' } } }))
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityMode: 'smart' }, workflowDir)

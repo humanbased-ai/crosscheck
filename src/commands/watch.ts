@@ -590,7 +590,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         board.updatePR(key, { prLoc })
         stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
-        const { verdict, fixAppliedCount } = await runWorkflow({
+        const { verdict, fixAppliedCount, strategySkipped } = await runWorkflow({
           owner, repoName, prNumber, pr,
           tmpDir, token, config: effectiveConfig, origin,
           linearAuth,
@@ -652,9 +652,15 @@ export async function runWatch(opts: WatchOpts = {}) {
             }
           }
         }
+        // A class-skipped PR (e.g. lockfile-only) never ran a review, so say so
+        // rather than reporting it as a completed one.
+        if (strategySkipped) {
+          bLog(`${chalk.dim(fmtTime())}  ${chalk.dim(`PR #${prNumber} skipped — ${strategySkipped} class, nothing to review`)}`)
+        }
         board.completePR(key, {
           elapsedMs: Date.now() - reviewStart,
           url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
+          ...(strategySkipped !== undefined && { label: `skipped · ${strategySkipped}` }),
         })
         // Smart-switch recovery confirmation: if a restore attempt is pending and
         // this reviewer matches the previously-degraded vendor, announce full restoration.
@@ -895,6 +901,11 @@ export async function runWatch(opts: WatchOpts = {}) {
             headRepo: prData.head.repo?.full_name ?? null,
             baseRef: prData.base.ref,
             action: 'comment',
+            // Same fields the webhook path forwards: without them the risky
+            // class's label and hotfix rules classify this PR differently
+            // depending on which trigger ran it.
+            ...(prData.labels !== undefined && { labels: prData.labels.map((l: { name: string }) => l.name) }),
+            ...(prData.base.repo?.default_branch !== undefined && { defaultBranch: prData.base.repo.default_branch }),
           })
           break
         }
@@ -1198,6 +1209,8 @@ export async function runWatch(opts: WatchOpts = {}) {
           title: pr.title, body: pr.body, author: pr.author,
           headSha: pr.headSha, headRef: pr.headRef, headRepo: pr.headRepo,
           baseRef: pr.baseRef, action: 'backtrace',
+          ...(pr.labels !== undefined && { labels: pr.labels }),
+          ...(pr.defaultBranch !== undefined && { defaultBranch: pr.defaultBranch }),
         })))
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)

@@ -389,3 +389,30 @@ describe('rounds escalate on measured non-convergence', () => {
       .toEqual({ tier: 'balanced', effort: null })
   })
 })
+
+describe('codex under subscription auth', () => {
+  const codex = (over: Partial<CodexVendorConfig> = {}): CodexVendorConfig =>
+    ({ enabled: true, model: null, auth: 'subscription', effort: 'medium', quality: 'medium', timeout_sec: null, ...over }) as CodexVendorConfig
+  const q = (tier: QualityConfig['tier']): QualityConfig => ({ tier, mode: 'smart', focus: [] }) as QualityConfig
+
+  // Without model_tiers every tier collapses to the CLI's own default, so the
+  // strategy's tier had no effect and must not be cited.
+  it('collapses every tier to default with no model_tiers', () => {
+    for (const tier of ['fast', 'balanced', 'thorough'] as const) {
+      expect(resolveCodexModel(q(tier), codex())).toBe('default')
+    }
+  })
+
+  it('withholds the citation when the resolved model is default', () => {
+    const strat = { version: '1.0.0', classId: 'risky', tier: 'thorough' } as never
+    expect(strategyDeterminedModel({ model: null }, strat, 'default')).toBe(false)
+    expect(strategyDeterminedModel({ model: null }, strat, 'gpt-5.6-sol')).toBe(true)
+  })
+
+  // What onboard writes under smart, so tiers actually differ.
+  it('varies by tier once model_tiers is written', () => {
+    const v = codex({ model_tiers: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol' } })
+    expect(resolveCodexModel(q('fast'), v)).toBe('gpt-5.6-luna')
+    expect(resolveCodexModel(q('thorough'), v)).toBe('gpt-5.6-sol')
+  })
+})

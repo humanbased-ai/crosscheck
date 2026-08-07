@@ -57,6 +57,12 @@ quality:
   # the strategy, so pinning one makes per-PR selection a no-op — and crosscheck
   # then withholds the tier from the comment rather than citing one that did not
   # run. `crosscheck onboard` clears the pin (and says so) when you pick smart.
+  #
+  # vendors.*.effort behaves the opposite way: under smart the class's effort
+  # wins over the value below. `effort` always has a value (it has a schema
+  # default), so crosscheck cannot tell a deliberate setting from an unset one,
+  # and honoring it would disable effort escalation for every install. Use
+  # `mode: fixed` if you want a hand-set effort applied to every call.
 
   tier: balanced            # fast | balanced | thorough
   #

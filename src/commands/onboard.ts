@@ -694,6 +694,17 @@ export function applyOnboardConfig(
         delete (vendors[vendor] as Record<string, unknown>).model
       }
     }
+    // Codex needs an explicit per-tier map to vary by tier at all: with no
+    // `model` and no `model_tiers`, resolveCodexModel returns the CLI's own
+    // 'default' under subscription auth, so fast/balanced/thorough would be the
+    // same run. `model_tiers` is honored ahead of the auth check, so writing it
+    // is what makes smart mode mean anything for codex. Claude needs no
+    // equivalent — its tier map applies under either auth.
+    ;(vendors.codex as Record<string, unknown>).model_tiers = {
+      fast: QUALITY_TIERS.fast.codex.model,
+      balanced: QUALITY_TIERS.balanced.codex.model,
+      thorough: QUALITY_TIERS.thorough.codex.model,
+    }
   } else {
     vendors.codex.model = tierCfg.codex.model
   }

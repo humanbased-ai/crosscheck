@@ -6,6 +6,7 @@
   "review_interval_days": 60,
   "report": "docs/dynamic-thoroughness.md",
   "runtime_status": "active",
+  "_tier_map_note": "resolveClaudeModel/resolveCodexModel read tier->model from review-model-tiers.json, not from `vendors` below. The two agree today and CI verifies both against the same provider docs; `vendors` here is the documented policy and the tier map is the runtime lookup.",
   "_runtime_status_note": "Read at runtime by src/lib/review-strategy.ts. The runner classifies each PR from the cloned working copy and folds the result into the quality config the reviewers receive; the version, class, and tier are stamped into every annotation.",
   "_comment": "Single source of truth for how crosscheck picks a model, effort, and step set. Every review comment cites `version` so a past review can be explained by the policy in force when it ran. Supersedes review-model-tiers.json, which is retained for backwards compat. Re-verify every review_interval_days with `npm run verify:strategy`.",
 
@@ -195,7 +196,7 @@
   "citation": {
     "_comment": "Every crosscheck comment states the strategy it ran under, so a past review can be explained by the policy in force at the time.",
     "annotation_fields": ["strategy", "class", "tier"],
-    "annotation_example": "<!-- crosscheck: origin=claude reviewer=claude model=claude-opus-5 type=review round=1 verdict=BLOCK strategy=1.0.0 class=risky tier=thorough service=crosscheck sha=abc123 -->",
+    "annotation_example": "<!-- crosscheck: origin=claude reviewer=claude model=claude-opus-5 type=review round=1 verdict=BLOCK service=crosscheck sha=abc123 strategy=1.0.0 class=risky tier=thorough -->",
     "body_template": "{tier} tier · {reason} · strategy v{version}",
     "body_example": "_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](https://github.com/humanbased-ai/crosscheck) with Opus 5 (high) — thorough tier · touches a security or data-critical path, where a missed defect is expensive · strategy v1.0.0_"
   }
