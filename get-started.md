@@ -1414,7 +1414,7 @@ claude \
 
 `--bare` makes execution fast and deterministic. `--allowedTools` limits Claude to read-only git operations on the cloned repo. `vendors.claude.effort` drives `--effort` for every Claude step — review, recheck, auto-fix and conflict-resolve.
 
-Every comment crosscheck posts closes with the model and effort the step actually ran with, plus any skills the agent activated:
+Most comments crosscheck posts close with the model and effort the step actually ran with, plus any skills the agent activated:
 
 ```
 ---
