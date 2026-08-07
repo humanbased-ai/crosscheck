@@ -366,10 +366,12 @@ export interface LinearDecision {
   teamKeys: string[]
 }
 
-// The attribution ladder, surfaced at onboarding rather than left in the docs.
-// Each rung buys stronger attribution for more setup; rung 1 needs nothing but a
-// key, so a user who just wants review outcomes in Linear never has to see an
-// OAuth form. Defaults to off — writing into someone's tracker is opt-in.
+// Linear write-back is in beta and not selectable from onboarding yet. The whole
+// attribution ladder is still printed — each rung buys stronger attribution for
+// more setup — because this is where people look for what crosscheck can do, and
+// a single greyed-out "[1] off" advertises nothing. Nothing here is a prompt:
+// whatever the config already has is carried through untouched, so a re-run can
+// never disable an integration this step can no longer configure.
 export async function promptLinear(
   current: { enabled?: boolean; mode?: string; teamKeys?: string[] } | undefined,
   opts: OnboardOpts,
@@ -377,55 +379,20 @@ export async function promptLinear(
   const currentMode: LinearDecision['mode'] = !current?.enabled
     ? 'off'
     : current.mode === 'client_credentials' ? 'client_credentials' : 'api_key'
+  const decision: LinearDecision = { mode: currentMode, teamKeys: current?.teamKeys ?? [] }
 
-  if (opts.yes) return { mode: currentMode, teamKeys: current?.teamKeys ?? [] }
+  if (opts.yes) return decision
 
-  const currentChoice = currentMode === 'client_credentials' ? '3' : currentMode === 'api_key' ? '2' : '1'
-
-  console.log(chalk.dim('  Post the review verdict onto the Linear issue a PR belongs to.\n'))
-  console.log('  [1] off           — leave Linear alone')
-  console.log(`  [2] api key       — works immediately. Comments post under ${chalk.dim('your own Linear account')}`)
-  console.log(`  [3] workspace app — comments post as ${chalk.cyan('crosscheck')} itself, with its own icon`)
+  console.log(chalk.dim('  Post the review verdict onto the Linear issue a PR belongs to.'))
+  console.log(`  ${chalk.yellow('(beta)')} ${chalk.dim('— preview of what is coming; not selectable here yet.')}\n`)
+  console.log(chalk.dim('  [1] off           — leave Linear alone'))
+  console.log(chalk.dim('  [2] api key       — works immediately. Comments post under your own Linear account'))
+  console.log(chalk.dim('  [3] workspace app — comments post as crosscheck itself, with its own icon'))
   console.log(chalk.dim('                      one app per workspace, ~5 min, needs Linear settings access'))
-  console.log(chalk.dim(`\n  Current: ${currentMode}`))
+  console.log(chalk.dim(`\n  Current: ${currentMode} (unchanged — edit \`linear:\` in crosscheck.config.yml to set it by hand)`))
   console.log()
 
-  // Enter keeps whatever is configured. Defaulting to `off` meant a re-run where
-  // the user just pressed enter silently disabled a working integration.
-  const answer = (await ask(`  Choice [${currentChoice}]: `)).trim()
-  const mode: LinearDecision['mode'] =
-    answer === '1' ? 'off'
-      : answer === '2' ? 'api_key'
-        : answer === '3' ? 'client_credentials'
-          : currentMode
-
-  if (mode === 'off') return { mode, teamKeys: [] }
-
-  // Without team keys only full linear.app URLs resolve — worth asking, because a
-  // user who skips it may see nothing happen and assume the feature is broken.
-  console.log(chalk.dim('\n  Your Linear team key prefixes, so refs like ENG-42 in a branch name resolve.'))
-  console.log(chalk.dim('  Comma-separated. Leave blank to only follow full linear.app links.'))
-  // Blank keeps the current value on a first run (nothing to keep) and on a re-run
-  // where the user just pressed enter. `-` is the explicit clear, because silently
-  // treating blank as "clear" would wipe configured keys on every re-run.
-  const hasCurrent = (current?.teamKeys?.length ?? 0) > 0
-  const keysPrompt = hasCurrent
-    ? `  team keys [${current!.teamKeys!.join(',')}] (- to clear): `
-    : '  team keys: '
-  const keysAnswer = (await ask(keysPrompt)).trim()
-  const teamKeys = keysAnswer === '-'
-    ? []
-    : keysAnswer
-      ? keysAnswer.split(',').map(k => k.trim().toUpperCase()).filter(Boolean)
-      : (current?.teamKeys ?? [])
-
-  if (mode === 'api_key') {
-    console.log(chalk.dim('\n  Set LINEAR_API_KEY in your environment (Linear → Settings → API).'))
-  } else {
-    console.log(chalk.dim('\n  Create the app, then set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET.'))
-    console.log(chalk.dim('  Walkthrough: docs/linear-identity.md'))
-  }
-  return { mode, teamKeys }
+  return decision
 }
 
 async function promptConnectionType(
@@ -1072,7 +1039,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log()
 
   // ── Step 9.5: Linear write-back ────────────────────────────────────────────
-  console.log(chalk.bold('Step 9.5 — Linear write-back (optional)'))
+  console.log(chalk.bold(`Step 9.5 — Linear write-back ${chalk.yellow('(beta)')}`))
   const linear = await promptLinear(
     {
       enabled: existingConfig?.linear?.enabled,
@@ -1094,7 +1061,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
   console.log(`  connection   ${chalk.cyan(tunnelBackend)}${tunnelBackend === 'smee' && smeeChannel ? chalk.dim(` (${smeeChannel})`) : ''}`)
   console.log(`  clone        ${chalk.cyan(cloneProtocol)}`)
-  console.log(`  linear       ${chalk.cyan(linear.mode === 'off' ? 'off' : linear.mode)}${linear.mode !== 'off' && linear.teamKeys.length > 0 ? chalk.dim(` (${linear.teamKeys.join(', ')})`) : ''}`)
+  console.log(`  linear       ${chalk.cyan(linear.mode === 'off' ? 'off' : linear.mode)}${linear.mode !== 'off' && linear.teamKeys.length > 0 ? chalk.dim(` (${linear.teamKeys.join(', ')})`) : ''} ${chalk.yellow('(beta)')}`)
   console.log(`  mode         ${chalk.cyan(vendorConfig.mode)}`)
   if (vendorConfig.mode === 'single-vendor') {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
