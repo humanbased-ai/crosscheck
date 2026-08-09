@@ -271,9 +271,15 @@ export async function runWatch(opts: WatchOpts = {}) {
   const reviewedPRKeys = new Set<string>()
   // PR+sha pairs this session approved. Used only to steer the event back to history
   // detection — never to skip on its own, since a newer verdict or an out-of-band fix
-  // can supersede the approval. Keyed by SHA, not by PR: a push changes what was
-  // approved. Restarts lose the set; history detection is correct without it.
+  // can supersede the approval. Restarts lose the set; history detection is correct
+  // without it.
   const approvedShaKeys = new Set<string>()
+  // PRs this session approved at least once, keyed by PR rather than by SHA. A push
+  // moves HEAD off the approved SHA, so the SHA-keyed set above stops matching while
+  // the SHA-agnostic `reviewedPRKeys` fast-path still would — which would run the new
+  // commit as a recheck instead of the fresh review an invalidated approval requires.
+  // This set keeps forcing history detection once HEAD moves past an approval.
+  const approvedPRKeys = new Set<string>()
   const prRoundCounts = new Map<string, number>()
   // PR+sha pairs completed by this watch session — used to suppress issue_comment
   // re-entries for reviews that watch posted itself (as opposed to kickass).
@@ -410,14 +416,16 @@ export async function runWatch(opts: WatchOpts = {}) {
         isRecheckRun = false
         round = 1
       }
-      // This session approved this exact commit. That is a hint, never a verdict: the
-      // `--steps review` escape hatch can post a newer NEEDS_WORK on the same SHA, and
-      // an out-of-band `crosscheck fix` / `resolve` can push a fix past the approval —
-      // both supersede it. So the cache only forces history detection (which applies the
-      // latest-record rule and the post-approval fix exception) rather than short-
-      // circuiting to a skip. Without it the session fast-path would coerce the event
-      // into a recheck of an already-approved commit.
-      if (approvedShaKeys.has(key) && isRecheckRun) {
+      // This session approved this commit, or an earlier commit on this PR. That is a
+      // hint, never a verdict: the `--steps review` escape hatch can post a newer
+      // NEEDS_WORK on the same SHA, and an out-of-band `crosscheck fix` / `resolve` can
+      // push a fix past the approval — both supersede it. So the cache only forces
+      // history detection (which applies the latest-record rule and the post-approval
+      // fix exception) rather than short-circuiting to a skip. Without it the session
+      // fast-path would coerce the event into a recheck — of the approved commit itself
+      // (SHA key), or, once a push moves HEAD past the approval, of code that has never
+      // been reviewed and is owed a fresh review round (PR key).
+      if ((approvedShaKeys.has(key) || approvedPRKeys.has(prKey)) && isRecheckRun) {
         isRecheckRun = false
         round = 1
       }
@@ -463,7 +471,10 @@ export async function runWatch(opts: WatchOpts = {}) {
             // Remember an approved SHA so a later event for it takes the history path
             // again instead of the session fast-path's recheck. A push lands on a
             // different key and is detected fresh.
-            if (nextResult.stopReason === 'approved') approvedShaKeys.add(key)
+            if (nextResult.stopReason === 'approved') {
+              approvedShaKeys.add(key)
+              approvedPRKeys.add(prKey)
+            }
             await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
             releasePRLock(owner, repoName, prNumber, params.headSha)
             fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: nextResult.stopReason ?? 'workflow_complete', sha: params.headSha })
@@ -632,10 +643,14 @@ export async function runWatch(opts: WatchOpts = {}) {
         })
 
         // The workflow just approved this commit — nothing more to run for it. Recording
-        // the key sends a later event on the same SHA through history detection (which
-        // stops it) rather than the session fast-path's recheck; a push (new key) is
-        // reviewed normally.
-        if (verdict === 'APPROVE') approvedShaKeys.add(key)
+        // the keys sends later events through history detection rather than the session
+        // fast-path's recheck: the SHA key covers another event on this same commit
+        // (detection stops it), the PR key covers a push that moves HEAD past the
+        // approval (detection reviews the new code fresh).
+        if (verdict === 'APPROVE') {
+          approvedShaKeys.add(key)
+          approvedPRKeys.add(prKey)
+        }
         // A strategy-skipped PR never ran a review, so it must stay out of the
         // session caches. reviewedPRKeys is what makes the next event on this PR
         // an `isRecheckRun`, and a review coerced to a recheck is deliberately

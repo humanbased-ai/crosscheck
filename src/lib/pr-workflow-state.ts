@@ -275,6 +275,14 @@ export function identifyNextWorkflowStep(
   const lastFixAfterReview = historyAfterReview.filter(r => r.type === 'fix').at(-1)
   const conflictAfterReview = historyAfterReview.some(r => r.type === 'conflict-resolve')
   const fixAfterReview = lastFixAfterReview !== undefined || conflictAfterReview
+  // A fix/conflict-resolve recorded after the approval only invalidates it while that
+  // commit is still HEAD. Comment history is permanent, but a force-push can drop the
+  // commit and put HEAD back on the approved SHA — the record then describes content
+  // that no longer exists, and treating it as live work would schedule another pass
+  // over the already-approved commit.
+  const postApprovalPushCoversHead = historyAfterReview.some(
+    r => (r.type === 'fix' || r.type === 'conflict-resolve') && shaCovers(r.pushedSha, currentSha),
+  )
 
   // Terminal state: the newest verdict is APPROVE and it covers the current HEAD. No
   // further step runs — not a recheck, not a re-review — for as long as HEAD stays there.
@@ -284,10 +292,12 @@ export function identifyNextWorkflowStep(
   // fresh review below. A legacy APPROVE carrying no `sha=` cannot prove it covers HEAD,
   // so it falls through too; that one review re-establishes the SHA and the stop.
   //
-  // Gated on `fixAfterReview` so work that landed AFTER the approval still finishes: a
-  // workflow whose fix step isn't gated on the verdict can push a commit past an APPROVE,
-  // and that commit still needs its recheck.
-  if (lastReview.verdict === 'APPROVE' && !fixAfterReview && shaCovers(lastReview.sha, currentSha)) {
+  // Gated on `postApprovalPushCoversHead` so work that landed AFTER the approval still
+  // finishes: a workflow whose fix step isn't gated on the verdict can push a commit past
+  // an APPROVE, and that commit still needs its recheck. The gate requires that commit to
+  // be the current HEAD, so a stale fix record left behind by a force-push doesn't keep
+  // re-opening an approval that still covers HEAD.
+  if (lastReview.verdict === 'APPROVE' && !postApprovalPushCoversHead && shaCovers(lastReview.sha, currentSha)) {
     return { step: null, stopReason: 'approved', hasExistingReview: true, round: lastReview.round, history }
   }
 
