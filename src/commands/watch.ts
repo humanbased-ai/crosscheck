@@ -178,26 +178,6 @@ export interface WatchOpts {
   backtrace?: boolean
 }
 
-// Whether an in-session cached APPROVE for `sha` is still the newest verdict on the PR.
-// The cache is only an API-call optimisation and can go stale: the documented escape
-// hatch (`crosscheck run <pr-url> --steps review`) can post a newer NEEDS_WORK/BLOCK on
-// the same SHA while this watcher keeps running, and the newer record supersedes the
-// approval — the same latest-record rule identifyNextWorkflowStep and decideReviewOnly
-// apply. On a fetch failure the cached approval stands, which is the conservative skip
-// the cache performed unconditionally before.
-async function approvalStillStands(
-  owner: string, repoName: string, prNumber: number, sha: string, token: string,
-): Promise<boolean> {
-  try {
-    const history = await fetchStepHistory(owner, repoName, prNumber, token)
-    const lastReview = history.filter(r => r.type === 'review' || r.type === 'recheck').at(-1)
-    if (!lastReview || lastReview.verdict !== 'APPROVE') return false
-    return lastReview.sha !== undefined && (lastReview.sha.startsWith(sha) || sha.startsWith(lastReview.sha))
-  } catch {
-    return true
-  }
-}
-
 export async function runWatch(opts: WatchOpts = {}) {
   const configPath = opts.config
   let config = loadConfig(configPath)
@@ -289,10 +269,10 @@ export async function runWatch(opts: WatchOpts = {}) {
   const diffHashes = new PersistentDiffHashMap()
   // PRs reviewed at least once this session — synchronize events on these run as recheck rounds
   const reviewedPRKeys = new Set<string>()
-  // PR+sha pairs this session approved. An APPROVE ends crosscheck's work on that commit,
-  // so later events for it skip without re-reading comment history. Keyed by SHA, not by
-  // PR: a push after the approval changes what was approved and must be reviewed again.
-  // Restarts lose the set; identifyNextWorkflowStep re-derives the same stop from history.
+  // PR+sha pairs this session approved. Used only to steer the event back to history
+  // detection — never to skip on its own, since a newer verdict or an out-of-band fix
+  // can supersede the approval. Keyed by SHA, not by PR: a push changes what was
+  // approved. Restarts lose the set; history detection is correct without it.
   const approvedShaKeys = new Set<string>()
   const prRoundCounts = new Map<string, number>()
   // PR+sha pairs completed by this watch session — used to suppress issue_comment
@@ -327,15 +307,6 @@ export async function runWatch(opts: WatchOpts = {}) {
       }
 
       const prKey = `${owner}/${repoName}#${prNumber}`
-
-      // This exact commit was approved — nothing more to do for it. Checked before origin
-      // detection so a re-delivered event on an approved SHA costs no API calls. A push
-      // moves HEAD off this key and is reviewed again; sessions that did not post the
-      // approval themselves reach the same stop through identifyNextWorkflowStep below.
-      if (approvedShaKeys.has(key)) {
-        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'approved', sha: params.headSha })
-        return
-      }
 
       const { origin, method: originMethod } = await detectOriginFull(
         params.body ?? '', params.headRef,
@@ -439,6 +410,17 @@ export async function runWatch(opts: WatchOpts = {}) {
         isRecheckRun = false
         round = 1
       }
+      // This session approved this exact commit. That is a hint, never a verdict: the
+      // `--steps review` escape hatch can post a newer NEEDS_WORK on the same SHA, and
+      // an out-of-band `crosscheck fix` / `resolve` can push a fix past the approval —
+      // both supersede it. So the cache only forces history detection (which applies the
+      // latest-record rule and the post-approval fix exception) rather than short-
+      // circuiting to a skip. Without it the session fast-path would coerce the event
+      // into a recheck of an already-approved commit.
+      if (approvedShaKeys.has(key) && isRecheckRun) {
+        isRecheckRun = false
+        round = 1
+      }
 
       if (reviewOnlyForRepo) {
         // Review-only comes from a per-repo override (crosscheck alter --review-only).
@@ -478,9 +460,9 @@ export async function runWatch(opts: WatchOpts = {}) {
           if (nextResult.step === null) {
             // Workflow already complete for this HEAD sha — release lock and skip.
             // Happens when a synchronize event fires after all steps are done.
-            // Remember an approved SHA so re-delivered events for it skip without
-            // another history fetch. A later push lands on a different key and is
-            // detected fresh.
+            // Remember an approved SHA so a later event for it takes the history path
+            // again instead of the session fast-path's recheck. A push lands on a
+            // different key and is detected fresh.
             if (nextResult.stopReason === 'approved') approvedShaKeys.add(key)
             await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
             releasePRLock(owner, repoName, prNumber, params.headSha)
@@ -650,8 +632,9 @@ export async function runWatch(opts: WatchOpts = {}) {
         })
 
         // The workflow just approved this commit — nothing more to run for it. Recording
-        // the key makes a re-delivered event on the same SHA a zero-API-call skip, while
-        // a push (new key) still gets reviewed.
+        // the key sends a later event on the same SHA through history detection (which
+        // stops it) rather than the session fast-path's recheck; a push (new key) is
+        // reviewed normally.
         if (verdict === 'APPROVE') approvedShaKeys.add(key)
         // A strategy-skipped PR never ran a review, so it must stay out of the
         // session caches. reviewedPRKeys is what makes the next event on this PR
