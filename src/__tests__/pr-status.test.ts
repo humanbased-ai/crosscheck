@@ -190,6 +190,74 @@ describe('derivePRStatus', () => {
     expect(status.nextAction).toBe('fix')
   })
 
+  // Logging is on by default, and runWorkflow writes workflow_complete AFTER posting the
+  // review comment — so the newest verdict on a freshly approved PR is a SHA-less log
+  // entry. Reading the approval SHA from it would fail every check and have scan/kickass
+  // re-dispatch approved PRs forever.
+  it('stays APPROVED when a newer workflow_complete log follows the approval comment', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [{
+        ts: '2026-05-27T11:00:05.000Z',
+        event: 'workflow_complete',
+        repo: 'acme/web',
+        pr: 7,
+        last_verdict: 'APPROVE',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('APPROVED')
+    expect(status.nextAction).toBe('merge')
+  })
+
+  // The SHA still has to cover HEAD — the log entry must not paper over a later push.
+  it('needs review when a workflow_complete log follows an approval of an older SHA', () => {
+    const status = derivePRStatus(input({
+      headSha: 'def456',
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [{
+        ts: '2026-05-27T11:00:05.000Z',
+        event: 'workflow_complete',
+        repo: 'acme/web',
+        pr: 7,
+        last_verdict: 'APPROVE',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_REVIEW')
+    expect(status.nextAction).toBe('review')
+  })
+
+  // A newer annotation disagreeing with an older APPROVE must win: the approval SHA is
+  // read only when the newest verdict-bearing annotation is itself the APPROVE.
+  it('does not resurrect an older approval when a newer annotation disagrees', () => {
+    const status = derivePRStatus(input({
+      comments: [
+        {
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+          createdAt: '2026-05-27T11:00:00.000Z',
+          updatedAt: '2026-05-27T11:00:00.000Z',
+        },
+        {
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc123 -->',
+          createdAt: '2026-05-27T12:00:00.000Z',
+          updatedAt: '2026-05-27T12:00:00.000Z',
+        },
+      ],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.nextAction).toBe('fix')
+  })
+
   // Fix log events carry no SHA, so one that no longer describes HEAD — force-pushed
   // away, or delivered as its own PR — must not pin an approved commit to NEEDS_RECHECK
   // and have kickass dispatch no-op rechecks at it forever.
