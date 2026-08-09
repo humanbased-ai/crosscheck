@@ -124,7 +124,7 @@ export async function runDetectStep(
     const lastVerdict = [...history].reverse().find(r => r.verdict)?.verdict
     console.log(`  ${chalk.green('✓')} Workflow complete${lastVerdict ? ` — last verdict: ${verdictColor(lastVerdict)}` : ''}`)
     if (nextResult.stopReason === 'approved') {
-      console.log(chalk.dim('    crosscheck will not run again on this PR, including on new commits'))
+      console.log(chalk.dim('    this commit is approved — crosscheck resumes only if new commits land'))
     }
   } else {
     const nextLabel = chalk.bold(nextResult.step.type)

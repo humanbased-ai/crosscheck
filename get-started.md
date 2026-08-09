@@ -528,12 +528,12 @@ crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove th
 
 The depths differ in what happens after the initial review:
 
-All depths stop for good once a verdict comes back `APPROVE` — see [What happens after a PR is approved?](#what-happens-after-a-pr-is-approved).
+In every depth, an `APPROVE` stops all work on the commit it covers, and a later push re-opens the PR — see [What happens after a PR is approved?](#what-happens-after-a-pr-is-approved).
 
-- **`review`** — review each new SHA until one is approved; never modify code.
+- **`review`** — review each new SHA; never modify code.
 - **`review,fix`** — crosscheck auto-applies fixes when the verdict isn't `APPROVE`, and stops there; its own fix commit is not re-reviewed.
 - **`review,fix,recheck`** — same, then rechecks its own fix commit. `max_rounds` in `~/.crosscheck/workflow.yml` bounds that fix→recheck cycle.
-- **`review,recheck`** — crosscheck never auto-fixes. When an engineer pushes their own fix commits **while a review is still unresolved** (last verdict `NEEDS_WORK` or `BLOCK`), watch runs a **recheck** — re-evaluating the new code against that review — instead of a fresh review. Once the verdict is `APPROVE` there is nothing left to resolve, and crosscheck stops working on the PR entirely. Use this when humans own the fix decision but still want automated re-evaluation on every push. The recheck only ever runs in its own session, never immediately after the review that triggered it. `max_rounds` does not apply here: with no auto-fix cycle to bound, every push is rechecked for as long as the review stays unresolved.
+- **`review,recheck`** — crosscheck never auto-fixes. When an engineer pushes their own fix commits **while a review is still unresolved** (last verdict `NEEDS_WORK` or `BLOCK`), watch runs a **recheck** — re-evaluating the new code against that review — instead of a fresh review. Once the verdict is `APPROVE` there is nothing left to resolve, so a later push gets a fresh review rather than a recheck. Use this when humans own the fix decision but still want automated re-evaluation on every push. The recheck only ever runs in its own session, never immediately after the review that triggered it. `max_rounds` does not apply here: with no auto-fix cycle to bound, every push is rechecked for as long as the review stays unresolved.
 
 Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. Changes apply on the next PR event — no need to restart a running `crosscheck watch`.
 
@@ -1648,9 +1648,11 @@ Each cycle is one `[crosscheck]` fix commit followed by one recheck. The loop st
 
 ### What happens after a PR is approved?
 
-Crosscheck stops working on it. Once the newest verdict on a PR is `APPROVE`, no further step runs — not a recheck, not a fresh review, not even when new commits are pushed afterwards. `watch` skips later events on that PR, `crosscheck run` prints `latest review is APPROVE — crosscheck is done with this PR` and exits, and `kickass` lists it under "needs merge (manual)" instead of dispatching it.
+Crosscheck stops working on that commit. Once the newest verdict is `APPROVE` and it covers the PR's current HEAD, no further step runs — not a recheck, not a re-review. `watch` skips further events on that SHA, `crosscheck run` prints `this commit is already approved — nothing to do until new commits land`, and `kickass` lists the PR under "needs merge (manual)" instead of dispatching it.
 
-To force another pass on an approved PR, name the steps explicitly — that bypasses history detection:
+**A push re-opens it.** New commits materially change what was approved, so the approval no longer applies: the next event runs a fresh review (round *n*+1) on the new code, and the full fix/recheck loop resumes from there. An `APPROVE` posted before the annotation carried a `sha=` field can't prove which commit it covers, so it is treated the same way — one review re-establishes it.
+
+To force another pass on the approved commit itself, name the steps explicitly — that bypasses history detection:
 
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123 --steps review

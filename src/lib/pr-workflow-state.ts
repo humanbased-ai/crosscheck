@@ -27,7 +27,7 @@ export interface StepRecord {
   source?: 'comment' | 'commit'
 }
 
-/** Why `step` is null. `approved` means the PR is finished for good, not just for this SHA. */
+/** Why `step` is null. `approved` means HEAD carries an APPROVE verdict — nothing runs until it moves. */
 export type WorkflowStopReason = 'approved'
 
 export interface NextStepResult {
@@ -46,6 +46,15 @@ export interface NextStepResult {
 }
 
 const VALID_STEP_TYPES = new Set<StepRecordType>(['review', 'recheck', 'fix', 'conflict-resolve'])
+
+// Whether a record's SHA refers to the same commit as `currentSha`. Annotations carry
+// either the short (7-char) or the full form, so compare by prefix — the same tolerance
+// decideReviewOnly and the issue_comment bridge use. An absent or empty SHA proves
+// nothing and never matches.
+function shaCovers(recordSha: string | undefined, currentSha: string): boolean {
+  if (!recordSha || !currentSha) return false
+  return recordSha.startsWith(currentSha) || currentSha.startsWith(recordSha)
+}
 
 function commentToRecord(comment: { id: number; body: string; created_at: string }): StepRecord | null {
   const fields = parseAnnotationFields(comment.body)
@@ -267,15 +276,18 @@ export function identifyNextWorkflowStep(
   const conflictAfterReview = historyAfterReview.some(r => r.type === 'conflict-resolve')
   const fixAfterReview = lastFixAfterReview !== undefined || conflictAfterReview
 
-  // Terminal state: the newest verdict on the PR is APPROVE. Crosscheck is done with this
-  // PR — no further step runs, not even on commits pushed after the approval. Re-reviewing
-  // post-approval pushes is the one thing this deliberately gives up; a human who wants
-  // another pass asks for it explicitly (`ck run <pr-url> --steps review`, which skips
-  // history detection entirely).
-  // Gated on `fixAfterReview` so work that landed AFTER the approval is still finished:
-  // a workflow whose fix step isn't gated on the verdict can push a commit past an
-  // APPROVE, and that commit still needs its recheck.
-  if (lastReview.verdict === 'APPROVE' && !fixAfterReview) {
+  // Terminal state: the newest verdict is APPROVE and it covers the current HEAD. No
+  // further step runs — not a recheck, not a re-review — for as long as HEAD stays there.
+  //
+  // The approval covers a specific commit, not the PR forever. Commits pushed after it
+  // materially change what was approved, so they invalidate it and fall through to a
+  // fresh review below. A legacy APPROVE carrying no `sha=` cannot prove it covers HEAD,
+  // so it falls through too; that one review re-establishes the SHA and the stop.
+  //
+  // Gated on `fixAfterReview` so work that landed AFTER the approval still finishes: a
+  // workflow whose fix step isn't gated on the verdict can push a commit past an APPROVE,
+  // and that commit still needs its recheck.
+  if (lastReview.verdict === 'APPROVE' && !fixAfterReview && shaCovers(lastReview.sha, currentSha)) {
     return { step: null, stopReason: 'approved', hasExistingReview: true, round: lastReview.round, history }
   }
 
@@ -339,10 +351,10 @@ export function identifyNextWorkflowStep(
     // the workflow has a fix step, keep the fresh-review behaviour so the auto-fix loop
     // re-engages on the new SHA.
     //
-    // Only when the prior review left unresolved work. An APPROVE normally stops the
-    // workflow above; it reaches here only when a conflict-resolve landed after the
-    // approval, and a recheck — whose instructions centre on resolving the original
-    // review — has no findings to re-evaluate. That merge gets a fresh review instead.
+    // Only when the prior review left unresolved work. After an APPROVE there are no
+    // findings to re-evaluate, so a recheck — whose instructions centre on resolving
+    // the original review — could gloss over defects in the newly pushed code. Those
+    // pushes get a fresh review instead.
     if (hasRecheckStep && !hasFixStep && lastReview.verdict !== 'APPROVE') {
       return {
         step: effectiveRecheckStep(steps),
@@ -399,8 +411,6 @@ export function identifyNextWorkflowStep(
 export interface ReviewOnlyDecision {
   /** True when `sha` already has a review/recheck record — the run should be skipped. */
   alreadyReviewed: boolean
-  /** True when the most recent review carries APPROVE — crosscheck is done with this PR. */
-  approved: boolean
   /** Round number to stamp on the review: highest prior round + 1, or 1 for a never-reviewed PR. */
   round: number
 }
@@ -415,11 +425,8 @@ export function decideReviewOnly(history: StepRecord[], sha: string): ReviewOnly
   const reviews = history.filter(r => r.type === 'review' || r.type === 'recheck')
   const alreadyReviewed = reviews.some(r =>
     r.sha !== undefined && (r.sha.startsWith(sha) || sha.startsWith(r.sha)))
-  // An APPROVE on the latest review ends the PR the same way it does in the full
-  // workflow — later pushes are not reviewed again.
-  const approved = reviews.at(-1)?.verdict === 'APPROVE'
   const maxRound = reviews.reduce((max, r) => Math.max(max, r.round), 0)
-  return { alreadyReviewed, approved, round: alreadyReviewed ? maxRound : maxRound + 1 }
+  return { alreadyReviewed, round: alreadyReviewed ? maxRound : maxRound + 1 }
 }
 
 function firstIncompleteInitialStep(history: StepRecord[], steps: WorkflowStep[]): WorkflowStep | null {
