@@ -20,6 +20,7 @@ import { isAuthorAllowed } from './filter.js'
 import { getLogDir, logError } from './logger.js'
 import { parseAnnotationFieldsFenced } from './annotation.js'
 import { readRepoWorkflowStepTypes } from './repo-workflow.js'
+import { shaCovers } from './pr-workflow-state.js'
 import { dedupScopes, type Scope } from './scopes.js'
 
 export type Freshness = 'stale' | 'not_stale'
@@ -206,7 +207,7 @@ export function derivePRStatus(input: PRStatusInput, options: DeriveStatusOption
   ]) ?? Date.parse(input.prUpdatedAt)
 
   const ageMs = Math.max(0, options.nowMs - lastActiveMs)
-  const reviewState = computeReviewState(latestVerdict, latestFix)
+  const reviewState = computeReviewState(latestVerdict, latestFix, input.headSha)
   const nextAction = nextActionForState(reviewState)
   const freshness: Freshness = ageMs >= options.staleAfterMs && nextAction !== null ? 'stale' : 'not_stale'
 
@@ -433,9 +434,27 @@ function verdictToReviewState(verdict: CrosscheckVerdict): ReviewState {
   return 'NEEDS_FIX' // NEEDS_WORK and BLOCK both require a fix; severity is on the verdict field
 }
 
-function computeReviewState(latestVerdict: TimedVerdict | null, latestFix: PRWorkflowLogEvent | null): ReviewState {
+function computeReviewState(
+  latestVerdict: TimedVerdict | null,
+  latestFix: PRWorkflowLogEvent | null,
+  headSha: string,
+): ReviewState {
   if (!latestVerdict) return 'NEEDS_REVIEW'
   if (latestFix) return 'NEEDS_RECHECK'
+  // An APPROVE ends the PR only for the commit it covers — the same rule
+  // identifyNextWorkflowStep applies. Without this check the scan reports
+  // `nextAction: 'merge'` for a PR approved at an older SHA, so kickass presents
+  // never-reviewed code as merge-ready instead of dispatching the fresh review it is
+  // owed. A verdict recovered from a log event, or a legacy annotation written before
+  // `sha=` existed, cannot say which commit it describes and so cannot claim HEAD:
+  // those fall through to a review, which re-establishes the SHA (fail open).
+  //
+  // Only APPROVE is SHA-scoped here. A stale NEEDS_WORK/BLOCK still means "this PR has
+  // unresolved findings", and kickass separately demotes a fix to a review when the
+  // annotation covers an older SHA (`hasUsableCurrentHeadReview`).
+  if (latestVerdict.verdict === 'APPROVE' && !shaCovers(latestVerdict.annotation?.sha, headSha)) {
+    return 'NEEDS_REVIEW'
+  }
   return verdictToReviewState(latestVerdict.verdict)
 }
 

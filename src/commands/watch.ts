@@ -35,7 +35,7 @@ import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
-import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
+import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly, type StepRecord } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
@@ -178,6 +178,27 @@ export interface WatchOpts {
   backtrace?: boolean
 }
 
+// PR history is what decides whether a step runs at all — the approval stop, the
+// per-SHA dedup, the resume point. Acting without it means posting a duplicate review
+// or modifying an already-approved commit, so callers fail closed rather than assume an
+// empty history. One short retry first: the usual cause is a transient GitHub blip or a
+// rate-limit tick, and deferring the event strands the PR until something else happens.
+const HISTORY_RETRY_DELAY_MS = 3_000
+
+async function fetchStepHistoryWithRetry(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<StepRecord[]> {
+  try {
+    return await fetchStepHistory(owner, repo, prNumber, token)
+  } catch {
+    await new Promise(resolve => setTimeout(resolve, HISTORY_RETRY_DELAY_MS))
+    return await fetchStepHistory(owner, repo, prNumber, token)
+  }
+}
+
 export async function runWatch(opts: WatchOpts = {}) {
   const configPath = opts.config
   let config = loadConfig(configPath)
@@ -270,9 +291,17 @@ export async function runWatch(opts: WatchOpts = {}) {
   // Completed round count per PR — the auto-loop's round counter, which history cannot
   // supply (it returns the last recheck's round unchanged across iterations).
   const prRoundCounts = new Map<string, number>()
-  // PR+sha pairs completed by this watch session — used to suppress issue_comment
-  // re-entries for reviews that watch posted itself (as opposed to kickass).
-  const reviewedPRShaKeys = new Set<string>()
+  // When this session finished a run for a PR+sha, in epoch ms. Used to suppress the
+  // issue_comment re-entry on a review this session posted itself: our own comments are
+  // created before the run that posts them finishes, so they sort before this mark.
+  // A comment created AFTER it belongs to someone else — `crosscheck run --steps review`
+  // or a second watcher superseding the verdict on the same SHA — and must be let
+  // through, or this watcher would never see a verdict that arrived without a push.
+  // SELF_TRIGGER_SKEW_MS absorbs clock skew between our clock and GitHub's, and errs
+  // toward suppression: re-entering on our own comment risks a loop, while delaying an
+  // external one by a minute costs nothing.
+  const runCompletedAt = new Map<string, number>()
+  const SELF_TRIGGER_SKEW_MS = 60_000
 
   // Idle tracking — reset on any PR activity; used by the idle-issue timer.
   let lastActivityAt = Date.now()
@@ -380,11 +409,12 @@ export async function runWatch(opts: WatchOpts = {}) {
       // undo the guess and ask history. So ask history. It costs one call per event, and
       // it is the only thing that sees the PR as it actually is.
       //
-      // Comment-triggered runs keep their SHA-specific fast path: a kickass re-review
-      // targets a SHA history detection would report as already complete.
-      let isRecheckRun = params.action === 'comment'
-        ? reviewedPRShaKeys.has(key)    // SHA-specific: already processed this exact sha
-        : false                          // ask history
+      // Comment triggers ask too. The SHA-specific fast path they used to take could not
+      // tell our own review comment from someone else's newer verdict on the same SHA,
+      // so an externally-posted NEEDS_WORK was run as a recheck instead of routing to
+      // fix. Suppressing our own echo is the job of `runCompletedAt` in the
+      // issue_comment handler, not of the routing decision.
+      let isRecheckRun = false
       // auto_loop's round is pre-computed from the completed round count rather than
       // from history, which returns the last recheck's round unchanged across iterations
       // and would defeat the max_rounds cap.
@@ -418,7 +448,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         round = 1
         resolvedSteps = reviewSteps
         try {
-          const history = await fetchStepHistory(owner, repoName, prNumber, token)
+          const history = await fetchStepHistoryWithRetry(owner, repoName, prNumber, token)
           const decision = decideReviewOnly(history, params.headSha)
           if (decision.alreadyReviewed) {
             await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
@@ -427,7 +457,14 @@ export async function runWatch(opts: WatchOpts = {}) {
             return
           }
           round = decision.round
-        } catch { /* best-effort — fall back to a fresh round-1 review */ }
+        } catch (err: unknown) {
+          // The dedup this mode relies on lives in that history. Reviewing without it
+          // would post a second review on a SHA already covered.
+          await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+          releasePRLock(owner, repoName, prNumber, params.headSha)
+          fileLog({ level: 'warn', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'history_unavailable', sha: params.headSha, error: err instanceof Error ? err.message : String(err) })
+          return
+        }
       } else if (!isRecheckRun) {
         try {
           // Reuse the per-event override snapshot (read once at repoStepOverride)
@@ -435,7 +472,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           // fresh so live edits to workflow.yml apply across events.
           const globalWorkflow = loadWorkflow(process.cwd())
           const allSteps = repoStepOverride ? filterStepsByTypes(globalWorkflow, repoStepOverride) : globalWorkflow
-          const history = await fetchStepHistory(owner, repoName, prNumber, token)
+          const history = await fetchStepHistoryWithRetry(owner, repoName, prNumber, token)
           const nextResult = identifyNextWorkflowStep(history, allSteps, params.headSha)
           if (nextResult.step === null) {
             // Workflow already complete for this HEAD sha — release lock and skip.
@@ -492,13 +529,23 @@ export async function runWatch(opts: WatchOpts = {}) {
               }
             }
           }
-        } catch {
-          // History unavailable — best-effort fallback. auto_loop forces a recheck so a
-          // transient fetch failure does not restart the workflow from the review step.
-          // Everything else falls through to a fresh round-1 review: with no history to
-          // read, that is the conservative direction, since a review never assumes
-          // findings that may already be resolved (or were never posted at all).
-          if (params.action === 'auto_loop') isRecheckRun = true
+        } catch (err: unknown) {
+          // History still unreadable after the retry. Everything this function decides —
+          // whether HEAD is already approved, already reviewed, or mid-loop — lives in
+          // that history, so running anyway risks a second review on an approved commit
+          // or a fix re-applied to code that already has one. Defer instead: release the
+          // locks and let the next event, `kickass`, or `crosscheck run` pick the PR up.
+          //
+          // auto_loop is the exception. It is a continuation of a run this process just
+          // completed, so the state is known from the session rather than from history,
+          // and deferring would strand the loop — nothing else re-triggers it.
+          if (params.action !== 'auto_loop') {
+            await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+            releasePRLock(owner, repoName, prNumber, params.headSha)
+            fileLog({ level: 'warn', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'history_unavailable', sha: params.headSha, error: err instanceof Error ? err.message : String(err) })
+            return
+          }
+          isRecheckRun = true
         }
       }
 
@@ -607,11 +654,11 @@ export async function runWatch(opts: WatchOpts = {}) {
         })
 
         // A strategy-skipped PR never ran a review, so it must stay out of the session
-        // caches: reviewedPRShaKeys suppresses the issue_comment re-entry for a review
-        // this session posted, and prRoundCounts is the auto-loop's round counter —
-        // neither should count a run that posted nothing.
+        // caches: runCompletedAt suppresses the issue_comment re-entry on a review this
+        // session posted, and prRoundCounts is the auto-loop's round counter — neither
+        // should count a run that posted nothing.
         if (strategySkipped === undefined) {
-          reviewedPRShaKeys.add(key)  // key = "owner/repo#pr@sha"
+          runCompletedAt.set(key, Date.now())  // key = "owner/repo#pr@sha"
           prRoundCounts.set(prKey, round)
         }
         // Recompute the diff hash AFTER runWorkflow — workflow steps such as
@@ -840,6 +887,18 @@ export async function runWatch(opts: WatchOpts = {}) {
       const annotationSha = commentAnnotation?.sha  // may be short (7 chars)
       const shaMatches = (a: string, b: string) => a.startsWith(b) || b.startsWith(a)
 
+      // A comment this session's own run produced, rather than an external verdict:
+      // our comments are created before the run posting them completes. Anything newer
+      // than that mark (plus a skew allowance) came from somewhere else and must reach
+      // reviewPR, so history detection can act on the verdict it carries.
+      const isSelfTriggeredComment = (headSha: string): boolean => {
+        const completedAt = runCompletedAt.get(`${owner}/${repoName}#${prNumber}@${headSha}`)
+        if (completedAt === undefined) return false
+        const commentAt = Date.parse(event.comment.created_at)
+        return Number.isNaN(commentAt) || commentAt <= completedAt + SELF_TRIGGER_SKEW_MS
+      }
+
+
       try {
         const octokit = createGithubClient(token)
         const initial = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
@@ -857,7 +916,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           return
         }
 
-        if (reviewedPRShaKeys.has(`${owner}/${repoName}#${prNumber}@${prData.head.sha}`)) {
+        if (isSelfTriggeredComment(prData.head.sha)) {
           fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_self_trigger', sha: prData.head.sha })
           return
         }
@@ -885,7 +944,7 @@ export async function runWatch(opts: WatchOpts = {}) {
             }
           }
 
-          if (reviewedPRShaKeys.has(`${owner}/${repoName}#${prNumber}@${prData.head.sha}`)) {
+          if (isSelfTriggeredComment(prData.head.sha)) {
             fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_self_trigger', sha: prData.head.sha })
             break
           }

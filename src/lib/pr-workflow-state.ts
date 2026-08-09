@@ -47,11 +47,15 @@ export interface NextStepResult {
 
 const VALID_STEP_TYPES = new Set<StepRecordType>(['review', 'recheck', 'fix', 'conflict-resolve'])
 
-// Whether a record's SHA refers to the same commit as `currentSha`. Annotations carry
-// either the short (7-char) or the full form, so compare by prefix — the same tolerance
-// decideReviewOnly and the issue_comment bridge use. An absent or empty SHA proves
-// nothing and never matches.
-function shaCovers(recordSha: string | undefined, currentSha: string): boolean {
+// Whether a recorded SHA refers to the same commit as `currentSha`. Annotations carry
+// either the short (7-char) or the full form, so compare by prefix. An absent or empty
+// SHA proves nothing and never matches — a record that cannot say which commit it
+// describes cannot be used to claim that commit is covered.
+//
+// The single implementation of this comparison: `decideReviewOnly`, the scan's approval
+// check, and kickass's current-head review check all route through it, so they cannot
+// drift apart on what "the same commit" means.
+export function shaCovers(recordSha: string | undefined, currentSha: string): boolean {
   if (!recordSha || !currentSha) return false
   return recordSha.startsWith(currentSha) || currentSha.startsWith(recordSha)
 }
@@ -433,8 +437,7 @@ export interface ReviewOnlyDecision {
 // matched by prefix, the same tolerance the issue_comment bridge uses.
 export function decideReviewOnly(history: StepRecord[], sha: string): ReviewOnlyDecision {
   const reviews = history.filter(r => r.type === 'review' || r.type === 'recheck')
-  const alreadyReviewed = reviews.some(r =>
-    r.sha !== undefined && (r.sha.startsWith(sha) || sha.startsWith(r.sha)))
+  const alreadyReviewed = reviews.some(r => shaCovers(r.sha, sha))
   const maxRound = reviews.reduce((max, r) => Math.max(max, r.round), 0)
   return { alreadyReviewed, round: alreadyReviewed ? maxRound : maxRound + 1 }
 }

@@ -38,6 +38,9 @@ export interface IssueCommentEvent {
     id: number
     body: string
     user: { login: string }
+    /** ISO 8601. Distinguishes a comment this watcher's own run posted from a later
+     *  external one on the same SHA (see the self-trigger check in watch.ts). */
+    created_at: string
   }
   repository: {
     name: string

@@ -110,10 +110,10 @@ describe('derivePRStatus', () => {
     expect(status.nextAction).toBe('review')
   })
 
-  it('moves to APPROVED stage when verdict is APPROVE', () => {
+  it('moves to APPROVED stage when the APPROVE covers HEAD', () => {
     const status = derivePRStatus(input({
       comments: [{
-        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
         createdAt: '2026-05-27T11:00:00.000Z',
         updatedAt: '2026-05-27T11:00:00.000Z',
       }],
@@ -123,6 +123,71 @@ describe('derivePRStatus', () => {
     expect(status.verdict).toBe('APPROVE')
     expect(status.nextAction).toBe('merge')
     expect(status.freshness).toBe('stale')
+  })
+
+  // An approval covers a commit, not a PR. Reporting `merge` for an approval that
+  // predates the current HEAD would put never-reviewed code in kickass's read-only
+  // "needs merge (manual)" list instead of dispatching the review it is owed.
+  it('needs review again when the APPROVE covers an older SHA', () => {
+    const status = derivePRStatus(input({
+      headSha: 'def456',
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_REVIEW')
+    expect(status.nextAction).toBe('review')
+    // The verdict field still reports the last verdict on record — it is the review
+    // state, not the history, that HEAD invalidates.
+    expect(status.verdict).toBe('APPROVE')
+  })
+
+  // A legacy annotation predates the `sha=` field, so it cannot prove which commit it
+  // describes. Fail open: one review re-establishes the SHA and the approval sticks.
+  it('needs review again when the APPROVE carries no SHA', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_REVIEW')
+    expect(status.nextAction).toBe('review')
+  })
+
+  it('matches the approved SHA in short and long form', () => {
+    const status = derivePRStatus(input({
+      headSha: 'abc123456789abcdef',
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc1234 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.nextAction).toBe('merge')
+  })
+
+  // Only APPROVE is SHA-scoped: a stale NEEDS_WORK still means the PR has unresolved
+  // findings, and kickass separately demotes a fix to a review when the annotation
+  // covers an older SHA.
+  it('still reports fix for a NEEDS_WORK that covers an older SHA', () => {
+    const status = derivePRStatus(input({
+      headSha: 'def456',
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.nextAction).toBe('fix')
   })
 
   it('keeps the latest verdict when a newer bare crosscheck marker exists', () => {
