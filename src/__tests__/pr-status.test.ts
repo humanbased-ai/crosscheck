@@ -190,6 +190,52 @@ describe('derivePRStatus', () => {
     expect(status.nextAction).toBe('fix')
   })
 
+  // Fix log events carry no SHA, so one that no longer describes HEAD — force-pushed
+  // away, or delivered as its own PR — must not pin an approved commit to NEEDS_RECHECK
+  // and have kickass dispatch no-op rechecks at it forever.
+  it('stays APPROVED when a post-approval fix left HEAD untouched', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [{
+        ts: '2026-05-27T12:00:00.000Z',
+        event: 'fix_complete',
+        repo: 'acme/web',
+        pr: 7,
+        applied_count: 2,
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('APPROVED')
+    expect(status.nextAction).toBe('merge')
+  })
+
+  // The self-correcting half: a fix that really did change HEAD moves HEAD off the
+  // approved SHA, so the approval stops covering it and the recheck is owed again.
+  it('needs a recheck when the post-approval fix moved HEAD', () => {
+    const status = derivePRStatus(input({
+      headSha: 'def456',
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [{
+        ts: '2026-05-27T12:00:00.000Z',
+        event: 'fix_complete',
+        repo: 'acme/web',
+        pr: 7,
+        applied_count: 2,
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_RECHECK')
+    expect(status.nextAction).toBe('recheck')
+  })
+
   it('keeps the latest verdict when a newer bare crosscheck marker exists', () => {
     const status = derivePRStatus(input({
       comments: [

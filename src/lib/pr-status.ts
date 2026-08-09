@@ -440,21 +440,31 @@ function computeReviewState(
   headSha: string,
 ): ReviewState {
   if (!latestVerdict) return 'NEEDS_REVIEW'
-  if (latestFix) return 'NEEDS_RECHECK'
+
   // An APPROVE ends the PR only for the commit it covers — the same rule
-  // identifyNextWorkflowStep applies. Without this check the scan reports
-  // `nextAction: 'merge'` for a PR approved at an older SHA, so kickass presents
-  // never-reviewed code as merge-ready instead of dispatching the fresh review it is
-  // owed. A verdict recovered from a log event, or a legacy annotation written before
-  // `sha=` existed, cannot say which commit it describes and so cannot claim HEAD:
-  // those fall through to a review, which re-establishes the SHA (fail open).
+  // identifyNextWorkflowStep applies. Without it the scan reports `nextAction: 'merge'`
+  // for a PR approved at an older SHA, so kickass presents never-reviewed code as
+  // merge-ready instead of dispatching the fresh review it is owed. A verdict recovered
+  // from a log event, or a legacy annotation written before `sha=` existed, cannot say
+  // which commit it describes and so cannot claim HEAD: those fall through to a review,
+  // which re-establishes the SHA (fail open).
   //
+  // Checked BEFORE the fix branch below, which is deliberate. Fix log events carry no
+  // SHA, so a fix that was force-pushed away — or delivered as its own PR, leaving this
+  // HEAD untouched — would otherwise pin the PR to NEEDS_RECHECK forever and have
+  // kickass dispatch no-op rechecks against an approved commit. Ordering it first makes
+  // that self-correcting: a fix that really did change HEAD moves HEAD off the approved
+  // SHA, so the approval stops covering it and the fix branch takes over as it should.
+  const approvalCoversHead = latestVerdict.verdict === 'APPROVE'
+    && shaCovers(latestVerdict.annotation?.sha, headSha)
+  if (approvalCoversHead) return 'APPROVED'
+
+  if (latestFix) return 'NEEDS_RECHECK'
+
   // Only APPROVE is SHA-scoped here. A stale NEEDS_WORK/BLOCK still means "this PR has
   // unresolved findings", and kickass separately demotes a fix to a review when the
   // annotation covers an older SHA (`hasUsableCurrentHeadReview`).
-  if (latestVerdict.verdict === 'APPROVE' && !shaCovers(latestVerdict.annotation?.sha, headSha)) {
-    return 'NEEDS_REVIEW'
-  }
+  if (latestVerdict.verdict === 'APPROVE') return 'NEEDS_REVIEW'
   return verdictToReviewState(latestVerdict.verdict)
 }
 
