@@ -178,6 +178,26 @@ export interface WatchOpts {
   backtrace?: boolean
 }
 
+// Whether an in-session cached APPROVE for `sha` is still the newest verdict on the PR.
+// The cache is only an API-call optimisation and can go stale: the documented escape
+// hatch (`crosscheck run <pr-url> --steps review`) can post a newer NEEDS_WORK/BLOCK on
+// the same SHA while this watcher keeps running, and the newer record supersedes the
+// approval — the same latest-record rule identifyNextWorkflowStep and decideReviewOnly
+// apply. On a fetch failure the cached approval stands, which is the conservative skip
+// the cache performed unconditionally before.
+async function approvalStillStands(
+  owner: string, repoName: string, prNumber: number, sha: string, token: string,
+): Promise<boolean> {
+  try {
+    const history = await fetchStepHistory(owner, repoName, prNumber, token)
+    const lastReview = history.filter(r => r.type === 'review' || r.type === 'recheck').at(-1)
+    if (!lastReview || lastReview.verdict !== 'APPROVE') return false
+    return lastReview.sha !== undefined && (lastReview.sha.startsWith(sha) || sha.startsWith(lastReview.sha))
+  } catch {
+    return true
+  }
+}
+
 export async function runWatch(opts: WatchOpts = {}) {
   const configPath = opts.config
   let config = loadConfig(configPath)
