@@ -284,6 +284,31 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.stopReason).toBeUndefined()
   })
 
+  // The post-approval exception is scoped to the pushed commit, not to the record. A
+  // force-push can drop the fix commit and put HEAD back on the approved SHA; the record
+  // then describes content that no longer exists, so the approval stands.
+  it('stops when a post-approval fix was force-pushed away', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
+      record({ type: 'fix', commentId: 101, pushedSha: 'dropped-sha' }),
+    ], workflow, 'approved-sha')
+
+    expect(next.step).toBeNull()
+    expect(next.stopReason).toBe('approved')
+  })
+
+  // A fix that pushed nothing to the PR head (pull_request delivery puts it on its own
+  // branch) leaves HEAD as the approved content, so the approval still stands.
+  it('stops when a post-approval fix record has no pushed SHA', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
+      record({ type: 'fix', commentId: 101 }),
+    ], workflow, 'approved-sha')
+
+    expect(next.step).toBeNull()
+    expect(next.stopReason).toBe('approved')
+  })
+
   it('does not stop on a NEEDS_WORK verdict', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
