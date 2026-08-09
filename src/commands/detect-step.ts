@@ -78,7 +78,7 @@ export async function runDetectStep(
   historySpinner.stop()
 
   const currentSha = prData.head.sha
-  const nextResult = identifyNextWorkflowStep(history, steps, currentSha)
+  const nextResult = identifyNextWorkflowStep(history, steps, currentSha, { mergeable: prData.mergeable })
 
   if (opts.json) {
     console.log(JSON.stringify({

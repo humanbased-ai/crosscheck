@@ -3,6 +3,7 @@ import {
   buildProgressSummary,
   computeLastActive,
   computeTokenTotals,
+  applyRepoWorkflowOverrideToStatus,
   derivePRStatus,
   foldPRStatus,
   isStale,
@@ -302,6 +303,65 @@ describe('derivePRStatus', () => {
 
     expect(status.reviewState).toBe('NEEDS_RECHECK')
     expect(status.nextAction).toBe('recheck')
+  // A conflicted PR is actionable no matter where it sits in the review ladder — the base
+  // branch moved, and nothing else will notice, because that fires no webhook (#282).
+  describe('conflicted PRs', () => {
+    const conflicted = { mergeable: false, mergeStateStatus: 'dirty', protectedBase: false }
+
+    it('routes an unreviewed conflicted PR to resolve', () => {
+      const status = derivePRStatus(input({ merge: conflicted }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+      expect(status.nextAction).toBe('resolve')
+      expect(status.reviewState).toBe('NEEDS_REVIEW')
+    })
+
+    it('routes an approved conflicted PR to resolve rather than merge', () => {
+      const status = derivePRStatus(input({
+        merge: conflicted,
+        comments: [{
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+          createdAt: '2026-05-27T11:00:00.000Z',
+          updatedAt: '2026-05-27T11:00:00.000Z',
+        }],
+      }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+      expect(status.nextAction).toBe('resolve')
+      // The review verdict is untouched — the conflict says nothing about code quality.
+      expect(status.reviewState).toBe('APPROVED')
+      expect(status.verdict).toBe('APPROVE')
+    })
+
+    it('leaves a mergeable PR alone', () => {
+      const status = derivePRStatus(input({
+        merge: { mergeable: true, mergeStateStatus: 'clean', protectedBase: false },
+      }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+      expect(status.nextAction).toBe('review')
+    })
+
+    // null = GitHub still computing. Claiming a conflict on unknown would dispatch resolve
+    // runs against clean PRs.
+    it('leaves unknown mergeability alone', () => {
+      const status = derivePRStatus(input({
+        merge: { mergeable: null, protectedBase: false },
+      }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+      expect(status.nextAction).toBe('review')
+    })
+
+    // `--steps conflict-resolve` synthesizes the step when the workflow lacks it, which is
+    // right for the explicit `crosscheck resolve` command and wrong for automatic
+    // dispatch: it would push a merge commit for a workflow that never asked for one.
+    it('drops the resolve action when the workflow defines no conflict-resolve step', () => {
+      const conflictedStatus = derivePRStatus(input({ merge: conflicted }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+      const withoutStep = applyRepoWorkflowOverrideToStatus(conflictedStatus, new Set(['review', 'fix', 'recheck']))
+      expect(withoutStep.nextAction).toBeNull()
+      expect(withoutStep.freshness).toBe('not_stale')
+
+      const withStep = applyRepoWorkflowOverrideToStatus(conflictedStatus, new Set(['conflict-resolve', 'review', 'fix']))
+      expect(withStep.nextAction).toBe('resolve')
+    })
   })
 
   it('keeps the latest verdict when a newer bare crosscheck marker exists', () => {

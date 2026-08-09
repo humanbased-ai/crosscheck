@@ -603,7 +603,7 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: s
     currentSha = prData.head.sha
     const steps = loadWorkflow(process.cwd())
     history = await fetchStepHistory(owner, repo, number, token)
-    nextResult = identifyNextWorkflowStep(history, steps, currentSha)
+    nextResult = identifyNextWorkflowStep(history, steps, currentSha, { mergeable: prData.mergeable })
   } catch (err) {
     fetchError = err instanceof Error ? err.message : String(err)
   }

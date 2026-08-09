@@ -28,7 +28,7 @@ export interface KickassOpts {
   sequential?: boolean // force sequential execution (overrides concurrent)
 }
 
-export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
+export type KickassAction = 'resolve' | 'review' | 'fix' | 'recheck' | 'skip'
 export type KickassSkipReason = 'fork_pr' | 'stale_signature'
 export type KickassFailureReason = ErrorCategory
 export type FixDeliveryMode = Config['post_review']['auto_fix']['delivery']['mode']
@@ -133,7 +133,7 @@ export async function runKickassWithDeps(
     }
     if (queue.length === 0) {
       printMergeReady(mergeReady)
-      console.log(chalk.dim('\nNo PRs need review, fix, or recheck — all actionable work is merge-ready (manual).'))
+      console.log(chalk.dim('\nNo PRs need resolve, review, fix, or recheck — all actionable work is merge-ready (manual).'))
       return
     }
 
@@ -189,6 +189,26 @@ export function buildPreflightPlan(
   const chainRecheck = fixDeliveryMode === 'commit'
   return prs.map((pr) => {
     const fork = isForkPR(pr)
+    // Conflicts come first: nothing downstream can merge, and a fork PR cannot be pushed
+    // to any more than a fix can, so the fork guard applies here too.
+    if (pr.nextAction === 'resolve') {
+      if (fork) {
+        return {
+          pr,
+          action: 'skip',
+          transition: `${pr.reviewState} -> Skip`,
+          details: ['reason fork_pr'],
+          skipReason: 'fork_pr',
+        }
+      }
+      return {
+        pr,
+        action: 'resolve',
+        transition: 'Conflicted -> Resolve',
+        details: [`base ${pr.baseRef}`],
+      }
+    }
+
     if (pr.nextAction === 'fix' && fork) {
       return {
         pr,
@@ -504,12 +524,19 @@ export function buildKickassRunArgs(
   if (item.action === 'review' && item.explanation === 'no_usable_review_comment') {
     args.push('--steps', 'review')
   }
+  // A resolve dispatch is one step only. Live detection would agree (a conflicted PR
+  // routes to conflict-resolve), but pinning it keeps the leg honest if GitHub's
+  // mergeable flips to null between the scan and the run — the step's own no_conflicts
+  // pre-check is what decides whether there is anything to do.
+  if (item.action === 'resolve') {
+    args.push('--steps', 'conflict-resolve')
+  }
   args.push('--expected-head-sha', item.pr.headSha)
-  if (item.action !== 'fix') {
+  if (item.action !== 'fix' && item.action !== 'resolve') {
     if (roundMode === 'crazy') args.push('--crazy')
     else if (roundMode === 'halfcrazy') args.push('--half-crazy')
   } else if (roundMode) {
-    // fix legs don't loop, but still need the no-timeout constraint lifted
+    // fix and resolve legs don't loop, but still need the no-timeout constraint lifted
     args.push('--no-timeout')
   }
   // forward user-specified --timeout for runs that aren't already in a round mode
@@ -558,11 +585,11 @@ function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDep
   }
 
   const actionPhase = (action: string) =>
-    action === 'fix' ? 'fixing' : action === 'recheck' ? 'rechecking' : 'reviewing'
+    action === 'fix' ? 'fixing' : action === 'recheck' ? 'rechecking' : action === 'resolve' ? 'fixing' : 'reviewing'
   const actionLabel = (action: string) =>
-    action === 'fix' ? 'applying fix...' : action === 'recheck' ? 'rechecking...' : 'reviewing...'
+    action === 'fix' ? 'applying fix...' : action === 'recheck' ? 'rechecking...' : action === 'resolve' ? 'resolving conflicts...' : 'reviewing...'
   const donePhase = (action: string) =>
-    action === 'fix' ? 'fixed' : action === 'recheck' ? 'rechecked' : 'reviewed'
+    action === 'fix' ? 'fixed' : action === 'recheck' ? 'rechecked' : action === 'resolve' ? 'fixed' : 'reviewed'
 
   return {
     loadScanResult,
