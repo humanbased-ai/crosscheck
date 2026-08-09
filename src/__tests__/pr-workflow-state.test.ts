@@ -318,6 +318,107 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.stopReason).toBeUndefined()
   })
 
+  // A PR becomes conflicted when the BASE branch moves — nothing about the reviewed code
+  // changes, and no webhook fires. Once a review exists, firstIncompleteInitialStep is out
+  // of reach and the tail loop only walks steps that follow review, so a conflict-resolve
+  // configured ahead of review (the onboard default) could never run again. See #282.
+  describe('conflict-resolve after a review exists', () => {
+    it('routes a conflicted PR to conflict-resolve even though the step precedes review', () => {
+      const next = identifyNextWorkflowStep([
+        record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
+      ], workflow, 'sha-A', { mergeable: false })
+
+      expect(next.step?.type).toBe('conflict-resolve')
+      expect(next.round).toBe(1)
+    })
+
+    it('resolves conflicts on an approved PR rather than stopping', () => {
+      const next = identifyNextWorkflowStep([
+        record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A' }),
+      ], workflow, 'sha-A', { mergeable: false })
+
+      expect(next.step?.type).toBe('conflict-resolve')
+      expect(next.stopReason).toBeUndefined()
+    })
+
+    it('keeps the approval stop when the PR merges cleanly', () => {
+      const next = identifyNextWorkflowStep([
+        record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A' }),
+      ], workflow, 'sha-A', { mergeable: true })
+
+      expect(next.step).toBeNull()
+      expect(next.stopReason).toBe('approved')
+    })
+
+    // null = GitHub is still computing mergeability. Offering on unknown would churn, and
+    // the caller can simply ask again once GitHub settles.
+    it('does not offer conflict-resolve on unknown mergeability', () => {
+      for (const mergeable of [null, undefined]) {
+        const next = identifyNextWorkflowStep([
+          record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A' }),
+        ], workflow, 'sha-A', { mergeable })
+
+        expect(next.step).toBeNull()
+        expect(next.stopReason).toBe('approved')
+      }
+    })
+
+    it('does not offer conflict-resolve when the workflow has no such step', () => {
+      const next = identifyNextWorkflowStep([
+        record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
+      ], [reviewStep, fixStep, recheckStep], 'sha-A', { mergeable: false })
+
+      expect(next.step?.type).toBe('fix')
+    })
+
+    // One attempt per review round: a successful resolve pushes a merge commit, which gets
+    // reviewed, and that new review makes the PR eligible again if it re-conflicts.
+    it('does not re-offer conflict-resolve when one already ran since the last review', () => {
+      const next = identifyNextWorkflowStep([
+        record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A' }),
+        record({ type: 'conflict-resolve', commentId: 101, pushedSha: 'merge-sha' }),
+      ], workflow, 'merge-sha', { mergeable: false })
+
+      expect(next.step?.type).not.toBe('conflict-resolve')
+    })
+
+    // max_rounds on the conflict-resolve step caps merge attempts, not review depth. A PR
+    // deep into fix→recheck cycles must not lose conflict resolution because its review
+    // round outgrew the cap.
+    it('reports the round as the conflict-resolve attempt count, not the review round', () => {
+      const first = identifyNextWorkflowStep([
+        record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A', round: 7 }),
+      ], workflow, 'sha-A', { mergeable: false })
+
+      expect(first.round).toBe(1)
+
+      const second = identifyNextWorkflowStep([
+        record({ type: 'conflict-resolve', commentId: 99, pushedSha: 'merge-1' }),
+        record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'merge-1', round: 7, commentId: 100 }),
+      ], workflow, 'merge-1', { mergeable: false })
+
+      expect(second.round).toBe(2)
+    })
+
+    it('offers it again after a later review', () => {
+      const next = identifyNextWorkflowStep([
+        record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
+        record({ type: 'conflict-resolve', commentId: 101, pushedSha: 'merge-sha' }),
+        record({ type: 'review', verdict: 'APPROVE', sha: 'merge-sha', round: 2, commentId: 102 }),
+      ], workflow, 'merge-sha', { mergeable: false })
+
+      expect(next.step?.type).toBe('conflict-resolve')
+    })
+
+    // A never-reviewed PR already reaches conflict-resolve through the initial-step path,
+    // which must keep working without a mergeable hint.
+    it('leaves the pre-review path alone', () => {
+      const next = identifyNextWorkflowStep([], workflow, 'sha-A')
+
+      expect(next.step?.type).toBe('conflict-resolve')
+    })
+  })
+
   // recheck-no-fix mode (per-repo `review,recheck`): crosscheck never auto-fixes, so a
   // human pushing their own fix commits is the trigger to re-evaluate — as a recheck
   // against the prior review, not a fresh review.

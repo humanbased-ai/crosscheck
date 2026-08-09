@@ -21,6 +21,7 @@ import { getLogDir, logError } from './logger.js'
 import { parseAnnotationFieldsFenced } from './annotation.js'
 import { readRepoWorkflowStepTypes } from './repo-workflow.js'
 import { shaCovers } from './pr-workflow-state.js'
+import { loadWorkflow } from './workflow.js'
 import { dedupScopes, type Scope } from './scopes.js'
 
 export type Freshness = 'stale' | 'not_stale'
@@ -28,7 +29,7 @@ export type Freshness = 'stale' | 'not_stale'
 // Workflow stage — what action is pending on this PR.
 export type ReviewState = 'NEEDS_REVIEW' | 'NEEDS_FIX' | 'NEEDS_RECHECK' | 'APPROVED'
 
-export type NextAction = 'review' | 'fix' | 'recheck' | 'merge' | null
+export type NextAction = 'resolve' | 'review' | 'fix' | 'recheck' | 'merge' | null
 
 // AI verdict — what the reviewer decided. UNREVIEWED means no review found for current HEAD.
 export type ReviewVerdict = 'UNREVIEWED' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
@@ -219,7 +220,16 @@ export function derivePRStatus(input: PRStatusInput, options: DeriveStatusOption
     ? latestVerdictAnnotation.annotation.sha
     : undefined
   const reviewState = computeReviewState(latestVerdict, latestFix, input.headSha, approvedSha)
-  const nextAction = nextActionForState(reviewState)
+  // A conflicted PR takes precedence over wherever it sits in the review ladder — even
+  // over an approval, which is why this wraps the call rather than living inside
+  // computeReviewState: the PR cannot merge, and the base branch moving fires no webhook,
+  // so a scan is the only thing that will ever notice (#282). `reviewState` is
+  // deliberately left alone — a conflict says nothing about the code that was reviewed.
+  // Only an explicit `false` counts; `null` means GitHub is still computing and would
+  // dispatch resolve runs against clean PRs.
+  const nextAction: NextAction = input.merge?.mergeable === false
+    ? 'resolve'
+    : nextActionForState(reviewState)
   const freshness: Freshness = ageMs >= options.staleAfterMs && nextAction !== null ? 'stale' : 'not_stale'
 
   return {
@@ -254,10 +264,29 @@ export function summarizeStatuses(prs: ScanPRStatus[]): ScanSummary {
   }
 }
 
-function applyRepoWorkflowOverrideToStatus(status: ScanPRStatus): ScanPRStatus {
+export function applyRepoWorkflowOverrideToStatus(
+  status: ScanPRStatus,
+  workflowStepTypes: ReadonlySet<string>,
+): ScanPRStatus {
   if (status.nextAction === null || status.nextAction === 'merge') return status
+  // Never dispatch a step the operator's workflow does not define. This matters most for
+  // `resolve`: `--steps conflict-resolve` synthesizes the step when the workflow lacks it
+  // (so `crosscheck resolve` always works), which is right for an explicit command and
+  // wrong for automatic dispatch — it would push a merge commit on behalf of a workflow
+  // that never asked for one.
+  if (status.nextAction === 'resolve' && !workflowStepTypes.has('conflict-resolve')) {
+    return { ...status, nextAction: null, freshness: 'not_stale' }
+  }
   const repoSteps = readRepoWorkflowStepTypes(status.owner, status.repo)
-  if (!repoSteps || repoSteps.includes(status.nextAction)) return status
+  if (!repoSteps) return status
+  // conflict-resolve is orthogonal to the review→fix→recheck ladder, so a per-repo
+  // override never lists it. It passes through whenever the override permits code
+  // modification — the same rule filterStepsByTypes applies — and a review-only repo
+  // drops it along with fix, preserving the "never touch the code" guarantee.
+  const permitted = status.nextAction === 'resolve'
+    ? repoSteps.includes('fix')
+    : repoSteps.includes(status.nextAction)
+  if (permitted) return status
   return {
     ...status,
     nextAction: null,
@@ -277,6 +306,9 @@ export async function scanOpenPRStatuses(
   ])
   const octokit = createGithubClient(token)
   const limitGithub = createConcurrencyLimiter(GITHUB_SCAN_CONCURRENCY)
+  // Read once for the whole scan — the operator's workflow bounds which actions this
+  // scan is allowed to report as pending.
+  const workflowStepTypes = new Set(loadWorkflow(process.cwd()).map(step => step.type))
 
   const perRepoPRs = await Promise.all(
     repoScopes.map(({ owner, repo }) =>
@@ -336,7 +368,7 @@ export async function scanOpenPRStatuses(
           logEvents: filterLogEventsForPR(logEvents, owner, repo, pr.number),
           merge,
         }, { nowMs: now.getTime(), staleAfterMs: options.staleAfterMs })
-        return applyRepoWorkflowOverrideToStatus(status)
+        return applyRepoWorkflowOverrideToStatus(status, workflowStepTypes)
       } catch (err: unknown) {
         logError({ event: 'scan_pr_skipped', owner, repo, pr: pr.number }, err)
         return null

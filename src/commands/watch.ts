@@ -471,7 +471,19 @@ export async function runWatch(opts: WatchOpts = {}) {
           const globalWorkflow = loadWorkflow(process.cwd())
           const allSteps = repoStepOverride ? filterStepsByTypes(globalWorkflow, repoStepOverride) : globalWorkflow
           const history = await fetchStepHistoryWithRetry(owner, repoName, prNumber, token)
-          const nextResult = identifyNextWorkflowStep(history, allSteps, params.headSha)
+          // The webhook payload carries no usable `mergeable`, so ask — but only for
+          // workflows that can act on the answer. GitHub computes it lazily, and a null
+          // simply means the conflict route is not offered on this event. Unlike the
+          // history read above this one stays best-effort: not knowing whether the PR
+          // conflicts only costs a deferred resolve, not a wrong review.
+          let mergeable: boolean | null = null
+          if (allSteps.some(s => s.type === 'conflict-resolve')) {
+            try {
+              const { data: freshPR } = await lockOctokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+              mergeable = freshPR.mergeable
+            } catch { /* best-effort — unknown mergeability just skips the conflict route */ }
+          }
+          const nextResult = identifyNextWorkflowStep(history, allSteps, params.headSha, { mergeable })
           if (nextResult.step === null) {
             // Workflow already complete for this HEAD sha — release lock and skip.
             // Happens when a synchronize event fires after all steps are done.
@@ -481,7 +493,10 @@ export async function runWatch(opts: WatchOpts = {}) {
             return
           }
           if (nextResult.hasExistingReview) {
-            isRecheckRun = nextResult.step.type !== 'review'
+            // conflict-resolve is excluded: the run continues into the review step, and
+            // the merge commit it produces is new content owed a real review, not a
+            // recheck of findings the merge had nothing to do with.
+            isRecheckRun = nextResult.step.type !== 'review' && nextResult.step.type !== 'conflict-resolve'
             // auto_loop pre-computed the correct incremented round from prRoundCounts;
             // history detection returns the last recheck's round (unchanged across
             // iterations), so overwriting here would defeat the max_rounds cap.

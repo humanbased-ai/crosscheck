@@ -681,7 +681,7 @@ crosscheck scan --json
 
 ### `crosscheck kickass`
 
-Selects all actionable PRs (any PR where a next step is needed: review, fix, recheck) and advances each one. Stale PRs are shown first. APPROVE PRs appear as a read-only "needs merge (manual)" section — visible so you know what's ready, but not dispatched automatically. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
+Selects all actionable PRs (any PR where a next step is needed: resolve, review, fix, recheck) and advances each one. A PR with merge conflicts is dispatched as a `resolve` leg first — conflicts block everything downstream, and a base-branch move that conflicts a PR fires no webhook, so a scan is the only thing that notices. Stale PRs are shown first. APPROVE PRs appear as a read-only "needs merge (manual)" section — visible so you know what's ready, but not dispatched automatically. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
 
 Each PR dispatch uses `detect-step` to read live PR comment history and advances **exactly the next needed step** — kickass drives one step per PR, then `watch` picks up continuation via the webhooks that step produces.
 
@@ -1645,6 +1645,19 @@ Each cycle is one `[crosscheck]` fix commit followed by one recheck. The loop st
 `max_rounds` is a per-step field. Crosscheck uses the minimum across all fix and recheck steps in the workflow, so setting `max_rounds: 3` on both keeps them in sync. Setting it to different values on fix vs recheck is not recommended.
 
 `max_rounds` is respected by both `crosscheck watch` and `crosscheck run`. `watch` re-triggers on each pushed fix commit; `run` loops inline within the same session.
+
+### My PR became conflicted — will crosscheck resolve it?
+
+Yes, if your workflow has a `conflict-resolve` step (the `onboard` default does). Conflicts are handled independently of the review ladder, because a PR usually conflicts when the **base branch** moves — which changes nothing about the code that was reviewed.
+
+The catch is that a base-branch move fires no webhook on your PR, so `watch` never hears about it. `crosscheck scan` and `crosscheck kickass` are what notice: a conflicted PR shows `next=resolve` and is dispatched ahead of review, fix, and recheck. An approved PR that can no longer merge is resolved too — the merge commit then moves HEAD off the approved SHA, so the merged code gets a fresh review.
+
+```bash
+crosscheck kickass          # picks up conflicted PRs along with everything else
+crosscheck resolve <pr-url> # or force just the conflict-resolve step
+```
+
+Fork PRs are skipped, same as with auto-fix — crosscheck cannot push to them. Repos narrowed to `review` or `review,recheck` never resolve conflicts either, since that would modify code.
 
 ### What happens after a PR is approved?
 

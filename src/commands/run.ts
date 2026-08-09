@@ -323,7 +323,9 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   if (!opts.steps) {
     try {
       const history = await fetchStepHistory(owner, repo, number, token)
-      const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha)
+      // prData comes from pulls.get, which carries `mergeable` — so routing a conflicted
+      // PR to conflict-resolve costs no extra call here.
+      const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha, { mergeable: prData.mergeable })
       if (nextResult.step === null) {
         if (nextResult.stopReason === 'approved') {
           // This commit is approved; a push moves HEAD and re-opens the workflow.

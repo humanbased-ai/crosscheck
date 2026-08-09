@@ -8,6 +8,7 @@ import { UserInputError } from '../lib/pr-picker.js'
 import { scanOpenPRStatuses, type ScanPRStatus as PRStatus, type ScanResult } from '../lib/pr-status.js'
 import { readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
 import { readScanCache, writeScanCache, type ScanCachePayload } from '../lib/scan-cache.js'
+import { loadWorkflow } from '../lib/workflow.js'
 
 export interface ScanOpts {
   tidy?: boolean
@@ -144,6 +145,11 @@ function buildScanScopeHash(config: Config): string {
     repos: config.repos.map(repo => `${repo.owner}/${repo.name}:${readRepoWorkflowStepTypes(repo.owner, repo.name)?.join(',') ?? 'default'}`).sort(),
     users: [...config.users].sort(),
     allowedAuthors: [...config.routing.allowed_authors].sort(),
+    // Scan output now depends on the loaded workflow (`applyRepoWorkflowOverrideToStatus`
+    // drops a `resolve` action the workflow has no step for), so a workflow change has to
+    // invalidate the cache — otherwise kickass can dispatch `--steps conflict-resolve` for
+    // a workflow that no longer defines it.
+    workflowSteps: loadWorkflow(process.cwd()).map(step => step.type),
   }
   return createHash('sha256').update(JSON.stringify(scope)).digest('hex')
 }
