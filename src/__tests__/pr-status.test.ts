@@ -303,6 +303,8 @@ describe('derivePRStatus', () => {
 
     expect(status.reviewState).toBe('NEEDS_RECHECK')
     expect(status.nextAction).toBe('recheck')
+  })
+
   // A conflicted PR is actionable no matter where it sits in the review ladder — the base
   // branch moved, and nothing else will notice, because that fires no webhook (#282).
   describe('conflicted PRs', () => {

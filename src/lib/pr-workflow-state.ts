@@ -101,7 +101,12 @@ function commentToRecord(comment: { id: number; body: string; created_at: string
     return { type: 'fix', round: 1, commentId: comment.id, commentBody: comment.body, createdAt: comment.created_at, ...(pushedSha !== undefined && { pushedSha }) }
   }
   if (marker === 'conflict_resolved') {
-    return { type: 'conflict-resolve', round: 1, commentId: comment.id, commentBody: comment.body, createdAt: comment.created_at }
+    // Same as fix_applied: the body embeds the pushed SHA as a full commit URL. Extracting
+    // it is what lets mergeStepHistory recognise the commit-trailer record for this same
+    // resolution as a duplicate — without it, one resolution is counted twice.
+    const shaMatch = comment.body.match(/\/commit\/([0-9a-f]{40})/i)
+    const pushedSha = shaMatch ? shaMatch[1] : undefined
+    return { type: 'conflict-resolve', round: 1, commentId: comment.id, commentBody: comment.body, createdAt: comment.created_at, ...(pushedSha !== undefined && { pushedSha }) }
   }
 
   // Full annotation (requires origin + reviewer)
@@ -326,7 +331,19 @@ export function identifyNextWorkflowStep(
   // times this branch has needed a merge.
   const conflictResolveStep = steps.find(s => s.type === 'conflict-resolve')
   if (opts.mergeable === false && conflictResolveStep && !conflictAfterReview) {
-    const attempts = history.filter(r => r.type === 'conflict-resolve').length
+    // Count distinct resolution commits, not records. A successful resolve leaves both a
+    // comment and a commit trailer behind; when either one lacks a SHA the merge cannot
+    // dedupe them, and counting records would burn through max_rounds at double rate.
+    const attemptShas = new Set<string>()
+    let attempts = 0
+    for (const r of history) {
+      if (r.type !== 'conflict-resolve') continue
+      if (r.pushedSha) {
+        if (attemptShas.has(r.pushedSha)) continue
+        attemptShas.add(r.pushedSha)
+      }
+      attempts++
+    }
     return { step: conflictResolveStep, hasExistingReview: true, round: attempts + 1, history }
   }
 
