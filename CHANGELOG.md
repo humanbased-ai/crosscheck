@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **An `APPROVE` verdict now ends crosscheck's work on a PR.** ⚠️ Behavior change: previously, commits pushed after an approval opened a fresh review round. Now, once the newest verdict on a PR is `APPROVE`, no further step runs — `watch` skips later events on that PR, `crosscheck run` exits with `latest review is APPROVE — crosscheck is done with this PR`, and `crosscheck detect-step` reports the stop. Work that landed *after* the approval (a fix or conflict-resolve commit pushed past an APPROVE) is still finished. To force another pass, name the steps explicitly: `crosscheck run <pr-url> --steps review`.
 - **`quality.mode` now defaults to `smart`.** ⚠️ On upgrade this is a **silent behavior change** for existing installs: a config that sets `quality.tier` but no `quality.mode` switches from one fixed tier to **per-PR selection**. The tier, effort, and step set now come from the class each PR matches against the versioned policy in `src/config/review-strategy.json` — a lockfile-only PR is skipped outright, a docs PR narrows to review with no fix loop, a PR touching auth or a migration is promoted to `thorough` — and rounds past the first escalate on measured non-convergence. To keep the previous behavior, add `mode: fixed` under `quality:`, or re-run `crosscheck onboard`, which reads the raw yaml and preserves a tier that was written before `mode` existed. Every review comment cites the strategy version, class, and tier it ran under.
 
 ### Added

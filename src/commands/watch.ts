@@ -269,6 +269,10 @@ export async function runWatch(opts: WatchOpts = {}) {
   const diffHashes = new PersistentDiffHashMap()
   // PRs reviewed at least once this session — synchronize events on these run as recheck rounds
   const reviewedPRKeys = new Set<string>()
+  // PRs this session finished with an APPROVE verdict. An APPROVE ends crosscheck's work
+  // on the PR, so later events skip it without re-reading comment history. Restarts lose
+  // the set, but the same stop is re-derived from history by identifyNextWorkflowStep.
+  const approvedPRKeys = new Set<string>()
   const prRoundCounts = new Map<string, number>()
   // PR+sha pairs completed by this watch session — used to suppress issue_comment
   // re-entries for reviews that watch posted itself (as opposed to kickass).
@@ -298,6 +302,17 @@ export async function runWatch(opts: WatchOpts = {}) {
     try {
       if (!isAuthorAllowed(config.routing.allowed_authors, params.author)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author: params.author })
+        return
+      }
+
+      const prKey = `${owner}/${repoName}#${prNumber}`
+
+      // An APPROVE ends crosscheck's work on this PR — no later push, comment, or
+      // auto-loop round starts another step. Checked before origin detection so an
+      // approved PR costs no API calls at all. Sessions that did not post the approval
+      // themselves reach the same stop through identifyNextWorkflowStep below.
+      if (approvedPRKeys.has(prKey)) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'approved', sha: params.headSha })
         return
       }
 
@@ -365,8 +380,6 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      const prKey = `${owner}/${repoName}#${prNumber}`
-
       // Determine the correct starting step from PR comment history so watch
       // behaves correctly after a restart (reviewedPRKeys is in-memory only).
       // Fast-path: if the PR was reviewed in this session, skip the API call.
@@ -424,10 +437,11 @@ export async function runWatch(opts: WatchOpts = {}) {
         try {
           const history = await fetchStepHistory(owner, repoName, prNumber, token)
           const decision = decideReviewOnly(history, params.headSha)
-          if (decision.alreadyReviewed) {
+          if (decision.alreadyReviewed || decision.approved) {
+            if (decision.approved) approvedPRKeys.add(prKey)
             await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
             releasePRLock(owner, repoName, prNumber, params.headSha)
-            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'already_reviewed', sha: params.headSha })
+            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: decision.approved ? 'approved' : 'already_reviewed', sha: params.headSha })
             return
           }
           round = decision.round
@@ -444,9 +458,12 @@ export async function runWatch(opts: WatchOpts = {}) {
           if (nextResult.step === null) {
             // Workflow already complete for this HEAD sha — release lock and skip.
             // Happens when a synchronize event fires after all steps are done.
+            // `approved` is stronger: the PR is finished for good, so remember it and
+            // skip every later event on this PR without another history fetch.
+            if (nextResult.stopReason === 'approved') approvedPRKeys.add(prKey)
             await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
             releasePRLock(owner, repoName, prNumber, params.headSha)
-            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'workflow_complete', sha: params.headSha })
+            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: nextResult.stopReason ?? 'workflow_complete', sha: params.headSha })
             return
           }
           if (nextResult.hasExistingReview) {
@@ -611,7 +628,9 @@ export async function runWatch(opts: WatchOpts = {}) {
           trigger: params.action === 'backtrace' ? 'backtrace' : params.action === 'comment' ? 'comment' : 'watch',
         })
 
-        void verdict
+        // The workflow just approved the PR — crosscheck is done with it. Recording the
+        // key here is what makes every later event on this PR a zero-API-call skip.
+        if (verdict === 'APPROVE') approvedPRKeys.add(prKey)
         // A strategy-skipped PR never ran a review, so it must stay out of the
         // session caches. reviewedPRKeys is what makes the next event on this PR
         // an `isRecheckRun`, and a review coerced to a recheck is deliberately

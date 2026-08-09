@@ -206,13 +206,59 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.round).toBe(2)
   })
 
-  it('uses review rather than recheck when a new HEAD appears after APPROVE', () => {
+  // An APPROVE is terminal: crosscheck stops working on the PR entirely, including on
+  // commits pushed after the approval. (This replaces the former behaviour of opening a
+  // fresh review round on the new SHA — see `stopReason: 'approved'`.)
+  it('stops on the approved SHA', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
+    ], workflow, 'approved-sha')
+
+    expect(next.step).toBeNull()
+    expect(next.stopReason).toBe('approved')
+  })
+
+  it('stops when a new HEAD appears after APPROVE', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
     ], workflow, 'new-head-sha')
 
-    expect(next.step?.type).toBe('review')
-    expect(next.round).toBe(2)
+    expect(next.step).toBeNull()
+    expect(next.stopReason).toBe('approved')
+  })
+
+  it('stops when the APPROVE came from a recheck', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'sha-A' }),
+      record({ type: 'fix', commentId: 101, pushedSha: 'sha-B' }),
+      record({ type: 'recheck', verdict: 'APPROVE', sha: 'sha-B', round: 2, commentId: 102 }),
+    ], workflow, 'sha-C')
+
+    expect(next.step).toBeNull()
+    expect(next.stopReason).toBe('approved')
+  })
+
+  // The stop gate must not swallow work that landed AFTER the approval. A workflow whose
+  // fix step is not gated on the verdict can push a commit past an APPROVE; that commit
+  // still has to be rechecked.
+  it('still rechecks a fix that landed after an APPROVE', () => {
+    const ungatedFix: WorkflowStep = { ...fixStep, when: undefined }
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
+      record({ type: 'fix', commentId: 101, pushedSha: 'fix-sha' }),
+    ], [reviewStep, ungatedFix, recheckStep], 'fix-sha')
+
+    expect(next.step?.type).toBe('recheck')
+    expect(next.stopReason).toBeUndefined()
+  })
+
+  it('does not stop on a NEEDS_WORK verdict', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
+    ], workflow, 'sha-A')
+
+    expect(next.step?.type).toBe('fix')
+    expect(next.stopReason).toBeUndefined()
   })
 
   // recheck-no-fix mode (per-repo `review,recheck`): crosscheck never auto-fixes, so a
@@ -239,16 +285,15 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.step).toBeNull()
   })
 
-  // After an APPROVE there are no findings left to re-evaluate, so a push of NEW code
-  // must get a fresh review — a recheck would judge it against a resolved review and
-  // could gloss over defects the new commits introduced.
-  it('routes a post-APPROVE push to a fresh review, not a recheck (recheck-no-fix)', () => {
+  // After an APPROVE there is nothing left to do: neither a recheck (no findings to
+  // re-evaluate) nor a fresh review (an APPROVE ends crosscheck's work on the PR).
+  it('stops on a post-APPROVE push (recheck-no-fix)', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A' }),
     ], reviewRecheckWorkflow, 'sha-B')
 
-    expect(next.step?.type).toBe('review')
-    expect(next.round).toBe(2)
+    expect(next.step).toBeNull()
+    expect(next.stopReason).toBe('approved')
   })
 
   it('still rechecks a post-BLOCK push (recheck-no-fix)', () => {
@@ -260,13 +305,14 @@ describe('identifyNextWorkflowStep', () => {
   })
 
   // An APPROVE recorded by a recheck ends the cycle just like an APPROVE review does.
-  it('routes a push after an APPROVE recheck to a fresh review (recheck-no-fix)', () => {
+  it('stops on a push after an APPROVE recheck (recheck-no-fix)', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
       record({ type: 'recheck', verdict: 'APPROVE', sha: 'sha-B', round: 2, commentId: 102 }),
     ], reviewRecheckWorkflow, 'sha-C')
 
-    expect(next.step?.type).toBe('review')
+    expect(next.step).toBeNull()
+    expect(next.stopReason).toBe('approved')
   })
 })
 
@@ -277,7 +323,25 @@ describe('identifyNextWorkflowStep', () => {
 // new content to review rather than mistaking it for a recheck (the fixedCurrentSha bypass).
 describe('decideReviewOnly (per-repo review-only)', () => {
   it('reviews a fresh PR at round 1', () => {
-    expect(decideReviewOnly([], 'head-sha')).toEqual({ alreadyReviewed: false, round: 1 })
+    expect(decideReviewOnly([], 'head-sha')).toEqual({ alreadyReviewed: false, approved: false, round: 1 })
+  })
+
+  it('reports approved once the latest review carries APPROVE', () => {
+    const decision = decideReviewOnly([
+      record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A', round: 1 }),
+      record({ type: 'review', verdict: 'APPROVE', sha: 'sha-B', round: 2, commentId: 101 }),
+    ], 'sha-C')
+
+    expect(decision.approved).toBe(true)
+  })
+
+  it('is not approved when a later review supersedes an earlier APPROVE', () => {
+    const decision = decideReviewOnly([
+      record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A', round: 1 }),
+      record({ type: 'review', verdict: 'BLOCK', sha: 'sha-B', round: 2, commentId: 101 }),
+    ], 'sha-C')
+
+    expect(decision.approved).toBe(false)
   })
 
   it('skips when the current SHA was already reviewed', () => {
@@ -293,7 +357,7 @@ describe('decideReviewOnly (per-repo review-only)', () => {
       record({ type: 'review', verdict: 'BLOCK', sha: 'old-sha', round: 1 }),
     ], 'new-sha')
 
-    expect(decision).toEqual({ alreadyReviewed: false, round: 2 })
+    expect(decision).toEqual({ alreadyReviewed: false, approved: false, round: 2 })
   })
 
   it('reviews a fix-pushed SHA as new content, not a recheck (fixedCurrentSha bypass)', () => {
@@ -305,7 +369,7 @@ describe('decideReviewOnly (per-repo review-only)', () => {
       record({ type: 'fix', pushedSha: 'sha-B', round: 1, commentId: 101 }),
     ], 'sha-B')
 
-    expect(decision).toEqual({ alreadyReviewed: false, round: 2 })
+    expect(decision).toEqual({ alreadyReviewed: false, approved: false, round: 2 })
   })
 
   it('skips the fix-pushed SHA once it has been reviewed', () => {

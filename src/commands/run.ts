@@ -325,6 +325,12 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       const history = await fetchStepHistory(owner, repo, number, token)
       const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha)
       if (nextResult.step === null) {
+        if (nextResult.stopReason === 'approved') {
+          // An APPROVE ends crosscheck's work on the PR. --steps skips this detection
+          // entirely, so it stays the escape hatch for forcing another pass.
+          console.log(chalk.dim('  latest review is APPROVE — crosscheck is done with this PR (use --steps review to force another pass)'))
+          return
+        }
         // Workflow already complete for this SHA
         console.log(chalk.dim('  workflow already complete for this SHA — nothing to do'))
         return

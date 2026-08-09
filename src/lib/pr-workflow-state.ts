@@ -27,9 +27,14 @@ export interface StepRecord {
   source?: 'comment' | 'commit'
 }
 
+/** Why `step` is null. `approved` means the PR is finished for good, not just for this SHA. */
+export type WorkflowStopReason = 'approved'
+
 export interface NextStepResult {
   /** Next workflow step to execute, or null when the workflow is complete. */
   step: WorkflowStep | null
+  /** Set when the workflow stopped for a reason worth reporting. */
+  stopReason?: WorkflowStopReason
   /** For fix/recheck steps: the review comment to use as working context. */
   reviewComment?: { id: number; body: string }
   /** True when at least one review or recheck comment exists on the PR. */
@@ -262,6 +267,18 @@ export function identifyNextWorkflowStep(
   const conflictAfterReview = historyAfterReview.some(r => r.type === 'conflict-resolve')
   const fixAfterReview = lastFixAfterReview !== undefined || conflictAfterReview
 
+  // Terminal state: the newest verdict on the PR is APPROVE. Crosscheck is done with this
+  // PR — no further step runs, not even on commits pushed after the approval. Re-reviewing
+  // post-approval pushes is the one thing this deliberately gives up; a human who wants
+  // another pass asks for it explicitly (`ck run <pr-url> --steps review`, which skips
+  // history detection entirely).
+  // Gated on `fixAfterReview` so work that landed AFTER the approval is still finished:
+  // a workflow whose fix step isn't gated on the verdict can push a commit past an
+  // APPROVE, and that commit still needs its recheck.
+  if (lastReview.verdict === 'APPROVE' && !fixAfterReview) {
+    return { step: null, stopReason: 'approved', hasExistingReview: true, round: lastReview.round, history }
+  }
+
   // Build synthetic results so evaluateWhen works correctly for downstream steps.
   // Always populate under the literal key 'review' so conditions like
   // "review.verdict != 'APPROVE'" work regardless of the step's name in the workflow.
@@ -322,10 +339,10 @@ export function identifyNextWorkflowStep(
     // the workflow has a fix step, keep the fresh-review behaviour so the auto-fix loop
     // re-engages on the new SHA.
     //
-    // Only when the prior review left unresolved work. After an APPROVE there are no
-    // findings to re-evaluate, so a recheck — whose instructions centre on resolving
-    // the original review — could gloss over defects in the newly pushed code. Those
-    // pushes get a fresh review instead.
+    // Only when the prior review left unresolved work. An APPROVE normally stops the
+    // workflow above; it reaches here only when a conflict-resolve landed after the
+    // approval, and a recheck — whose instructions centre on resolving the original
+    // review — has no findings to re-evaluate. That merge gets a fresh review instead.
     if (hasRecheckStep && !hasFixStep && lastReview.verdict !== 'APPROVE') {
       return {
         step: effectiveRecheckStep(steps),
@@ -382,6 +399,8 @@ export function identifyNextWorkflowStep(
 export interface ReviewOnlyDecision {
   /** True when `sha` already has a review/recheck record — the run should be skipped. */
   alreadyReviewed: boolean
+  /** True when the most recent review carries APPROVE — crosscheck is done with this PR. */
+  approved: boolean
   /** Round number to stamp on the review: highest prior round + 1, or 1 for a never-reviewed PR. */
   round: number
 }
@@ -396,8 +415,11 @@ export function decideReviewOnly(history: StepRecord[], sha: string): ReviewOnly
   const reviews = history.filter(r => r.type === 'review' || r.type === 'recheck')
   const alreadyReviewed = reviews.some(r =>
     r.sha !== undefined && (r.sha.startsWith(sha) || sha.startsWith(r.sha)))
+  // An APPROVE on the latest review ends the PR the same way it does in the full
+  // workflow — later pushes are not reviewed again.
+  const approved = reviews.at(-1)?.verdict === 'APPROVE'
   const maxRound = reviews.reduce((max, r) => Math.max(max, r.round), 0)
-  return { alreadyReviewed, round: alreadyReviewed ? maxRound : maxRound + 1 }
+  return { alreadyReviewed, approved, round: alreadyReviewed ? maxRound : maxRound + 1 }
 }
 
 function firstIncompleteInitialStep(history: StepRecord[], steps: WorkflowStep[]): WorkflowStep | null {
