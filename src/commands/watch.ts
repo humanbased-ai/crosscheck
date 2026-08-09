@@ -34,7 +34,7 @@ import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
-import { filterStepsByTypes, formatRepoWorkflowSteps, isRecheckWithoutFix, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
+import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
@@ -267,16 +267,8 @@ export async function runWatch(opts: WatchOpts = {}) {
   // Last-reviewed diff hash per PR — skip reviews when a new SHA has identical diff vs base
   // (force-push, amend, no-op rebase). Persisted so restarts don't re-review unchanged content.
   const diffHashes = new PersistentDiffHashMap()
-  // PRs reviewed at least once this session — synchronize events on these run as recheck rounds
-  const reviewedPRKeys = new Set<string>()
-  // PRs this session approved at least once. Used only to steer later events back to
-  // history detection — never to skip on its own, since a newer verdict or an
-  // out-of-band fix can supersede the approval. Keyed by PR, not by SHA: both the
-  // approved commit (detection stops it) and a push that moves HEAD past the approval
-  // (detection reviews it fresh) must escape the SHA-agnostic `reviewedPRKeys`
-  // fast-path, which would otherwise run either as a recheck. Restarts lose the set;
-  // history detection is correct without it.
-  const approvedPRKeys = new Set<string>()
+  // Completed round count per PR — the auto-loop's round counter, which history cannot
+  // supply (it returns the last recheck's round unchanged across iterations).
   const prRoundCounts = new Map<string, number>()
   // PR+sha pairs completed by this watch session — used to suppress issue_comment
   // re-entries for reviews that watch posted itself (as opposed to kickass).
@@ -375,20 +367,27 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      // Determine the correct starting step from PR comment history so watch
-      // behaves correctly after a restart (reviewedPRKeys is in-memory only).
-      // Fast-path: if the PR was reviewed in this session, skip the API call.
-      // Exception: comment-triggered runs must always do live detection —
-      // reviewedPRKeys is SHA-agnostic and would misroute a kickass review
-      // annotation for a new SHA as a recheck run instead of routing to fix.
-      // auto_loop runs also skip the session fast-path so history detection
-      // picks the correct starting step (fix, not recheck); round is instead
-      // incremented from prRoundCounts to match the completed round count.
+      // Determine the correct starting step from PR comment history. Webhook, backtrace,
+      // and auto_loop events always ask — there is no PR-level session fast-path.
+      //
+      // There used to be one (`reviewedPRKeys`): reviewed-in-this-session meant "run the
+      // next event as a recheck". It was wrong by construction on two axes. It is
+      // SHA-agnostic, so a push it had never seen inherited the previous SHA's routing;
+      // and it only knows what THIS process did, so an approval, a forced re-review, or a
+      // fix pushed by `kickass`, `crosscheck run`, or a second watcher was invisible to
+      // it. Each case where it guessed wrong grew its own guard — recheck-no-fix depth,
+      // repo overrides, approvals — and every one of those guards did the same thing:
+      // undo the guess and ask history. So ask history. It costs one call per event, and
+      // it is the only thing that sees the PR as it actually is.
+      //
+      // Comment-triggered runs keep their SHA-specific fast path: a kickass re-review
+      // targets a SHA history detection would report as already complete.
       let isRecheckRun = params.action === 'comment'
         ? reviewedPRShaKeys.has(key)    // SHA-specific: already processed this exact sha
-        : params.action === 'auto_loop'
-        ? false                          // always use history detection for auto-loop rounds
-        : reviewedPRKeys.has(prKey)     // session fast-path for webhook/backtrace events
+        : false                          // ask history
+      // auto_loop's round is pre-computed from the completed round count rather than
+      // from history, which returns the last recheck's round unchanged across iterations
+      // and would defeat the max_rounds cap.
       let round = params.action === 'auto_loop'
         ? (prRoundCounts.get(prKey) ?? 1) + 1
         : isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
@@ -399,29 +398,6 @@ export async function runWatch(opts: WatchOpts = {}) {
       const initialRepoSteps = repoStepOverride ? filterStepsByTypes(workflow, repoStepOverride) : workflow
       const reviewOnlyForRepo = isReviewOnlyWorkflow(initialRepoSteps)
       if (!repoAllowsRecheck && isRecheckRun) {
-        isRecheckRun = false
-        round = 1
-      }
-      // A recheck-no-fix depth (`review,recheck`) decides review-vs-recheck per SHA from
-      // the last verdict: an unresolved review gets a recheck, an APPROVE gets a fresh
-      // review (identifyNextWorkflowStep). The session fast-path above is PR-level and
-      // SHA-agnostic, so it would coerce every later push in this process into a recheck
-      // and never consult that decision. Force history detection instead. Comment-
-      // triggered runs keep their SHA-specific fast path — a kickass re-review targets a
-      // SHA history detection would report as already complete.
-      if (isRecheckWithoutFix(repoStepOverride) && isRecheckRun && params.action !== 'comment') {
-        isRecheckRun = false
-        round = 1
-      }
-      // This session approved this PR at some commit. That is a hint, never a verdict:
-      // the `--steps review` escape hatch can post a newer NEEDS_WORK on the same SHA,
-      // and an out-of-band `crosscheck fix` / `resolve` can push a fix past the
-      // approval — both supersede it. So the cache only forces history detection (which
-      // applies the latest-record rule and the post-approval fix exception) rather than
-      // short-circuiting to a skip. Without it the session fast-path would coerce the
-      // event into a recheck — of the approved commit itself, or, once a push moves HEAD
-      // past the approval, of code never reviewed and owed a fresh review round.
-      if (approvedPRKeys.has(prKey) && isRecheckRun) {
         isRecheckRun = false
         round = 1
       }
@@ -464,9 +440,6 @@ export async function runWatch(opts: WatchOpts = {}) {
           if (nextResult.step === null) {
             // Workflow already complete for this HEAD sha — release lock and skip.
             // Happens when a synchronize event fires after all steps are done.
-            // Remember the approval so later events on this PR take the history path
-            // again instead of the session fast-path's recheck.
-            if (nextResult.stopReason === 'approved') approvedPRKeys.add(prKey)
             await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
             releasePRLock(owner, repoName, prNumber, params.headSha)
             fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: nextResult.stopReason ?? 'workflow_complete', sha: params.headSha })
@@ -520,12 +493,11 @@ export async function runWatch(opts: WatchOpts = {}) {
             }
           }
         } catch {
-          // best-effort — fall back to session-based detection.
-          // For auto_loop, force isRecheckRun=true so a transient history-fetch
-          // failure does not restart the workflow from the review step.
-          // A recheck-no-fix repo has no session state left to fall back to (the guard
-          // above cleared it), so it re-reviews the new SHA — the conservative direction,
-          // since a fresh review never assumes findings that may already be resolved.
+          // History unavailable — best-effort fallback. auto_loop forces a recheck so a
+          // transient fetch failure does not restart the workflow from the review step.
+          // Everything else falls through to a fresh round-1 review: with no history to
+          // read, that is the conservative direction, since a review never assumes
+          // findings that may already be resolved (or were never posted at all).
           if (params.action === 'auto_loop') isRecheckRun = true
         }
       }
@@ -634,18 +606,11 @@ export async function runWatch(opts: WatchOpts = {}) {
           trigger: params.action === 'backtrace' ? 'backtrace' : params.action === 'comment' ? 'comment' : 'watch',
         })
 
-        // The workflow just approved this commit. Recording the PR sends later events
-        // through history detection rather than the session fast-path's recheck —
-        // another event on this same commit is stopped, and a push that moves HEAD past
-        // the approval is reviewed fresh.
-        if (verdict === 'APPROVE') approvedPRKeys.add(prKey)
-        // A strategy-skipped PR never ran a review, so it must stay out of the
-        // session caches. reviewedPRKeys is what makes the next event on this PR
-        // an `isRecheckRun`, and a review coerced to a recheck is deliberately
-        // never gated by max_rounds — so a lockfile-only PR that later gains
-        // source files would be "rechecked" against findings never posted.
+        // A strategy-skipped PR never ran a review, so it must stay out of the session
+        // caches: reviewedPRShaKeys suppresses the issue_comment re-entry for a review
+        // this session posted, and prRoundCounts is the auto-loop's round counter —
+        // neither should count a run that posted nothing.
         if (strategySkipped === undefined) {
-          reviewedPRKeys.add(prKey)
           reviewedPRShaKeys.add(key)  // key = "owner/repo#pr@sha"
           prRoundCounts.set(prKey, round)
         }
