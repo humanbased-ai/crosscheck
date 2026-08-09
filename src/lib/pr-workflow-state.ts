@@ -27,9 +27,14 @@ export interface StepRecord {
   source?: 'comment' | 'commit'
 }
 
+/** Why `step` is null. `approved` means HEAD carries an APPROVE verdict — nothing runs until it moves. */
+export type WorkflowStopReason = 'approved'
+
 export interface NextStepResult {
   /** Next workflow step to execute, or null when the workflow is complete. */
   step: WorkflowStep | null
+  /** Set when the workflow stopped for a reason worth reporting. */
+  stopReason?: WorkflowStopReason
   /** For fix/recheck steps: the review comment to use as working context. */
   reviewComment?: { id: number; body: string }
   /** True when at least one review or recheck comment exists on the PR. */
@@ -41,6 +46,19 @@ export interface NextStepResult {
 }
 
 const VALID_STEP_TYPES = new Set<StepRecordType>(['review', 'recheck', 'fix', 'conflict-resolve'])
+
+// Whether a recorded SHA refers to the same commit as `currentSha`. Annotations carry
+// either the short (7-char) or the full form, so compare by prefix. An absent or empty
+// SHA proves nothing and never matches — a record that cannot say which commit it
+// describes cannot be used to claim that commit is covered.
+//
+// The single implementation of this comparison: `decideReviewOnly`, the scan's approval
+// check, and kickass's current-head review check all route through it, so they cannot
+// drift apart on what "the same commit" means.
+export function shaCovers(recordSha: string | undefined, currentSha: string): boolean {
+  if (!recordSha || !currentSha) return false
+  return recordSha.startsWith(currentSha) || currentSha.startsWith(recordSha)
+}
 
 function commentToRecord(comment: { id: number; body: string; created_at: string }): StepRecord | null {
   const fields = parseAnnotationFields(comment.body)
@@ -261,6 +279,31 @@ export function identifyNextWorkflowStep(
   const lastFixAfterReview = historyAfterReview.filter(r => r.type === 'fix').at(-1)
   const conflictAfterReview = historyAfterReview.some(r => r.type === 'conflict-resolve')
   const fixAfterReview = lastFixAfterReview !== undefined || conflictAfterReview
+  // A fix/conflict-resolve recorded after the approval only invalidates it while that
+  // commit is still HEAD. Comment history is permanent, but a force-push can drop the
+  // commit and put HEAD back on the approved SHA — the record then describes content
+  // that no longer exists, and treating it as live work would schedule another pass
+  // over the already-approved commit.
+  const postApprovalPushCoversHead = historyAfterReview.some(
+    r => (r.type === 'fix' || r.type === 'conflict-resolve') && shaCovers(r.pushedSha, currentSha),
+  )
+
+  // Terminal state: the newest verdict is APPROVE and it covers the current HEAD. No
+  // further step runs — not a recheck, not a re-review — for as long as HEAD stays there.
+  //
+  // The approval covers a specific commit, not the PR forever. Commits pushed after it
+  // materially change what was approved, so they invalidate it and fall through to a
+  // fresh review below. A legacy APPROVE carrying no `sha=` cannot prove it covers HEAD,
+  // so it falls through too; that one review re-establishes the SHA and the stop.
+  //
+  // Gated on `postApprovalPushCoversHead` so work that landed AFTER the approval still
+  // finishes: a workflow whose fix step isn't gated on the verdict can push a commit past
+  // an APPROVE, and that commit still needs its recheck. The gate requires that commit to
+  // be the current HEAD, so a stale fix record left behind by a force-push doesn't keep
+  // re-opening an approval that still covers HEAD.
+  if (lastReview.verdict === 'APPROVE' && !postApprovalPushCoversHead && shaCovers(lastReview.sha, currentSha)) {
+    return { step: null, stopReason: 'approved', hasExistingReview: true, round: lastReview.round, history }
+  }
 
   // Build synthetic results so evaluateWhen works correctly for downstream steps.
   // Always populate under the literal key 'review' so conditions like
@@ -394,8 +437,7 @@ export interface ReviewOnlyDecision {
 // matched by prefix, the same tolerance the issue_comment bridge uses.
 export function decideReviewOnly(history: StepRecord[], sha: string): ReviewOnlyDecision {
   const reviews = history.filter(r => r.type === 'review' || r.type === 'recheck')
-  const alreadyReviewed = reviews.some(r =>
-    r.sha !== undefined && (r.sha.startsWith(sha) || sha.startsWith(r.sha)))
+  const alreadyReviewed = reviews.some(r => shaCovers(r.sha, sha))
   const maxRound = reviews.reduce((max, r) => Math.max(max, r.round), 0)
   return { alreadyReviewed, round: alreadyReviewed ? maxRound : maxRound + 1 }
 }

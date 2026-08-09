@@ -34,8 +34,8 @@ import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
-import { filterStepsByTypes, formatRepoWorkflowSteps, isRecheckWithoutFix, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
-import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
+import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
+import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly, type StepRecord } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
@@ -178,6 +178,27 @@ export interface WatchOpts {
   backtrace?: boolean
 }
 
+// PR history is what decides whether a step runs at all — the approval stop, the
+// per-SHA dedup, the resume point. Acting without it means posting a duplicate review
+// or modifying an already-approved commit, so callers fail closed rather than assume an
+// empty history. One short retry first: the usual cause is a transient GitHub blip or a
+// rate-limit tick, and deferring the event strands the PR until something else happens.
+const HISTORY_RETRY_DELAY_MS = 3_000
+
+async function fetchStepHistoryWithRetry(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<StepRecord[]> {
+  try {
+    return await fetchStepHistory(owner, repo, prNumber, token)
+  } catch {
+    await new Promise(resolve => setTimeout(resolve, HISTORY_RETRY_DELAY_MS))
+    return await fetchStepHistory(owner, repo, prNumber, token)
+  }
+}
+
 export async function runWatch(opts: WatchOpts = {}) {
   const configPath = opts.config
   let config = loadConfig(configPath)
@@ -267,12 +288,16 @@ export async function runWatch(opts: WatchOpts = {}) {
   // Last-reviewed diff hash per PR — skip reviews when a new SHA has identical diff vs base
   // (force-push, amend, no-op rebase). Persisted so restarts don't re-review unchanged content.
   const diffHashes = new PersistentDiffHashMap()
-  // PRs reviewed at least once this session — synchronize events on these run as recheck rounds
-  const reviewedPRKeys = new Set<string>()
+  // Completed round count per PR — the auto-loop's round counter, which history cannot
+  // supply (it returns the last recheck's round unchanged across iterations).
   const prRoundCounts = new Map<string, number>()
-  // PR+sha pairs completed by this watch session — used to suppress issue_comment
-  // re-entries for reviews that watch posted itself (as opposed to kickass).
-  const reviewedPRShaKeys = new Set<string>()
+  // Comment IDs the issue_comment bridge has already handled, so a webhook redelivery
+  // of the same comment does not dispatch twice. There is no need to guess at which
+  // comments are "ours": webhook.ts forwards only `trigger=kickass` annotations, and
+  // this watcher's own reviews carry trigger=watch/comment/backtrace, so they never
+  // reach the bridge. Every comment that does reach it is a kickass dispatch whose
+  // verdict this watcher is meant to act on — history detection decides how.
+  const handledCommentIds = new Set<number>()
 
   // Idle tracking — reset on any PR activity; used by the idle-issue timer.
   let lastActivityAt = Date.now()
@@ -300,6 +325,8 @@ export async function runWatch(opts: WatchOpts = {}) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author: params.author })
         return
       }
+
+      const prKey = `${owner}/${repoName}#${prNumber}`
 
       const { origin, method: originMethod } = await detectOriginFull(
         params.body ?? '', params.headRef,
@@ -365,22 +392,26 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      const prKey = `${owner}/${repoName}#${prNumber}`
-
-      // Determine the correct starting step from PR comment history so watch
-      // behaves correctly after a restart (reviewedPRKeys is in-memory only).
-      // Fast-path: if the PR was reviewed in this session, skip the API call.
-      // Exception: comment-triggered runs must always do live detection —
-      // reviewedPRKeys is SHA-agnostic and would misroute a kickass review
-      // annotation for a new SHA as a recheck run instead of routing to fix.
-      // auto_loop runs also skip the session fast-path so history detection
-      // picks the correct starting step (fix, not recheck); round is instead
-      // incremented from prRoundCounts to match the completed round count.
-      let isRecheckRun = params.action === 'comment'
-        ? reviewedPRShaKeys.has(key)    // SHA-specific: already processed this exact sha
-        : params.action === 'auto_loop'
-        ? false                          // always use history detection for auto-loop rounds
-        : reviewedPRKeys.has(prKey)     // session fast-path for webhook/backtrace events
+      // Determine the correct starting step from PR comment history. Webhook, backtrace,
+      // and auto_loop events always ask — there is no PR-level session fast-path.
+      //
+      // There used to be one (`reviewedPRKeys`): reviewed-in-this-session meant "run the
+      // next event as a recheck". It was wrong by construction on two axes. It is
+      // SHA-agnostic, so a push it had never seen inherited the previous SHA's routing;
+      // and it only knows what THIS process did, so an approval, a forced re-review, or a
+      // fix pushed by `kickass`, `crosscheck run`, or a second watcher was invisible to
+      // it. Each case where it guessed wrong grew its own guard — recheck-no-fix depth,
+      // repo overrides, approvals — and every one of those guards did the same thing:
+      // undo the guess and ask history. So ask history. It costs one call per event, and
+      // it is the only thing that sees the PR as it actually is.
+      //
+      // Comment triggers ask too. The SHA-specific fast path they used to take ran an
+      // externally-posted NEEDS_WORK as a recheck instead of routing to fix, because it
+      // skipped detection whenever this session had already touched the SHA.
+      let isRecheckRun = false
+      // auto_loop's round is pre-computed from the completed round count rather than
+      // from history, which returns the last recheck's round unchanged across iterations
+      // and would defeat the max_rounds cap.
       let round = params.action === 'auto_loop'
         ? (prRoundCounts.get(prKey) ?? 1) + 1
         : isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
@@ -391,17 +422,6 @@ export async function runWatch(opts: WatchOpts = {}) {
       const initialRepoSteps = repoStepOverride ? filterStepsByTypes(workflow, repoStepOverride) : workflow
       const reviewOnlyForRepo = isReviewOnlyWorkflow(initialRepoSteps)
       if (!repoAllowsRecheck && isRecheckRun) {
-        isRecheckRun = false
-        round = 1
-      }
-      // A recheck-no-fix depth (`review,recheck`) decides review-vs-recheck per SHA from
-      // the last verdict: an unresolved review gets a recheck, an APPROVE gets a fresh
-      // review (identifyNextWorkflowStep). The session fast-path above is PR-level and
-      // SHA-agnostic, so it would coerce every later push in this process into a recheck
-      // and never consult that decision. Force history detection instead. Comment-
-      // triggered runs keep their SHA-specific fast path — a kickass re-review targets a
-      // SHA history detection would report as already complete.
-      if (isRecheckWithoutFix(repoStepOverride) && isRecheckRun && params.action !== 'comment') {
         isRecheckRun = false
         round = 1
       }
@@ -422,7 +442,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         round = 1
         resolvedSteps = reviewSteps
         try {
-          const history = await fetchStepHistory(owner, repoName, prNumber, token)
+          const history = await fetchStepHistoryWithRetry(owner, repoName, prNumber, token)
           const decision = decideReviewOnly(history, params.headSha)
           if (decision.alreadyReviewed) {
             await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
@@ -431,7 +451,18 @@ export async function runWatch(opts: WatchOpts = {}) {
             return
           }
           round = decision.round
-        } catch { /* best-effort — fall back to a fresh round-1 review */ }
+        } catch (err: unknown) {
+          // The dedup this mode relies on lives in that history. Reviewing without it
+          // would post a second review on a SHA already covered.
+          // Released as `failure`, not `success`: this SHA was not reviewed, and
+          // `crosscheck/review` is a commit status a repo can require for merge — a
+          // green one here would let an unreviewed HEAD satisfy branch protection
+          // during a GitHub outage.
+          await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'failure')
+          releasePRLock(owner, repoName, prNumber, params.headSha)
+          fileLog({ level: 'warn', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'history_unavailable', sha: params.headSha, error: err instanceof Error ? err.message : String(err) })
+          return
+        }
       } else if (!isRecheckRun) {
         try {
           // Reuse the per-event override snapshot (read once at repoStepOverride)
@@ -439,14 +470,14 @@ export async function runWatch(opts: WatchOpts = {}) {
           // fresh so live edits to workflow.yml apply across events.
           const globalWorkflow = loadWorkflow(process.cwd())
           const allSteps = repoStepOverride ? filterStepsByTypes(globalWorkflow, repoStepOverride) : globalWorkflow
-          const history = await fetchStepHistory(owner, repoName, prNumber, token)
+          const history = await fetchStepHistoryWithRetry(owner, repoName, prNumber, token)
           const nextResult = identifyNextWorkflowStep(history, allSteps, params.headSha)
           if (nextResult.step === null) {
             // Workflow already complete for this HEAD sha — release lock and skip.
             // Happens when a synchronize event fires after all steps are done.
             await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
             releasePRLock(owner, repoName, prNumber, params.headSha)
-            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'workflow_complete', sha: params.headSha })
+            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: nextResult.stopReason ?? 'workflow_complete', sha: params.headSha })
             return
           }
           if (nextResult.hasExistingReview) {
@@ -496,14 +527,26 @@ export async function runWatch(opts: WatchOpts = {}) {
               }
             }
           }
-        } catch {
-          // best-effort — fall back to session-based detection.
-          // For auto_loop, force isRecheckRun=true so a transient history-fetch
-          // failure does not restart the workflow from the review step.
-          // A recheck-no-fix repo has no session state left to fall back to (the guard
-          // above cleared it), so it re-reviews the new SHA — the conservative direction,
-          // since a fresh review never assumes findings that may already be resolved.
-          if (params.action === 'auto_loop') isRecheckRun = true
+        } catch (err: unknown) {
+          // History still unreadable after the retry. Everything this function decides —
+          // whether HEAD is already approved, already reviewed, or mid-loop — lives in
+          // that history, so running anyway risks a second review on an approved commit
+          // or a fix re-applied to code that already has one. Defer instead: release the
+          // locks and let the next event, `kickass`, or `crosscheck run` pick the PR up.
+          //
+          // auto_loop is the exception. It is a continuation of a run this process just
+          // completed, so the state is known from the session rather than from history,
+          // and deferring would strand the loop — nothing else re-triggers it.
+          if (params.action !== 'auto_loop') {
+            // `failure`, not `success` — see the review-only branch above: a green
+            // `crosscheck/review` on a HEAD nobody reviewed can satisfy branch
+            // protection.
+            await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'failure')
+            releasePRLock(owner, repoName, prNumber, params.headSha)
+            fileLog({ level: 'warn', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'history_unavailable', sha: params.headSha, error: err instanceof Error ? err.message : String(err) })
+            return
+          }
+          isRecheckRun = true
         }
       }
 
@@ -611,15 +654,9 @@ export async function runWatch(opts: WatchOpts = {}) {
           trigger: params.action === 'backtrace' ? 'backtrace' : params.action === 'comment' ? 'comment' : 'watch',
         })
 
-        void verdict
-        // A strategy-skipped PR never ran a review, so it must stay out of the
-        // session caches. reviewedPRKeys is what makes the next event on this PR
-        // an `isRecheckRun`, and a review coerced to a recheck is deliberately
-        // never gated by max_rounds — so a lockfile-only PR that later gains
-        // source files would be "rechecked" against findings never posted.
+        // A strategy-skipped PR never ran a review, so it must not advance the
+        // auto-loop's round counter — that run posted nothing to count.
         if (strategySkipped === undefined) {
-          reviewedPRKeys.add(prKey)
-          reviewedPRShaKeys.add(key)  // key = "owner/repo#pr@sha"
           prRoundCounts.set(prKey, round)
         }
         // Recompute the diff hash AFTER runWorkflow — workflow steps such as
@@ -848,6 +885,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       const annotationSha = commentAnnotation?.sha  // may be short (7 chars)
       const shaMatches = (a: string, b: string) => a.startsWith(b) || b.startsWith(a)
 
+
       try {
         const octokit = createGithubClient(token)
         const initial = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
@@ -865,10 +903,11 @@ export async function runWatch(opts: WatchOpts = {}) {
           return
         }
 
-        if (reviewedPRShaKeys.has(`${owner}/${repoName}#${prNumber}@${prData.head.sha}`)) {
-          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_self_trigger', sha: prData.head.sha })
+        if (handledCommentIds.has(event.comment.id)) {
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_already_handled', comment_id: event.comment.id })
           return
         }
+        handledCommentIds.add(event.comment.id)
 
         // GitHub can deliver issue_comment before ck run's finally block releases
         // the remote lock. Retry with backoff; re-fetch the PR head on each attempt
@@ -893,10 +932,6 @@ export async function runWatch(opts: WatchOpts = {}) {
             }
           }
 
-          if (reviewedPRShaKeys.has(`${owner}/${repoName}#${prNumber}@${prData.head.sha}`)) {
-            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_self_trigger', sha: prData.head.sha })
-            break
-          }
           if (await checkRemoteLock(octokit, owner, repoName, prData.head.sha).catch(() => false)) {
             fileLog({ level: 'info', event: 'comment_trigger_deferred', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_remote', attempt })
             continue

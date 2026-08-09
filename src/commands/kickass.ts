@@ -13,6 +13,7 @@ import { hintForError } from '../lib/remediation.js'
 import { pickPRs } from '../lib/pr-picker.js'
 import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 import { handleScanError, loadScanResult } from './scan.js'
+import { shaCovers } from '../lib/pr-workflow-state.js'
 import { PRBoard } from '../lib/board.js'
 import { loadWorkflow } from '../lib/workflow.js'
 
@@ -668,8 +669,8 @@ function groupPreflight(plan: PreflightItem[]): Array<[string, PreflightItem[]]>
 
 function hasUsableCurrentHeadReview(pr: PRStatus): boolean {
   const annotation = pr.latestAnnotation
-  if (!annotation || annotation.type !== 'review' || !annotation.sha) return false
-  return pr.headSha.startsWith(annotation.sha) || annotation.sha.startsWith(pr.headSha)
+  if (!annotation || annotation.type !== 'review') return false
+  return shaCovers(annotation.sha, pr.headSha)
 }
 
 function isForkPR(pr: PRStatus): boolean {

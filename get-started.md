@@ -528,6 +528,8 @@ crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove th
 
 The depths differ in what happens after the initial review:
 
+In every depth, an `APPROVE` stops all work on the commit it covers, and a later push re-opens the PR — see [What happens after a PR is approved?](#what-happens-after-a-pr-is-approved).
+
 - **`review`** — review each new SHA; never modify code.
 - **`review,fix`** — crosscheck auto-applies fixes when the verdict isn't `APPROVE`, and stops there; its own fix commit is not re-reviewed.
 - **`review,fix,recheck`** — same, then rechecks its own fix commit. `max_rounds` in `~/.crosscheck/workflow.yml` bounds that fix→recheck cycle.
@@ -1643,6 +1645,20 @@ Each cycle is one `[crosscheck]` fix commit followed by one recheck. The loop st
 `max_rounds` is a per-step field. Crosscheck uses the minimum across all fix and recheck steps in the workflow, so setting `max_rounds: 3` on both keeps them in sync. Setting it to different values on fix vs recheck is not recommended.
 
 `max_rounds` is respected by both `crosscheck watch` and `crosscheck run`. `watch` re-triggers on each pushed fix commit; `run` loops inline within the same session.
+
+### What happens after a PR is approved?
+
+Crosscheck stops working on that commit. Once the newest verdict is `APPROVE` and it covers the PR's current HEAD, no further step runs — not a recheck, not a re-review. `watch` skips further events on that SHA, `crosscheck run` prints `this commit is already approved — nothing to do until new commits land`, and `kickass` lists the PR under "needs merge (manual)" instead of dispatching it.
+
+**A push re-opens it.** New commits materially change what was approved, so the approval no longer applies: the next event runs a fresh review (round *n*+1) on the new code, and the full fix/recheck loop resumes from there. An `APPROVE` posted before the annotation carried a `sha=` field can't prove which commit it covers, so it is treated the same way — one review re-establishes it.
+
+To force another pass on the approved commit itself, name the steps explicitly — that bypasses history detection:
+
+```bash
+crosscheck run https://github.com/owner/repo/pull/123 --steps review
+```
+
+`crosscheck detect-step <pr-url>` shows the stop reason for any PR.
 
 ### Can I disable the auto-fix step?
 
