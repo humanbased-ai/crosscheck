@@ -312,6 +312,8 @@ export async function runWatch(opts: WatchOpts = {}) {
     // Feed the review strategy's `risky` class: without these its `or_labels`
     // (risk:T3) and `or_hotfix_to_default_branch` rules can never fire.
     labels?: string[]; defaultBranch?: string;
+    // ISO timestamp the PR was opened — feeds the open→verdict latency metric.
+    createdAt?: string;
   }): Promise<void> {
     lastActivityAt = Date.now()  // reset idle timer on any PR event
     const { owner, repoName, prNumber } = params
@@ -372,6 +374,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         html_url: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
         user: { login: params.author },
         ...(params.labels !== undefined && { labels: params.labels.map(name => ({ name })) }),
+        ...(params.createdAt !== undefined && { created_at: params.createdAt }),
       }
 
       if (!acquirePRLock(owner, repoName, prNumber, params.headSha)) {
@@ -859,6 +862,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         baseRef: pr.base.ref, action: event.action,
         ...(pr.labels !== undefined && { labels: pr.labels.map(l => l.name) }),
         ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
+        ...(pr.created_at !== undefined && { createdAt: pr.created_at }),
       })
     },
     (msg: string) => bLog(chalk.dim(fmtTime()) + '  ' + msg),
@@ -967,6 +971,7 @@ export async function runWatch(opts: WatchOpts = {}) {
             // depending on which trigger ran it.
             ...(prData.labels !== undefined && { labels: prData.labels.map((l: { name: string }) => l.name) }),
             ...(prData.base.repo?.default_branch !== undefined && { defaultBranch: prData.base.repo.default_branch }),
+            ...(prData.created_at !== undefined && { createdAt: prData.created_at }),
           })
           break
         }
@@ -1299,6 +1304,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           baseRef: pr.baseRef, action: 'backtrace',
           ...(pr.labels !== undefined && { labels: pr.labels }),
           ...(pr.defaultBranch !== undefined && { defaultBranch: pr.defaultBranch }),
+          createdAt: pr.createdAt,
         })))
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
