@@ -217,6 +217,28 @@ export function anyFixApplied(results: Record<string, StepResult>): boolean {
   return Object.values(results).some(r => (r.applied_count ?? 0) > 0)
 }
 
+export type FixDeliveryMode = 'pull_request' | 'commit' | 'comment'
+
+// How a fix should be delivered once its edits are applied. Fork PRs are handled
+// upstream (the fix step skips them with `fork_pr`), so by the time delivery runs
+// the PR branch is one we can push to. Both `commit` and `pull_request` therefore
+// land the fix directly on the PR's own branch — keeping the fix, recheck, and
+// approval on the original PR. The ONLY difference: `pull_request` may fall back
+// to opening a separate follow-up PR if that push can't succeed (e.g. the PR was
+// merged and its branch deleted, or the branch is protected), whereas `commit`
+// surfaces the push failure and `comment` never pushes at all.
+//   'branch'                 → commit + push onto the PR branch; no fallback
+//   'branch-then-separate-pr'→ same, but fall back to a follow-up PR on push failure
+//   'comment'                → post the diff as a suggestion, no push
+export type FixLanding = 'branch' | 'branch-then-separate-pr' | 'comment'
+export function resolveFixLanding(deliveryMode: FixDeliveryMode): FixLanding {
+  switch (deliveryMode) {
+    case 'comment': return 'comment'
+    case 'commit': return 'branch'
+    case 'pull_request': return 'branch-then-separate-pr'
+  }
+}
+
 export interface PRPhaseData {
   phase?: PRPhase
   verdict?: string | null
@@ -1446,8 +1468,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (isFork) { skipFix('fork_pr'); continue }
 
       const deliveryMode = config.post_review.auto_fix.delivery.mode
+      const landing = resolveFixLanding(deliveryMode)
 
-      if (deliveryMode === 'commit') {
+      if (landing === 'branch') {
         const fixModel = activeVendor === 'codex' ? codexFixModel : claudeFixModel
         execSync('git add -A', { cwd: tmpDir })
         execFileSync(
@@ -1516,11 +1539,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
         results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
 
-      } else if (deliveryMode === 'pull_request') {
+      } else if (landing === 'branch-then-separate-pr') {
         const fixModel = activeVendor === 'codex' ? codexFixModel : claudeFixModel
-        // Create a fix branch and open a PR targeting the original branch
-        const fixBranch = `fix/cr-${prNumber}-review-issues`
-        execSync(`git checkout -b ${fixBranch}`, { cwd: tmpDir })
+        // Commit the fix on the PR's own branch (already checked out in tmpDir) and
+        // try to push it there, so the fix, recheck, and approval all stay on the
+        // original PR. Only when that push can't land — e.g. the PR was merged and
+        // its branch deleted, or the branch is protected — do we fall back to opening
+        // a separate follow-up PR that carries the very same commit.
         execSync('git add -A', { cwd: tmpDir })
         execFileSync(
           'git',
@@ -1534,38 +1559,96 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           { cwd: tmpDir },
         )
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
-        execSync(`git push origin HEAD:${fixBranch}`, {
-          cwd: tmpDir,
-          env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
-        })
+
+        let landedOnBranch = false
+        try {
+          await pushWithNonFastForwardHandling({
+            tmpDir,
+            branch: pr.head.ref,
+            token,
+            log,
+            fileLog: (entry) => fileLog({ ...entry, phase: 'fix' } as any),
+            owner,
+            repoName,
+            prNumber,
+          })
+          landedOnBranch = true
+        } catch (pushErr: unknown) {
+          fileLog({ level: 'warn', event: 'fix_branch_push_fell_back', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, branch: pr.head.ref, error: pushErr instanceof Error ? pushErr.message.slice(0, 500) : String(pushErr), fallback: 'pull_request' })
+        }
         ctx.crosscheckShas.add(newSha)
 
-        const octokit = createGithubClient(token)
-        const fixPrTitle = config.post_review.auto_fix.delivery.pr_title.replace('#{original_pr_title}', pr.title)
-        const { data: fixPr } = await octokit.rest.pulls.create({
-          owner,
-          repo: repoName,
-          head: fixBranch,
-          base: pr.head.ref,
-          title: fixPrTitle,
-          body: [
-            `Auto-fix by crosscheck for CR issues found in #${prNumber}.`,
-            '',
-            `Review: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
-            '',
-            fixAttributionFooter(),
-          ].join('\n'),
-        })
-        if (config.post_review.auto_fix.delivery.label) {
+        if (landedOnBranch) {
+          // Fix landed on the PR branch — mirror `commit` delivery exactly: set the
+          // pending status the following recheck releases, and post the fix-applied
+          // comment so the push is visible on the PR timeline.
+          const currentStepIdx = steps.indexOf(step)
+          const hasRecheckAfterFix = steps.slice(currentStepIdx + 1).some(s => s.type === 'review' || s.type === 'recheck')
+          if (hasRecheckAfterFix) {
+            try {
+              const lockOctokit = createGithubClient(token)
+              await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
+              pushedShasNeedingRelease.push(newSha)
+              fixPushedShaRequiresRecheck = newSha
+            } catch (err) {
+              fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
+            }
+          }
+          onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+          fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
           try {
-            await octokit.rest.issues.addLabels({
-              owner, repo: repoName, issue_number: fixPr.number, labels: [config.post_review.auto_fix.delivery.label],
+            const octokit = createGithubClient(token)
+            const body = buildFixAppliedCommentBody({
+              owner, repo: repoName, sha: newSha, appliedCount,
+              reviewCommentId,
+              changedFiles: fixChangedFiles,
+              vendor: activeVendor,
+              reviewCommentBody,
+              model: activeVendor === 'codex' ? codexFixModel : claudeFixModel,
+              effort: fixEffort,
+              skills: activatedSkills,
             })
-          } catch { /* label may not exist in this repo — skip */ }
+            await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
+            fileLog({ level: 'info', event: 'fix_applied_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })
+          } catch (err) {
+            fileLog({ level: 'warn', event: 'fix_applied_comment_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
+          }
+          results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
+        } else {
+          // Fallback: the fix could not land on the PR branch. Push the same commit to
+          // a dedicated branch and open a follow-up PR targeting the original branch.
+          const fixBranch = `fix/cr-${prNumber}-review-issues`
+          execSync(`git push origin HEAD:${fixBranch}`, {
+            cwd: tmpDir,
+            env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
+          })
+          const octokit = createGithubClient(token)
+          const fixPrTitle = config.post_review.auto_fix.delivery.pr_title.replace('#{original_pr_title}', pr.title)
+          const { data: fixPr } = await octokit.rest.pulls.create({
+            owner,
+            repo: repoName,
+            head: fixBranch,
+            base: pr.head.ref,
+            title: fixPrTitle,
+            body: [
+              `Auto-fix by crosscheck for CR issues found in #${prNumber}.`,
+              '',
+              `Review: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
+              '',
+              fixAttributionFooter(),
+            ].join('\n'),
+          })
+          if (config.post_review.auto_fix.delivery.label) {
+            try {
+              await octokit.rest.issues.addLabels({
+                owner, repo: repoName, issue_number: fixPr.number, labels: [config.post_review.auto_fix.delivery.label],
+              })
+            } catch { /* label may not exist in this repo — skip */ }
+          }
+          onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+          fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
+          results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
         }
-        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
-        results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
 
       } else {
         // comment: post the diff as a suggested-fix comment, no code push needed (works for fork PRs too)

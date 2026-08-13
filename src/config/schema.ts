@@ -234,8 +234,10 @@ export const WatchConfigSchema = z.object({
 })
 
 export const PostReviewDeliverySchema = z.object({
-  // pull_request → opens a fix PR targeting the original branch (human approves before merge)
-  // commit       → pushes fixes directly onto the original PR branch
+  // pull_request → pushes fixes onto the original PR branch (so the fix, recheck, and
+  //                approval stay on that one PR); falls back to opening a separate fix PR
+  //                only when that push can't land (branch merged/deleted or protected)
+  // commit       → pushes fixes directly onto the original PR branch (no fallback)
   // comment      → posts suggested changes as review comments only (no code push)
   mode: z.enum(['pull_request', 'commit', 'comment']).default('pull_request'),
   pr_title: z.string().default('fix: address CR issues in #{original_pr_title}'),

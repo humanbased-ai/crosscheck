@@ -14,6 +14,7 @@ import {
   resolveFixVendor,
   resolveConflictResolveVendor,
   summariseStepOutcomes,
+  resolveFixLanding,
 } from '../lib/runner.js'
 import type { StepResult } from '../lib/workflow.js'
 
@@ -47,6 +48,23 @@ describe('isRetryableFixError', () => {
     expect(isRetryableFixError('timeout string')).toBe(true)
     expect(isRetryableFixError('auth failure: bad token')).toBe(false)
     expect(isRetryableFixError(null)).toBe(true)
+  })
+})
+
+describe('resolveFixLanding', () => {
+  it('commit mode lands on the PR branch with no fallback', () => {
+    expect(resolveFixLanding('commit')).toBe('branch')
+  })
+
+  it('pull_request mode lands on the PR branch but may fall back to a separate PR', () => {
+    // The key behavior fix: pull_request no longer means "always a separate PR".
+    // It lands on the original branch first, keeping fix+recheck+approval on one PR,
+    // and only opens a follow-up PR when the branch push can't land.
+    expect(resolveFixLanding('pull_request')).toBe('branch-then-separate-pr')
+  })
+
+  it('comment mode never pushes', () => {
+    expect(resolveFixLanding('comment')).toBe('comment')
   })
 })
 
