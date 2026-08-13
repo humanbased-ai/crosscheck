@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Launch assets drafted under [`docs/growth/launch/`](docs/growth/launch/)** ([#198](https://github.com/humanbased-ai/crosscheck/issues/198)) — the "Stop Letting One Agent Review Its Own Code" essay, X/LinkedIn posts, a Show HN submission with its first comment, and per-community Reddit drafts. All unpublished drafts; the folder's README carries the pre-publish decisions (venue, whether to publish the unflattering 4-minute merge-past number, npm-scope dependency on #200, demo clip on #201) and a claim-by-claim fact-check trail back to [`docs/dynamic-thoroughness.md`](docs/dynamic-thoroughness.md), so a revised census invalidates the drafts loudly rather than silently. Every asset leads with the census finding — the reviewer was essentially never wrong and 62% of PRs merged past it anyway — and reaches the product second.
 - **`crosscheck alter <repo>`** (alias `alter-workflow`) — set a per-repo workflow override: `--steps review,fix,recheck`, `--review-only`, `--show`, `--reset`.
 - **`crosscheck run --review-only`** — one-shot alias for `--steps review`.
 
