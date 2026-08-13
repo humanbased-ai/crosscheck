@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **[`docs/trust.md`](docs/trust.md) — the security and mutation model in one place** ([#199](https://github.com/humanbased-ai/crosscheck/issues/199)). Deciding whether to point crosscheck at a real repo previously meant reading the CLI. The doc answers, with the specifics rather than reassurance: the five destinations anything leaves for (and that your diff reaches Anthropic/OpenAI through *their* CLIs under *their* terms, not through a crosscheck upload path); that `watch`'s default tunnel puts a third-party relay in the webhook path, and that `crosscheck run` avoids it entirely; which token scope each command actually needs and why `repo` is coarse; how webhooks are registered, reused across restarts, removed on shutdown — and orphaned by an abnormal exit, with both ways to clear one; what each step can write, step by step, plus the boundaries that always hold (never merges, never touches the base branch, never force-pushes over your work) and the one boundary that is the vendor CLI's to enforce rather than crosscheck's; the read-only first run; three levels of turning auto-fix off; and what standard logs do and do not contain, including why `logs.extended` has no CLI flag.
 - **`crosscheck alter <repo>`** (alias `alter-workflow`) — set a per-repo workflow override: `--steps review,fix,recheck`, `--review-only`, `--show`, `--reset`.
 - **`crosscheck run --review-only`** — one-shot alias for `--steps review`.
 

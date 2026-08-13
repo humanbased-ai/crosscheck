@@ -334,6 +334,7 @@ Deployment mode decides scope: `personal` monitors your own repos and reviews on
 | | |
 |---|---|
 | **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, every flag, complete config reference, FAQ |
+| **[docs/trust.md](./docs/trust.md)** | What leaves your machine, which GitHub permissions are needed, what Crosscheck can and cannot change, and how to try it read-only first |
 | **[docs/dynamic-thoroughness.md](./docs/dynamic-thoroughness.md)** | How Crosscheck picks a model and effort per PR — and the 400-PR census behind it |
 | **[docs/linear-identity.md](./docs/linear-identity.md)** | Linear write-back and the attribution ladder |
 | **[docs/linear-identity-contract.md](./docs/linear-identity-contract.md)** | The identity contract, as a spec for other tools |
