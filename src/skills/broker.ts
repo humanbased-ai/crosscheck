@@ -216,12 +216,28 @@ export function claudeSkillBrokerArgs(session?: SkillActivationSession): string[
   })]
 }
 
+// Every argument codex needs to actually *use* the broker — registering the
+// server is not enough on its own.
+//
+// Codex starts the MCP server and lists its tools under any sandbox, then
+// cancels each tools/call with "user cancelled MCP tool call" unless the sandbox
+// is danger-full-access: an MCP server is a local process outside the sandbox,
+// so calling one is treated as requiring full-access trust, and headless there
+// is nobody to approve it. Measured against codex-cli 0.147 — `-a never`,
+// `--full-auto`, `-s read-only`, `-s workspace-write`, `approval_policy="never"`
+// and per-tool `approval_mode` all leave the call cancelled; only the sandbox
+// setting moves it. Without this, codex logged 0 skill activations across 244
+// production runs while claude logged 131 on the same workflows.
+//
+// This does widen what codex may do with the PR checkout, so it is scoped to
+// sessions that have a broker to reach: no skills, no override.
 export function codexSkillBrokerArgs(session?: SkillActivationSession): string[] {
   if (!session) return []
   const broker = skillBrokerCommand(session)
   return [
     '-c', `mcp_servers.crosscheck.command=${JSON.stringify(broker.command)}`,
     '-c', `mcp_servers.crosscheck.args=${JSON.stringify(broker.args)}`,
+    '-c', 'sandbox_mode="danger-full-access"',
   ]
 }
 

@@ -172,7 +172,26 @@ describe('skill activation broker', () => {
     expect(codexSkillBrokerArgs(session)).toEqual([
       '-c', expect.stringContaining('mcp_servers.crosscheck.command='),
       '-c', expect.stringContaining('mcp_servers.crosscheck.args='),
+      '-c', 'sandbox_mode="danger-full-access"',
     ])
+  })
+
+  // Codex registers the MCP server and lists its tools under any sandbox, then
+  // cancels every tools/call ("user cancelled MCP tool call") unless the sandbox
+  // is danger-full-access. Measured against codex-cli 0.147: -a never,
+  // --full-auto, -s read-only, -s workspace-write, approval_policy="never" and
+  // per-tool approval_mode all leave the call cancelled. Without this arg the
+  // broker is reachable but unusable — which is why codex logged 0 skill
+  // activations across 244 production runs while claude logged 131.
+  it('widens the codex sandbox so broker tool calls are not cancelled', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    expect(codexSkillBrokerArgs(session)).toContain('sandbox_mode="danger-full-access"')
+  })
+
+  // The override is the price of reaching the broker, so it is scoped to exactly
+  // that: no skills, no widened sandbox.
+  it('does not widen the sandbox when there is no session', () => {
+    expect(codexSkillBrokerArgs(undefined)).toEqual([])
   })
 
   it('removes the session endpoint on close', () => {
