@@ -76,12 +76,17 @@ jobs:
         if: steps.ver.outputs.new_tag == ''
         run: echo "No version-worthy commits since last tag — skipping publish."
 
-  # ── Job 2: publish — runs unattended; no approval gate (removed in 79893b5) ──
+  # ── Job 2: publish — gated by the `production` environment ───────────────────
+  # Everything with an outward effect (git tag, npm publish, GitHub Release)
+  # lives in this job, so the gate holds all of it until a reviewer approves.
+  # GitHub cancels an unapproved deployment after 30 days and reports the run as
+  # failed; approve or reject promptly rather than letting one age out.
   publish:
     name: Publish to npm
     needs: compute
     if: needs.compute.outputs.new_tag != ''
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: write        # push git tag and version-bump commit
       id-token: write        # npm provenance

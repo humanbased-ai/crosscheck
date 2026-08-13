@@ -1224,8 +1224,9 @@ post_review:
   auto_fix:
     delivery:
       mode: pull_request      # pull_request | commit | comment
-      # pull_request → fix PR targets original branch; human approves before merge
-      # commit       → fixes pushed directly onto the original PR branch
+      # pull_request → fixes land on the original PR branch; a separate fix PR is
+      #                opened only if that push can't land (branch merged/deleted/protected)
+      # commit       → fixes pushed directly onto the original PR branch (no fallback)
       # comment      → suggested fixes posted as review comments only
       pr_title: "fix: address CR issues in #{original_pr_title}"
       label: cr-autofix       # GitHub label applied to the fix PR
@@ -1531,7 +1532,7 @@ agent opens PR #42  →  opposite vendor reviews  →  issues found?
 | Setting | Default | Why |
 |---|---|---|
 | `fixer: same-as-author` | the vendor that wrote the PR also fixes it | The authoring agent knows its own code and style best |
-| `delivery: pull_request` | opens a new PR, doesn't push directly | You stay in the loop — no code lands without your approval |
+| `delivery: pull_request` | pushes the fix onto the PR's own branch, so the fix, recheck, and approval stay on one PR; opens a separate fix PR only when that push can't land | Keeps everything on the original PR while still covering merged/protected branches |
 | `trigger: on_issues` | only fires when the reviewer found warnings or worse | Skips the fix step on clean PRs |
 | `min_severity: warning` | ignores info/cosmetic findings | Avoids noisy fix PRs for style-only comments |
 
@@ -1677,7 +1678,7 @@ crosscheck run https://github.com/owner/repo/pull/123 --steps review
 
 Yes. Set `post_review.auto_fix.enabled: false` in your config, or set `trigger: never`. You can also raise `min_severity` to `error` to limit fixes to blocking issues only.
 
-To push fixes directly without a separate PR (skipping your review), switch to `delivery: commit`. To get suggested fixes as review comments without any code push, use `delivery: comment`.
+Both `delivery: pull_request` (the default) and `delivery: commit` push the fix directly onto the PR's own branch. The only difference is the fallback: `pull_request` opens a separate fix PR if that push can't land (branch merged, deleted, or protected), whereas `commit` surfaces the push failure instead. To get suggested fixes as review comments without any code push, use `delivery: comment`.
 
 ### Why does the fixer use the same vendor that wrote the PR?
 
