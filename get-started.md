@@ -236,6 +236,8 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
 
 If this step fails, fix the specific auth, clone, reviewer, or comment-posting error before enabling `watch`.
 
+If you'd rather nothing be written to the PR on a first run, use `crosscheck run <pr-url> --dry-run` instead: it clones, reviews, and prints the comment it would post without touching GitHub. (`--dry-run` lives on `run`, `fix`, `recheck`, and `resolve` — not on `review`, which always posts.) [docs/trust.md](./docs/trust.md) covers what leaves your machine at each step, which permissions each command needs, and exactly what `watch` can change.
+
 ## Step 3 — Choose a deployment mode
 
 After one-shot review works, run the guided setup:
