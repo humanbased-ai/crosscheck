@@ -17,6 +17,8 @@ import { execSync } from 'child_process'
 import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/repo-picker.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
+import { initLogger, log as fileLog } from '../lib/logger.js'
+import { LogsConfigSchema } from '../config/schema.js'
 import {
   BUNDLED_SKILL_RECOMMENDATIONS,
   findCompetingSkill,
@@ -813,6 +815,18 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     process.exit(1)
   }
 
+  // Onboard runs before a config exists on a fresh install, so it initialises
+  // logging from the schema defaults (enabled, local files only). Without this the
+  // setup that most needs a record — the first one — writes nothing, and an
+  // abandoned onboard is invisible.
+  initLogger(LogsConfigSchema.parse({}))
+  fileLog({ level: 'info', event: 'onboard_started', command: 'onboard' })
+  // Every path out of onboard reports an outcome, so `started` minus `completed`
+  // is the abandonment count rather than a number that also absorbs crashes.
+  const onboardAbandoned = (stage: string) => {
+    fileLog({ level: 'info', event: 'onboard_completed', command: 'onboard', outcome: 'abandoned', stage })
+  }
+
   console.log(chalk.bold('\ncrosscheck onboard\n'))
 
   // ── Step 1: Auth check ─────────────────────────────────────────────────────
@@ -820,7 +834,10 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log(chalk.dim('  Confirms the CLIs and auth crosscheck needs before it writes anything.'))
 
   const env = await checkEnv()
-  if (!env.ok) process.exit(1)
+  if (!env.ok) {
+    onboardAbandoned('environment_check')
+    process.exit(1)
+  }
   console.log()
 
   // ── Step 2: Deployment mode ────────────────────────────────────────────────
@@ -878,6 +895,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     token = getGithubToken()
   } catch (err: unknown) {
     console.error(chalk.red(err instanceof Error ? err.message : String(err)))
+    onboardAbandoned('github_token')
     process.exit(1)
   }
 
@@ -1216,6 +1234,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     const confirm = await ask(`  Write to config? [Y/n]: `)
     if (confirm.toLowerCase() === 'n') {
       console.log(chalk.dim('  Aborted — no changes written.'))
+      onboardAbandoned('config_write_declined')
       return
     }
   }
@@ -1250,6 +1269,14 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
 
   console.log()
+
+  fileLog({
+    level: 'info', event: 'onboard_completed', command: 'onboard', outcome: 'completed',
+    // Shape of the setup, never its contents: counts, not repo or org names.
+    deployment, repos: selectedRepos.length, orgs: selectedOrgs.length,
+    quality_tier: qualityTier, quality_mode: qualityMode, pipeline: pipelinePreset,
+    tunnel: tunnelBackend, linear: linear !== null,
+  })
 
   // ── Next step hint ─────────────────────────────────────────────────────────
   console.log(chalk.dim('  Run crosscheck watch to start monitoring.'))

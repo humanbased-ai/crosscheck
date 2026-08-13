@@ -26,6 +26,7 @@
   - [diagnose](#crosscheck-diagnose)
   - [optimize](#crosscheck-optimize)
   - [impact](#crosscheck-impact)
+  - [adoption](#crosscheck-adoption)
   - [issue](#crosscheck-issue)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
@@ -977,6 +978,65 @@ crosscheck impact  (all time · 47 reviews)
 | `--since <YYYY-MM-DD>` | Limit the analysis to logs from this date onward |
 | `--json` | Output the full report as JSON |
 | `-c, --config <path>` | Config file path |
+
+---
+
+### `crosscheck adoption`
+
+Reports whether crosscheck is actually being used, and how long a PR waits for a verdict. Where `impact` prices reviews that happened, `adoption` measures activation and reach. Reads from `~/.crosscheck/logs/` — no network calls, nothing transmitted.
+
+```bash
+crosscheck adoption
+crosscheck adoption --since 2026-07-01
+crosscheck adoption --json
+```
+
+```
+crosscheck adoption  (2026-06-15 → 2026-07-14)
+
+  Activation
+  ──────────────────────────────────────────────
+  onboard started            3
+  onboard completed          2
+  abandoned                  1
+
+  Usage
+  ──────────────────────────────────────────────
+  reviews started            51
+  reviews completed          47
+  rechecks completed         12
+  blocking findings posted   19
+  fixes applied              11
+  active repos               6
+
+  Weekly active repos
+  ──────────────────────────────────────────────
+  2026-06-22  ████████          3 repos  14 reviews
+  2026-06-29  ████████████      4 repos  18 reviews
+  2026-07-06  ████████████████  6 repos  15 reviews
+
+  PR open → verdict
+  ──────────────────────────────────────────────
+  median                     22m
+  p90                        1.8h
+  slowest                    2d
+  measured on 41 verdicts
+  ⓘ 6 verdicts had no PR open time in the event — excluded
+
+  First-run failures  (sessions that never reached a verdict)
+  ──────────────────────────────────────────────
+  auth                       2
+
+  ⓘ derived from local logs only (30d retention) — nothing is transmitted. See docs/metrics.md
+```
+
+| Flag | Description |
+|---|---|
+| `--since <YYYY-MM-DD>` | Limit the analysis to logs from this date onward |
+| `--json` | Output the full report as JSON |
+| `-c, --config <path>` | Config file path |
+
+Every field these numbers are derived from is inventoried in **[docs/metrics.md](./docs/metrics.md)**, including what is deliberately never written to disk.
 
 The monetary estimate formula: `(hours_saved × hourly_rate_usd) + (issues_caught × defect_cost_usd)`. Defaults: `$150/hr`, `$150/issue`. Both configurable in `crosscheck.config.yml` under `impact`.
 
