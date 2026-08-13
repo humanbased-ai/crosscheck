@@ -76,17 +76,12 @@ jobs:
         if: steps.ver.outputs.new_tag == ''
         run: echo "No version-worthy commits since last tag — skipping publish."
 
-  # ── Job 2: publish — gated by the `production` environment ───────────────────
-  # Everything with an outward effect (git tag, npm publish, GitHub Release)
-  # lives in this job, so the gate holds all of it until a reviewer approves.
-  # GitHub cancels an unapproved deployment after 30 days and reports the run as
-  # failed; approve or reject promptly rather than letting one age out.
+  # ── Job 2: publish — runs unattended; no approval gate (removed in 79893b5) ──
   publish:
     name: Publish to npm
     needs: compute
     if: needs.compute.outputs.new_tag != ''
     runs-on: ubuntu-latest
-    environment: production
     permissions:
       contents: write        # push git tag and version-bump commit
       id-token: write        # npm provenance
@@ -204,16 +199,22 @@ jobs:
           # an earlier attempt at the same tag.
           git push --force origin "$SYNC_BRANCH"
 
-          # Leave no branch behind when the PR cannot be opened — unreviewable
-          # ci/sync-* branches accumulated for ten releases that way.
-          if ! gh pr create \
+          # Leave no branch behind when the PR cannot be opened for a reason
+          # other than one already being open for this tag — unreviewable
+          # ci/sync-* branches accumulated for ten releases that way. But a
+          # rerun must not close the only open sync PR for this tag.
+          if ! PR_CREATE_OUTPUT="$(gh pr create \
               --base staging \
               --head "$SYNC_BRANCH" \
               --title "chore: sync $NEW_TAG version to staging" \
-              --body "Automated version sync from release $NEW_TAG."; then
-            git push origin --delete "$SYNC_BRANCH" || true
-            echo "::error::Could not open the $NEW_TAG version-sync PR — staging still carries the previous version. Set the RELEASE_TOKEN secret (a PAT with contents+pull-requests write), or bump staging's package.json to $NEW_TAG by hand."
-            exit 1
+              --body "Automated version sync from release $NEW_TAG." 2>&1)"; then
+            echo "$PR_CREATE_OUTPUT"
+            if ! echo "$PR_CREATE_OUTPUT" | grep -qi "already exists"; then
+              git push origin --delete "$SYNC_BRANCH" || true
+              echo "::error::Could not open the $NEW_TAG version-sync PR — staging still carries the previous version. Set the RELEASE_TOKEN secret (a PAT with contents+pull-requests write), or bump staging's package.json to $NEW_TAG by hand."
+              exit 1
+            fi
+            echo "$NEW_TAG sync PR already exists for $SYNC_BRANCH — reusing it."
           fi
 
           gh pr merge "$SYNC_BRANCH" --merge \
