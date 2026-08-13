@@ -14,6 +14,7 @@ import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
+import { verifyReviewedSha, isVerifiedReviewedSha, reviewedShaRejection } from '../github/reviewed-sha.js'
 import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
 import { shouldPostToLinear } from '../linear/comment.js'
@@ -1173,6 +1174,29 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         try {
           annotationSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
         } catch { /* fall back to pr.head.sha if git is unavailable */ }
+
+        // ...but the clone's HEAD is only trustworthy once it is in the repo. A fix
+        // commit whose push failed leaves HEAD one commit ahead of the remote, and
+        // stamping it attributes this verdict to code that does not exist — an APPROVE
+        // on a phantom sha clears the previous BLOCK and reads as routine on the PR
+        // page. Refuse to post rather than post an unattributable verdict: a missing
+        // review is recoverable (the run fails, the pending status releases as
+        // failure, the PR stays blocked), a phantom approval is not.
+        const shaVerification = await verifyReviewedSha(octokit, owner, repoName, prNumber, annotationSha)
+        if (!isVerifiedReviewedSha(shaVerification.status)) {
+          const rejection = reviewedShaRejection(shaVerification, annotationSha, verdict)
+          fileLog({ level: 'error', event: 'verdict_sha_unverified', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, verdict, sha: annotationSha, head_sha: shaVerification.headSha, verification: shaVerification.status, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+          log(chalk.red(`✗ ${rejection}`))
+          // The review itself cost vendor tokens — surface it rather than lose it.
+          log(chalk.dim(`\n--- unposted review ---\n${commentBody}\n--- end ---`))
+          throw new Error(rejection)
+        }
+        if (shaVerification.status === 'descendant') {
+          // The reviewed commit is real but ahead of the PR head — the fix landed on a
+          // separate auto-fix branch. Recorded so a verdict that does not cover HEAD is
+          // explicable from the log rather than looking like the head-matching case.
+          fileLog({ level: 'warn', event: 'verdict_sha_off_head', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, verdict, sha: annotationSha, head_sha: shaVerification.headSha, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+        }
 
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
