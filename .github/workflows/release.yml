@@ -204,16 +204,22 @@ jobs:
           # an earlier attempt at the same tag.
           git push --force origin "$SYNC_BRANCH"
 
-          # Leave no branch behind when the PR cannot be opened — unreviewable
-          # ci/sync-* branches accumulated for ten releases that way.
-          if ! gh pr create \
+          # Leave no branch behind when the PR cannot be opened for a reason
+          # other than one already being open for this tag — unreviewable
+          # ci/sync-* branches accumulated for ten releases that way. But a
+          # rerun must not close the only open sync PR for this tag.
+          if ! PR_CREATE_OUTPUT="$(gh pr create \
               --base staging \
               --head "$SYNC_BRANCH" \
               --title "chore: sync $NEW_TAG version to staging" \
-              --body "Automated version sync from release $NEW_TAG."; then
-            git push origin --delete "$SYNC_BRANCH" || true
-            echo "::error::Could not open the $NEW_TAG version-sync PR — staging still carries the previous version. Set the RELEASE_TOKEN secret (a PAT with contents+pull-requests write), or bump staging's package.json to $NEW_TAG by hand."
-            exit 1
+              --body "Automated version sync from release $NEW_TAG." 2>&1)"; then
+            echo "$PR_CREATE_OUTPUT"
+            if ! echo "$PR_CREATE_OUTPUT" | grep -qi "already exists"; then
+              git push origin --delete "$SYNC_BRANCH" || true
+              echo "::error::Could not open the $NEW_TAG version-sync PR — staging still carries the previous version. Set the RELEASE_TOKEN secret (a PAT with contents+pull-requests write), or bump staging's package.json to $NEW_TAG by hand."
+              exit 1
+            fi
+            echo "$NEW_TAG sync PR already exists for $SYNC_BRANCH — reusing it."
           fi
 
           gh pr merge "$SYNC_BRANCH" --merge \

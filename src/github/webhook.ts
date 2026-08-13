@@ -18,6 +18,11 @@ export interface PREvent {
     user: { login: string }
     // Present on real webhook deliveries; used by the strategy's risk class.
     labels?: Array<{ name: string }>
+    // ISO timestamp the PR was opened. Feeds the open→verdict latency in
+    // `crosscheck adoption`. Optional: absent from hand-built events in tests
+    // and from third-party redeliveries, in which case the metric skips the PR
+    // rather than guessing a start time.
+    created_at?: string
   }
   repository: {
     name: string
