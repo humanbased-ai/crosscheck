@@ -179,7 +179,7 @@ Full walkthrough: **[docs/linear-identity.md](./docs/linear-identity.md)**.
 | `crosscheck alter <repo>` | Set a per-repo pipeline depth |
 | `crosscheck detect-step <pr>` | Show step history and the next step to run |
 | `crosscheck linear-test [issue]` | Dry-run Linear write-back |
-| `crosscheck diagnose` / `optimize` / `impact` / `issue` | Analyse logs, tune config, report value, file tickets |
+| `crosscheck diagnose` / `optimize` / `impact` / `adoption` / `issue` | Analyse logs, tune config, report value, report usage, file tickets |
 
 Multi-PR forms work where sensible — comma lists, bare numbers, and ranges:
 

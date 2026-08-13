@@ -14,6 +14,7 @@ import { runStatus } from './commands/status.js'
 import { runDiagnose } from './commands/diagnose.js'
 import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
+import { runAdoption } from './commands/adoption.js'
 import { runIssue } from './commands/issue.js'
 import { runRunSpec, runRecheckSpec, runFixSpec, runResolveSpec, type RunSpecOpts } from './commands/run.js'
 import { runDetectStep } from './commands/detect-step.js'
@@ -299,6 +300,14 @@ program
   .option('--money', 'include a rough monetary estimate')
   .option('-c, --config <path>', 'config file path')
   .action((opts: { json?: boolean; since?: string; money?: boolean; config?: string }) => void runImpact(opts))
+
+program
+  .command('adoption')
+  .description('Report activation, usage, weekly active repos, PR-open-to-verdict latency, and first-run failures from local logs')
+  .option('--json', 'output full report as JSON')
+  .option('--since <date>', 'only analyze logs from this date onward (YYYY-MM-DD)')
+  .option('-c, --config <path>', 'config file path')
+  .action((opts: { json?: boolean; since?: string; config?: string }) => void runAdoption(opts))
 
 program
   .command('issue')

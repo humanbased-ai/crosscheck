@@ -26,6 +26,7 @@ import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { resolveReviewStrategy, escalate, clampToLevels, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
+import { prOpenToVerdictMs } from '../lib/adoption.js'
 import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
@@ -1132,7 +1133,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ? `${buildRetriedReviewBanner(retried.timeoutMs, retried.delayMs)}\n\n${baseBody}`
         : baseBody
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, skills_activated: activatedSkills.map(skill => skill.name), ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
+      // How long the PR waited for a verdict, measured from when its author opened
+      // it — the number a team feels, as distinct from duration_ms (how long the
+      // reviewer ran). Omitted rather than guessed when the PR event carried no
+      // created_at, so the metric never mixes real latencies with invented ones.
+      const openToVerdictMs = prOpenToVerdictMs(pr.created_at, verdict)
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, ...(openToVerdictMs !== undefined && { open_to_verdict_ms: openToVerdictMs }), tokens_used: tokensUsed, skills_activated: activatedSkills.map(skill => skill.name), ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
@@ -1214,6 +1220,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
+
+        // A posted verdict that blocks the merge is the product's whole reason to
+        // exist, so it gets its own event rather than being re-derived downstream.
+        // BLOCK blocks by definition; a NEEDS WORK that reached here survived the
+        // severity gate, which only lets it through when a Critical/High/Medium
+        // finding backs it — a nit-only review was already downgraded to APPROVE.
+        // Logged only here, after the comment actually posted, so dry runs and
+        // failed postReviewComment calls are never counted as posted findings.
+        if (verdict === 'BLOCK' || verdict === 'NEEDS WORK') {
+          fileLog({ level: 'info', event: 'blocking_finding_posted', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+        }
 
         // Mirror the verdict onto the PR's Linear issue. `run` and `watch` both
         // land here, so this is the path that matters — reviews posted from
