@@ -60,3 +60,54 @@ describe('classifyError — SSL and auth failure patterns from real failures', (
     expect(classifyError('auth failure: session expired')).toBe('auth')
   })
 })
+
+// The clone URL embeds `x-access-token` as its *username*, and the redactor keeps
+// that literal while hiding the value. Every failed clone therefore carries the
+// substring `token`, which the broad auth pattern matched — so a clone that failed
+// for any reason at all was filed as an auth failure. In the logs behind this fix,
+// the identical SSL error read `network` when it happened on a push (no URL in the
+// message) and `auth` when it happened on a clone. 30 of them.
+describe('classifyError — a failing clone is classified by its cause, not its URL', () => {
+  const cloneCommand =
+    "Command failed with exit code 128: git -c 'http.postBuffer=524288000' -c 'http.lowSpeedLimit=1000' " +
+    "-c 'http.keepAlive=true' clone '--depth=50' --quiet " +
+    "'https://x-access-token:[REDACTED]@github.com/acme/web.git' /tmp/crosscheck-repo-3BdU8R"
+
+  it('classifies an SSL failure during clone as network, not auth', () => {
+    expect(classifyError(
+      `${cloneCommand}\n\nfatal: unable to access 'https://github.com/acme/web.git/': ` +
+      'LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443',
+    )).toBe('network')
+  })
+
+  it('classifies a clone that timed out as timeout, not auth', () => {
+    expect(classifyError(`${cloneCommand}\n\nfatal: the remote end hung up unexpectedly\ntimed out`)).toBe('timeout')
+  })
+
+  it('classifies a transient HTTP/2 framing clone failure as git', () => {
+    expect(classifyError(`${cloneCommand}\n\nerror: RPC failed; curl 16 HTTP/2 framing layer error`)).toBe('git')
+  })
+
+  it('still classifies a clone rejected for bad credentials as auth', () => {
+    expect(classifyError(
+      `${cloneCommand}\n\nfatal: Authentication failed for 'https://github.com/acme/web.git/'`,
+    )).toBe('auth')
+  })
+
+  it('still classifies a clone that could not read credentials as auth', () => {
+    expect(classifyError(`${cloneCommand}\n\nfatal: could not read Username for 'https://github.com': terminal prompts disabled`)).toBe('auth')
+  })
+
+  it('still classifies an SSH clone rejected for a bad key as auth', () => {
+    expect(classifyError(
+      "Command failed with exit code 128: git clone 'git@github.com:acme/web.git'\n\n" +
+      'git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.',
+    )).toBe('auth')
+  })
+
+  it('still classifies a repo the token cannot see as permission', () => {
+    expect(classifyError(
+      `${cloneCommand}\n\nremote: Repository not found.\nfatal: 403 Forbidden`,
+    )).toBe('permission')
+  })
+})
