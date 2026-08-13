@@ -12,6 +12,7 @@ import {
   countCrosscheckCommitsForPRDetailed,
   buildWorkflowCompleteEvent,
   resolveFixVendor,
+  resolveConflictResolveVendor,
 } from '../lib/runner.js'
 
 describe('isRetryableFixError', () => {
@@ -445,6 +446,96 @@ describe('resolveFixVendor', () => {
       // reviewer:origin + origin:human + smartSwitchFallback='codex' → resolveReviewer returns
       // 'codex' directly, so usedHumanFallback is false even though origin is human
       expect(resolveFixVendor('origin', 'human', cfg(false, true), 'codex')).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+  })
+})
+
+describe('resolveConflictResolveVendor', () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
+    vendors: {
+      claude: { enabled: claudeEnabled },
+      codex: { enabled: codexEnabled },
+    },
+    routing: { fallback_reviewer: fallbackReviewer },
+  }) as any
+
+  describe('human-origin fallback — the no_vendor regression', () => {
+    // The default workflow gives conflict-resolve `reviewer: origin`. A PR whose
+    // origin cannot be attributed resolved to null and skipped with 'no_vendor',
+    // even with routing.fallback_reviewer set — the fix step honoured it, this
+    // step did not.
+    it('explicit claude: resolves instead of skipping with no_vendor', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true, 'claude')))
+        .toEqual({ vendor: 'claude', usedHumanFallback: true })
+    })
+
+    it('auto: picks claude even with codex enabled — codex cannot resolve conflicts', () => {
+      // Diverges from resolveFixVendor's codex-first auto path on purpose: routing
+      // to codex here only trades a 'no_vendor' skip for a
+      // 'codex_conflict_resolve_unsupported' one.
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true)))
+        .toEqual({ vendor: 'claude', usedHumanFallback: true })
+    })
+
+    it('auto with claude disabled: no vendor supports the step', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(false, true)))
+        .toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('explicit codex: honoured, so the caller reports the precise unsupported skip', () => {
+      // An explicit fallback_reviewer is an operator decision. Silently swapping it
+      // for claude would hide a misconfiguration behind a step that works anyway.
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true, 'codex')))
+        .toEqual({ vendor: 'codex', usedHumanFallback: true })
+    })
+
+    it('null fallback_reviewer: still skips — opting out stays opt-out', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true, null)))
+        .toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('explicit claude but claude disabled: no fallback invented', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(false, true, 'claude')))
+        .toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('returns null when both vendors disabled regardless of fallback_reviewer', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(false, false)))
+        .toEqual({ vendor: null, usedHumanFallback: false })
+    })
+  })
+
+  describe('scoped to reviewer:origin only', () => {
+    it('reviewer:claude with human origin resolves directly, no fallback', () => {
+      expect(resolveConflictResolveVendor('claude', 'human', cfg(true, true)))
+        .toEqual({ vendor: 'claude', usedHumanFallback: false })
+    })
+
+    it('reviewer:auto with human origin uses the resolveReviewer auto path unchanged', () => {
+      // 'auto' encodes explicit intent, so it keeps resolveReviewer's codex-first
+      // path and the caller skips with codex_conflict_resolve_unsupported.
+      expect(resolveConflictResolveVendor('auto', 'human', cfg(true, true)))
+        .toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+  })
+
+  describe('attributed origins — unchanged behaviour', () => {
+    it('claude origin resolves to claude', () => {
+      expect(resolveConflictResolveVendor('origin', 'claude', cfg(true, true)))
+        .toEqual({ vendor: 'claude', usedHumanFallback: false })
+    })
+
+    it('codex origin resolves to codex, no human fallback', () => {
+      expect(resolveConflictResolveVendor('origin', 'codex', cfg(true, true)))
+        .toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+  })
+
+  describe('smartSwitchFallback takes precedence', () => {
+    it('resolves via resolveReviewer before the human-origin branch fires', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true, 'claude'), 'codex'))
+        .toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
   })
 })

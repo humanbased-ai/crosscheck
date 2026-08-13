@@ -358,15 +358,20 @@ function resolveLimitFallbackVendor(failedVendor: Vendor, stepType: string, conf
   return config.vendors[fallback].enabled && supportsStep(fallback, stepType) ? fallback : null
 }
 
-// Extends resolveReviewer with a human-origin fallback for the fix step.
+// Extends resolveReviewer with a human-origin fallback for the steps that write
+// code (fix, conflict-resolve).
 // Scoped to reviewer: 'origin' only — other reviewer types (claude, codex, auto)
 // already encode explicit vendor intent and need no fallback.
 // When origin is 'human' and no vendor resolved, honours routing.fallback_reviewer
-// so the fix step respects the same routing intent as the review step.
-// 'auto' mirrors resolveReviewer's auto path (config-enabled check, codex-first)
-// without async auth calls. null disables the fallback entirely.
-// Exported so callers can detect when the fallback was applied (e.g. for logging).
-export function resolveFixVendor(
+// so the step respects the same routing intent as the review step.
+// 'auto' resolves against the vendors that can actually run stepType, so a step
+// only one vendor supports doesn't fall back to the other and skip a line later.
+// An explicit 'claude'/'codex' is an operator decision and is honoured as written
+// even when that vendor cannot run the step — the caller then reports a precise
+// unsupported-step skip instead of silently substituting a different vendor.
+// null disables the fallback entirely.
+function resolveStepVendor(
+  stepType: string,
   stepReviewer: string,
   origin: PROrigin,
   config: Config,
@@ -381,11 +386,35 @@ export function resolveFixVendor(
   if (fb === 'claude') humanFallback = config.vendors.claude.enabled ? 'claude' : null
   else if (fb === 'codex') humanFallback = config.vendors.codex.enabled ? 'codex' : null
   else if (fb !== null) {
-    // 'auto': prefer codex then claude, same as resolveReviewer's auto path
-    humanFallback = config.vendors.codex.enabled ? 'codex' : config.vendors.claude.enabled ? 'claude' : null
+    // 'auto': prefer codex then claude, same as resolveReviewer's auto path,
+    // narrowed to vendors that support this step type.
+    const usable = (v: Vendor): boolean => config.vendors[v].enabled && supportsStep(v, stepType)
+    humanFallback = usable('codex') ? 'codex' : usable('claude') ? 'claude' : null
   }
   if (!humanFallback) return { vendor: null, usedHumanFallback: false }
   return { vendor: humanFallback, usedHumanFallback: true }
+}
+
+// Exported so callers can detect when the fallback was applied (e.g. for logging).
+export function resolveFixVendor(
+  stepReviewer: string,
+  origin: PROrigin,
+  config: Config,
+  fallback?: 'claude' | 'codex',
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean } {
+  return resolveStepVendor('fix', stepReviewer, origin, config, fallback)
+}
+
+// The default workflow gives conflict-resolve `reviewer: origin`, so every PR
+// crosscheck cannot attribute resolved to null here and skipped with 'no_vendor'
+// — the fix step honoured routing.fallback_reviewer, this one did not.
+export function resolveConflictResolveVendor(
+  stepReviewer: string,
+  origin: PROrigin,
+  config: Config,
+  fallback?: 'claude' | 'codex',
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean } {
+  return resolveStepVendor('conflict-resolve', stepReviewer, origin, config, fallback)
 }
 
 // ─── pr_complexity helpers ────────────────────────────────────────────────────
@@ -1568,7 +1597,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      // resolveConflictResolveVendor extends resolveReviewer with the same human-origin
+      // fallback the fix step uses, so a PR crosscheck cannot attribute still gets its
+      // conflicts resolved instead of skipping with 'no_vendor'.
+      const { vendor, usedHumanFallback } = resolveConflictResolveVendor(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      if (usedHumanFallback && vendor) {
+        fileLog({ level: 'info', event: 'conflict_resolve_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: 'none', to: vendor, reason: 'human_origin' })
+      }
       if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
       if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
       // Conflict-resolve is mechanical text surgery bounded by the markers —
