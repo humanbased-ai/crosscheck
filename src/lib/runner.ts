@@ -1139,15 +1139,6 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const openToVerdictMs = prOpenToVerdictMs(pr.created_at, verdict)
       fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, ...(openToVerdictMs !== undefined && { open_to_verdict_ms: openToVerdictMs }), tokens_used: tokensUsed, skills_activated: activatedSkills.map(skill => skill.name), ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
 
-      // A posted verdict that blocks the merge is the product's whole reason to
-      // exist, so it gets its own event rather than being re-derived downstream.
-      // BLOCK blocks by definition; a NEEDS WORK that reached here survived the
-      // severity gate, which only lets it through when a Critical/High/Medium
-      // finding backs it — a nit-only review was already downgraded to APPROVE.
-      if (verdict === 'BLOCK' || verdict === 'NEEDS WORK') {
-        fileLog({ level: 'info', event: 'blocking_finding_posted', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
-      }
-
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
         ? { recheckVerdict: verdict, phase: donePhase, recheckTokens: tokensUsed, recheckReviewer: reviewer, qualityTier: quality.tier }
@@ -1205,6 +1196,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
+
+        // A posted verdict that blocks the merge is the product's whole reason to
+        // exist, so it gets its own event rather than being re-derived downstream.
+        // BLOCK blocks by definition; a NEEDS WORK that reached here survived the
+        // severity gate, which only lets it through when a Critical/High/Medium
+        // finding backs it — a nit-only review was already downgraded to APPROVE.
+        // Logged only here, after the comment actually posted, so dry runs and
+        // failed postReviewComment calls are never counted as posted findings.
+        if (verdict === 'BLOCK' || verdict === 'NEEDS WORK') {
+          fileLog({ level: 'info', event: 'blocking_finding_posted', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+        }
 
         // Mirror the verdict onto the PR's Linear issue. `run` and `watch` both
         // land here, so this is the path that matters — reviews posted from

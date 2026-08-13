@@ -17,7 +17,10 @@ function readLogLines(sinceDate?: string): { files: string[]; lines: AdoptionLog
   for (const file of files) {
     for (const line of readFileSync(file, 'utf8').split('\n')) {
       if (!line.trim()) continue
-      try { lines.push(JSON.parse(line) as AdoptionLogLine) } catch { /* skip malformed */ }
+      try {
+        const parsed: unknown = JSON.parse(line)
+        if (parsed !== null && typeof parsed === 'object') lines.push(parsed as AdoptionLogLine)
+      } catch { /* skip malformed */ }
     }
   }
   return { files, lines }

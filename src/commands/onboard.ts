@@ -816,10 +816,13 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
 
   // Onboard runs before a config exists on a fresh install, so it initialises
-  // logging from the schema defaults (enabled, local files only). Without this the
-  // setup that most needs a record — the first one — writes nothing, and an
-  // abandoned onboard is invisible.
-  initLogger(LogsConfigSchema.parse({}))
+  // logging from the schema defaults (enabled, local files only) unless an
+  // existing config already opted out or set a custom retention — otherwise
+  // re-running onboard on an existing `logs.enabled: false` install would start
+  // writing logs again, and could delete logs older than the default retention.
+  const preOnboardConfigPath = opts.config ?? resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
+  const preOnboardConfig = existsSync(preOnboardConfigPath) ? loadConfig(preOnboardConfigPath) : null
+  initLogger(preOnboardConfig?.logs ?? LogsConfigSchema.parse({}))
   fileLog({ level: 'info', event: 'onboard_started', command: 'onboard' })
   // Every path out of onboard reports an outcome, so `started` minus `completed`
   // is the abandonment count rather than a number that also absorbs crashes.
@@ -844,8 +847,8 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log(chalk.bold('Step 2 — who you review for'))
   console.log(chalk.dim('  Personal reviews only PRs you author. Team reviews every author in the org.'))
 
-  const configPath = opts.config ?? resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
-  const existingConfig = existsSync(configPath) ? loadConfig(configPath) : null
+  const configPath = preOnboardConfigPath
+  const existingConfig = preOnboardConfig
   // Parsed config always carries a `tier` and a `mode` (schema defaults), so
   // read the raw file to tell an explicit choice from a pre-`mode` config.
   const rawQuality = ((): { tier?: string; mode?: string } => {
