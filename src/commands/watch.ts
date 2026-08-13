@@ -16,6 +16,7 @@ import {
   listUserRepos,
   checkRepoAccessible,
 } from '../github/client.js'
+import { closeSupersededAutoFixPRs } from '../github/superseded-fix-pr.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import {
   loadConfig,
@@ -971,6 +972,33 @@ export async function runWatch(opts: WatchOpts = {}) {
         }
       } catch (err: unknown) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'comment_trigger' }, err)
+      }
+    },
+    async (event: PREvent) => {
+      const owner = event.repository.owner.login
+      const repoName = event.repository.name
+      const prNumber = event.number
+
+      try {
+        const octokit = createGithubClient(token)
+        const outcomes = await closeSupersededAutoFixPRs(
+          octokit, owner, repoName, prNumber,
+          event.pull_request.merge_commit_sha ?? null,
+        )
+        for (const outcome of outcomes) {
+          fileLog({
+            level: outcome.status === 'failed' ? 'warn' : 'info',
+            event: 'auto_fix_pr_superseded',
+            repo: `${owner}/${repoName}`, pr: prNumber,
+            fix_pr: outcome.prNumber, status: outcome.status,
+            ...(outcome.reason && { reason: outcome.reason }),
+          })
+          if (outcome.status === 'closed') {
+            bLog(chalk.dim(fmtTime()) + `  closed superseded auto-fix PR ${owner}/${repoName}#${outcome.prNumber} (${prNumber} merged)`)
+          }
+        }
+      } catch (err: unknown) {
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'auto_fix_supersede' }, err)
       }
     },
   )

@@ -14,6 +14,7 @@ import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
+import { autoFixBranchName, autoFixPRIntro } from '../github/superseded-fix-pr.js'
 import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
 import { shouldPostToLinear } from '../linear/comment.js'
@@ -1578,7 +1579,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         } else {
           // Fallback: the fix could not land on the PR branch. Push the same commit to
           // a dedicated branch and open a follow-up PR targeting the original branch.
-          const fixBranch = `fix/cr-${prNumber}-review-issues`
+          const fixBranch = autoFixBranchName(prNumber)
           execSync(`git push origin HEAD:${fixBranch}`, {
             cwd: tmpDir,
             env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
@@ -1592,7 +1593,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             base: pr.head.ref,
             title: fixPrTitle,
             body: [
-              `Auto-fix by crosscheck for CR issues found in #${prNumber}.`,
+              autoFixPRIntro(prNumber),
               '',
               `Review: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
               '',
