@@ -25,6 +25,7 @@ import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { resolveReviewStrategy, escalate, clampToLevels, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
+import { planAutoFixDelivery, forceWithLeaseArgs, parseLsRemoteOid, isLeaseRejection } from '../lib/auto-fix-branch.js'
 import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
@@ -1576,38 +1577,116 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           }
           results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
         } else {
-          // Fallback: the fix could not land on the PR branch. Push the same commit to
-          // a dedicated branch and open a follow-up PR targeting the original branch.
+          // Fallback: the fix could not land on the PR branch. Push the same commit to a
+          // dedicated branch and open a follow-up PR targeting the original branch.
           const fixBranch = `fix/cr-${prNumber}-review-issues`
-          execSync(`git push origin HEAD:${fixBranch}`, {
-            cwd: tmpDir,
-            env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
-          })
+          const gitEnv = { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token }
           const octokit = createGithubClient(token)
+
+          // Ask whether the intended base still exists BEFORE pushing anything. The most
+          // common reason the PR-branch push failed is that the PR merged and GitHub
+          // deleted its branch — and `pulls.create` rejects a missing base with
+          // `field: base, code: invalid`. That used to throw after the branch was already
+          // pushed, losing the fix and orphaning the branch (19 times in logged runs).
+          let baseBranchExists = true
+          try {
+            await octokit.rest.repos.getBranch({ owner, repo: repoName, branch: pr.head.ref })
+          } catch (err: unknown) {
+            if ((err as { status?: number })?.status === 404) baseBranchExists = false
+            else throw err
+          }
+          const delivery = planAutoFixDelivery(baseBranchExists, pr.head.ref)
+
+          if (delivery.kind === 'comment') {
+            // A PR cut from this snapshot would be stale the moment it opened — it is
+            // exactly the artifact the superseded-auto-fix cleanup exists to close. Post
+            // the fix as a diff instead, so the work is still delivered and reviewable.
+            let patch = ''
+            try { patch = execSync('git diff HEAD~1', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* fall through to the empty check */ }
+            fileLog({ level: 'warn', event: 'fix_pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, branch: pr.head.ref, reason: delivery.reason })
+            log(chalk.yellow(`⚠  ${pr.head.ref} no longer exists — posting the fix as a diff instead of opening a stale follow-up PR`))
+            if (patch) {
+              await octokit.rest.issues.createComment({
+                owner, repo: repoName, issue_number: prNumber,
+                body: [
+                  '### Suggested fixes (crosscheck auto-fix)',
+                  '',
+                  `\`${pr.head.ref}\` no longer exists, so this PR has merged and there is no branch to land on. The fix is below rather than in a follow-up PR — a PR cut from the pre-merge state would reintroduce whatever the merged version changed.`,
+                  '',
+                  '```diff',
+                  patch.slice(0, 16000),
+                  '```',
+                  '',
+                  fixAttributionFooter(),
+                ].join('\n'),
+              })
+            }
+            onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+            fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'comment', tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
+            results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
+            continue
+          }
+
+          // A fix branch left behind by an earlier round of this PR made a plain push
+          // non-fast-forward and lost the fix (12 times in logged runs). Replace it under
+          // a lease: this round's fix is built on the newer PR head and supersedes it,
+          // and the lease still refuses if anything other than us moved the branch.
+          let remoteOid: string | null = null
+          try {
+            remoteOid = parseLsRemoteOid(execFileSync('git', ['ls-remote', '--heads', 'origin', fixBranch], { cwd: tmpDir, env: gitEnv, encoding: 'utf8' }))
+          } catch { /* treat an unreadable remote as "branch absent"; the lease catches a wrong guess */ }
+          try {
+            execFileSync('git', forceWithLeaseArgs(fixBranch, remoteOid), { cwd: tmpDir, env: gitEnv, stdio: 'pipe' })
+          } catch (pushErr: unknown) {
+            const pushMsg = pushErr instanceof Error ? pushErr.message : String(pushErr)
+            fileLog({
+              level: 'error', event: 'fix_branch_push_failed', repo: `${owner}/${repoName}`, pr: prNumber,
+              branch: fixBranch, lease: remoteOid ?? 'absent',
+              reason: isLeaseRejection(pushMsg) ? 'lease_rejected' : 'push_failed',
+              error: pushMsg.slice(0, 500),
+            })
+            throw pushErr
+          }
+          if (remoteOid !== null) {
+            fileLog({ level: 'info', event: 'fix_branch_replaced', repo: `${owner}/${repoName}`, pr: prNumber, branch: fixBranch, previous_sha: remoteOid, sha: newSha })
+          }
+
           const fixPrTitle = config.post_review.auto_fix.delivery.pr_title.replace('#{original_pr_title}', pr.title)
-          const { data: fixPr } = await octokit.rest.pulls.create({
-            owner,
-            repo: repoName,
-            head: fixBranch,
-            base: pr.head.ref,
-            title: fixPrTitle,
-            body: [
-              `Auto-fix by crosscheck for CR issues found in #${prNumber}.`,
-              '',
-              `Review: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
-              '',
-              fixAttributionFooter(),
-            ].join('\n'),
+          // An earlier round may already have an open PR from this branch; the force-push
+          // above updated it, so opening a second one would be rejected as a duplicate.
+          const { data: existingFixPrs } = await octokit.rest.pulls.list({
+            owner, repo: repoName, state: 'open', head: `${owner}:${fixBranch}`,
           })
+          let fixPrNumber: number
+          if (existingFixPrs.length > 0) {
+            fixPrNumber = existingFixPrs[0].number
+            fileLog({ level: 'info', event: 'fix_pr_updated', repo: `${owner}/${repoName}`, pr: prNumber, fix_pr: fixPrNumber, sha: newSha })
+          } else {
+            const { data: fixPr } = await octokit.rest.pulls.create({
+              owner,
+              repo: repoName,
+              head: fixBranch,
+              base: delivery.base,
+              title: fixPrTitle,
+              body: [
+                `Auto-fix by crosscheck for CR issues found in #${prNumber}.`,
+                '',
+                `Review: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
+                '',
+                fixAttributionFooter(),
+              ].join('\n'),
+            })
+            fixPrNumber = fixPr.number
+          }
           if (config.post_review.auto_fix.delivery.label) {
             try {
               await octokit.rest.issues.addLabels({
-                owner, repo: repoName, issue_number: fixPr.number, labels: [config.post_review.auto_fix.delivery.label],
+                owner, repo: repoName, issue_number: fixPrNumber, labels: [config.post_review.auto_fix.delivery.label],
               })
             } catch { /* label may not exist in this repo — skip */ }
           }
           onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-          fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
+          fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPrNumber, tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
           results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
         }
 
