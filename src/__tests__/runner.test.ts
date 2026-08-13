@@ -14,6 +14,7 @@ import {
   resolveFixVendor,
   resolveConflictResolveVendor,
   summariseStepOutcomes,
+  mergeStepOutcomes,
   resolveFixLanding,
 } from '../lib/runner.js'
 import type { StepResult } from '../lib/workflow.js'
@@ -615,5 +616,56 @@ describe('summariseStepOutcomes', () => {
 
   it('returns empty lists when no step was dispatched', () => {
     expect(summariseStepOutcomes([], results({}))).toEqual({ ran: [], skipped: [] })
+  })
+})
+
+describe('mergeStepOutcomes', () => {
+  // The crazy/halfcrazy loops re-enter runWorkflow, so the completion line has to
+  // reflect the whole invocation. Reporting only the first round called a run
+  // that later applied a fix "no step ran".
+  it('counts a step that ran in a later round as ran', () => {
+    const merged = mergeStepOutcomes(
+      { ran: [], skipped: [{ step: 'fix', reason: 'no_review_comment' }] },
+      { ran: ['fix'], skipped: [] },
+    )
+    expect(merged).toEqual({ ran: ['fix'], skipped: [] })
+  })
+
+  it('keeps a step skipped when it skipped in every round', () => {
+    const merged = mergeStepOutcomes(
+      { ran: [], skipped: [{ step: 'conflict-resolve', reason: 'no_vendor' }] },
+      { ran: [], skipped: [{ step: 'conflict-resolve', reason: 'no_vendor' }] },
+    )
+    expect(merged?.skipped).toEqual([{ step: 'conflict-resolve', reason: 'no_vendor' }])
+  })
+
+  // Listing one step twice reads as two distinct problems.
+  it('reports a repeatedly skipped step once, with its latest reason', () => {
+    const merged = mergeStepOutcomes(
+      { ran: [], skipped: [{ step: 'fix', reason: 'when_condition' }] },
+      { ran: [], skipped: [{ step: 'fix', reason: 'no_vendor' }] },
+    )
+    expect(merged?.skipped).toEqual([{ step: 'fix', reason: 'no_vendor' }])
+  })
+
+  it('does not duplicate a step that ran in both rounds', () => {
+    const merged = mergeStepOutcomes({ ran: ['review'], skipped: [] }, { ran: ['review'], skipped: [] })
+    expect(merged?.ran).toEqual(['review'])
+  })
+
+  it('keeps first-seen ordering across both sides', () => {
+    const merged = mergeStepOutcomes(
+      { ran: ['review'], skipped: [{ step: 'fix', reason: 'when_condition' }] },
+      { ran: ['recheck'], skipped: [{ step: 'conflict-resolve', reason: 'no_conflicts' }] },
+    )
+    expect(merged?.ran).toEqual(['review', 'recheck'])
+    expect(merged?.skipped.map(s => s.step)).toEqual(['fix', 'conflict-resolve'])
+  })
+
+  it('passes through when either side is absent', () => {
+    const only = { ran: ['review'], skipped: [] }
+    expect(mergeStepOutcomes(undefined, only)).toBe(only)
+    expect(mergeStepOutcomes(only, undefined)).toBe(only)
+    expect(mergeStepOutcomes(undefined, undefined)).toBeUndefined()
   })
 })

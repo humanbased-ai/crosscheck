@@ -14,7 +14,7 @@ import { enrichIssueContext } from '../issues/enrich.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { hintForError } from '../lib/remediation.js'
-import { runWorkflow, type StepOutcomes } from '../lib/runner.js'
+import { runWorkflow, mergeStepOutcomes } from '../lib/runner.js'
 import { isLinearConfigError, resolveLinearAuth } from '../linear/identity.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, linearWritePossible, type WorkflowStep } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
@@ -54,25 +54,6 @@ function meetsCrazyStopCondition(verdict: string | null, mode: 'crazy' | 'halfcr
   return verdict !== 'BLOCK'
 }
 
-// Merge two StepOutcomes for cross-round accumulation. A step that ran in any
-// round is counted as ran; a step is skipped only if it was skipped in every
-// round it was dispatched and never ran.
-function mergeStepOutcomes(
-  base: StepOutcomes | undefined,
-  next: StepOutcomes | undefined,
-): StepOutcomes | undefined {
-  if (!base) return next
-  if (!next) return base
-  const ranSet = new Set([...base.ran, ...next.ran])
-  const merged: StepOutcomes = {
-    ran: [...ranSet],
-    skipped: [
-      ...base.skipped.filter(s => !ranSet.has(s.step)),
-      ...next.skipped.filter(s => !ranSet.has(s.step)),
-    ],
-  }
-  return merged
-}
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)

@@ -90,6 +90,45 @@ describe('origin detection recognises crosscheck-authored work', () => {
   it('leaves an ordinary human PR body undetected', () => {
     expect(detectOriginFromBody('Fixed the crosscheck config so the reviewer picks up.', buildConfig())).toBeNull()
   })
+
+  // Recognising crosscheck's own output is a fact about that output, not a
+  // routing preference, so it does not live in routing.*_reviews_patterns: Zod
+  // defaults apply only when a field is absent, so an install that pinned its
+  // own pattern list would never receive these and would keep reading its own
+  // fix PRs as human — the exact misclassification this fixes.
+  const pinnedPatterns = buildConfig({
+    routing: { codex_reviews_patterns: ['^ONLY-THIS$'], claude_reviews_patterns: ['^ONLY-THAT$'] },
+  })
+
+  it('recognises its own fix-PR body even when the pattern lists are pinned', () => {
+    expect(detectOriginFromBody(fixPrBody('claude'), pinnedPatterns)).toBe('claude')
+    expect(detectOriginFromBody(fixPrBody('codex'), pinnedPatterns)).toBe('codex')
+  })
+
+  it('recognises its own commit trailer even when the pattern lists are pinned', () => {
+    const message = (vendor: 'claude' | 'codex'): string => [
+      '[crosscheck] fix: apply CR fixes from review of PR #2444',
+      '',
+      buildCommitTrailers({ reviewer: vendor, model: 'm', step: 'fix', service: 'crosscheck' }),
+    ].join('\n')
+    expect(detectOriginFromCommits([message('claude')], pinnedPatterns)).toBe('claude')
+    expect(detectOriginFromCommits([message('codex')], pinnedPatterns)).toBe('codex')
+  })
+
+  it('still lets a configured pattern win over the self-attribution', () => {
+    // A user's own pattern is explicit routing intent and is checked first.
+    const cfg = buildConfig({ routing: { claude_reviews_patterns: ['Auto-fix by crosscheck'] } })
+    expect(detectOriginFromBody(fixPrBody('claude'), cfg)).toBe('codex')
+  })
+
+  it('does not read a Crosscheck-Reviewer mention inside prose as a trailer', () => {
+    // The trailer is a line of its own. Quoting the field name in a PR body —
+    // this repo's own docs and changelog do exactly that — must not attribute it.
+    expect(detectOriginFromBody(
+      'The commit carries a Crosscheck-Reviewer: claude trailer, which we now read.',
+      buildConfig(),
+    )).toBeNull()
+  })
 })
 
 describe('detectOriginFromBranch', () => {

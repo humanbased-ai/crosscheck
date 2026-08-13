@@ -370,6 +370,32 @@ export function summariseStepOutcomes(
   return outcomes
 }
 
+// Accumulates outcomes across the fix→recheck rounds of one invocation, so the
+// completion line reports whether the run as a whole did work: a first round
+// that skips everything followed by a round that applies a fix is not a
+// "no step ran" run.
+//
+// Running once wins over skipping any number of times — the step demonstrably
+// happened. A step skipped in several rounds is reported once, carrying its
+// latest reason: that is the state the run ended in, and listing the same step
+// several times reads as several distinct problems.
+export function mergeStepOutcomes(
+  base: StepOutcomes | undefined,
+  next: StepOutcomes | undefined,
+): StepOutcomes | undefined {
+  if (!base) return next
+  if (!next) return base
+  const ran = [...new Set([...base.ran, ...next.ran])]
+  const ranSet = new Set(ran)
+  // Map.set on an existing key overwrites the reason but keeps the original
+  // position, so order stays first-seen while the reason stays last-seen.
+  const skipped = new Map<string, string>()
+  for (const entry of [...base.skipped, ...next.skipped]) {
+    if (!ranSet.has(entry.step)) skipped.set(entry.step, entry.reason)
+  }
+  return { ran, skipped: [...skipped].map(([step, reason]) => ({ step, reason })) }
+}
+
 function countComments(reviewText: string): number {
   const bullets = (reviewText.match(/^[-*•]\s/gm) ?? []).length
   const numbered = (reviewText.match(/^\d+\.\s/gm) ?? []).length

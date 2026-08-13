@@ -112,23 +112,20 @@ export const RepoConfigSchema = z.object({
 })
 
 export const RoutingConfigSchema = z.object({
-  // Patterns that identify who WROTE the code, not who looked at it. Crosscheck
-  // authors code too (fix PRs, conflict-resolve commits), so its own markers
-  // belong here — without them a crosscheck fix PR reads as origin: human.
-  // Keep these authorship-only: `Reviewed with [Claude Code]` and the
-  // `Attempted` footer of a failed fix must never match, or every PR crosscheck
-  // reviews would come back looking like a PR crosscheck wrote.
+  // Patterns that identify who WROTE the code, not who looked at it.
+  // Crosscheck's own attribution (fix-PR footers, Crosscheck-Reviewer commit
+  // trailers) is NOT listed here: these defaults apply only when the field is
+  // absent, so an install that pins its own list would stop recognising
+  // crosscheck's output. Self-recognition is always on, in
+  // github/detector.ts → SELF_AUTHORED_PATTERNS, and these patterns are checked
+  // first so an explicit list still outranks it.
   codex_reviews_patterns: z.array(z.string()).default([
     'Generated with \\[Claude Code\\]',  // PR body attribution footer
     'Co-Authored-By: Claude',            // commit trailer added by Claude Code
-    'Fixed with \\[Claude Code\\]',      // crosscheck fix-PR body footer
-    'Crosscheck-Reviewer: claude',       // crosscheck fix / conflict-resolve commit trailer
   ]),
   claude_reviews_patterns: z.array(z.string()).default([
     'Generated with \\[OpenAI Codex\\]', // PR body attribution footer
     'Co-Authored-By: codex',             // commit trailer added by Codex
-    'Fixed with \\[OpenAI Codex\\]',     // crosscheck fix-PR body footer
-    'Crosscheck-Reviewer: codex',        // crosscheck fix commit trailer
   ]),
   // Branch prefix routing — checked when body and commit patterns don't match.
   // Agents should branch with these prefixes so crosscheck can identify origin
