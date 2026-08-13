@@ -1662,6 +1662,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
                 ].join('\n'),
               })
             }
+            // The commit was only rendered as a comment — nothing pushed it. Leaving HEAD
+            // on it would make a later recheck stamp its verdict with a sha the repository
+            // cannot resolve, and verifyReviewedSha would refuse to post it. Put HEAD back
+            // on the PR head the clone started from.
+            execSync('git reset --hard HEAD~1', { cwd: tmpDir, stdio: 'pipe' })
             onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
             fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'comment', tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
             results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
@@ -1709,6 +1714,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
                   ].join('\n'),
                 })
               }
+              // Same as the base-branch-gone path: the commit exists only in this clone,
+              // so HEAD has to go back to the PR head or a later recheck would review —
+              // and then fail to post a verdict against — a sha the repository never saw.
+              execSync('git reset --hard HEAD~1', { cwd: tmpDir, stdio: 'pipe' })
               onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
               fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'comment', tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
               results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
