@@ -7,7 +7,7 @@ import type { Config, RepoWorkflowStep } from '../config/schema.js'
 import { filterStepsByTypes } from './repo-workflow.js'
 import type { PREvent } from '../github/webhook.js'
 import type { PROrigin } from '../github/detector.js'
-import type { Vendor } from '../lib/vendor.js'
+import { vendorDisplayName, type Vendor } from '../lib/vendor.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
@@ -410,6 +410,26 @@ function resolveLimitFallbackVendor(failedVendor: Vendor, stepType: string, conf
   return config.vendors[fallback].enabled && supportsStep(fallback, stepType) ? fallback : null
 }
 
+// ─── commit subjects ──────────────────────────────────────────────────────────
+// The vendor is a parameter, not a constant: the vendor that ran the step is
+// known at every call site, and a subject crediting a different one contradicts
+// the Crosscheck-Reviewer trailer on its own commit.
+// The `[crosscheck]` prefix and the step word after it are parsed —
+// countCrosscheckCommitsForPR greps the prefix to enforce the commit cap — so
+// only the trailing attribution varies.
+
+export function fixCommitSubject(appliedCount: number, vendor: Vendor): string {
+  return `[crosscheck] fix: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by ${vendorDisplayName(vendor)}`
+}
+
+export function fixPRCommitSubject(prNumber: number, vendor: Vendor): string {
+  return `[crosscheck] fix: apply CR fixes from review of PR #${prNumber} — by ${vendorDisplayName(vendor)}`
+}
+
+export function conflictResolveCommitSubject(conflictCount: number, vendor: Vendor): string {
+  return `[crosscheck] resolve: resolve ${conflictCount} conflict${conflictCount !== 1 ? 's' : ''} — by ${vendorDisplayName(vendor)}`
+}
+
 // Extends resolveReviewer with a human-origin fallback for the steps that write
 // code (fix, conflict-resolve).
 // Scoped to reviewer: 'origin' only — other reviewer types (claude, codex, auto)
@@ -764,7 +784,7 @@ async function pushWithNonFastForwardHandling(params: {
   const env = { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token }
   
   try {
-    execSync(`git push origin HEAD:${branch}`, { cwd: tmpDir, env })
+    execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { cwd: tmpDir, env })
   } catch (pushErr: unknown) {
     const pushMsg = pushErr instanceof Error ? pushErr.message : String(pushErr)
     
@@ -781,11 +801,11 @@ async function pushWithNonFastForwardHandling(params: {
       
       try {
         // Fetch the latest state of the branch
-        execSync(`git fetch origin ${branch}`, { cwd: tmpDir, env, stdio: 'pipe' })
+        execFileSync('git', ['fetch', 'origin', branch], { cwd: tmpDir, env, stdio: 'pipe' })
         // Rebase our changes onto the latest branch state
-        execSync(`git rebase origin/${branch}`, { cwd: tmpDir, env, stdio: 'pipe' })
+        execFileSync('git', ['rebase', `origin/${branch}`], { cwd: tmpDir, env, stdio: 'pipe' })
         // Retry the push
-        execSync(`git push origin HEAD:${branch}`, { cwd: tmpDir, env })
+        execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { cwd: tmpDir, env })
         fileLog({
           level: 'info',
           event: 'push_rebase_succeeded',
@@ -1478,7 +1498,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           [
             'commit',
             '-m',
-            `[crosscheck] fix: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code`,
+            fixCommitSubject(appliedCount, activeVendor),
             '-m',
             buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
           ],
@@ -1552,7 +1572,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           [
             'commit',
             '-m',
-            `[crosscheck] fix: apply CR fixes from review of PR #${prNumber} — by Claude Code`,
+            fixPRCommitSubject(prNumber, activeVendor),
             '-m',
             buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
           ],
@@ -1829,7 +1849,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         [
           'commit',
           '-m',
-          `[crosscheck] resolve: resolve ${conflictedFiles.length} conflict${conflictedFiles.length !== 1 ? 's' : ''} — by Claude Code`,
+          conflictResolveCommitSubject(conflictedFiles.length, vendor),
           '-m',
           buildCommitTrailers({ reviewer: vendor, model: conflictResolveModel, step: 'conflict-resolve', service: 'crosscheck' }),
         ],
