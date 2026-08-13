@@ -396,6 +396,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     html_url: prData.html_url,
     user: { login: prData.user?.login ?? '' },
     ...(prData.labels !== undefined && { labels: prData.labels.map((l: { name: string }) => ({ name: l.name })) }),
+    ...(prData.created_at !== undefined && { created_at: prData.created_at }),
   }
 
   const { sha } = prData.head
