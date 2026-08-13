@@ -540,14 +540,25 @@ describe('resolveConflictResolveVendor', () => {
     })
   })
 
-  describe('attributed origins — unchanged behaviour', () => {
+  describe('attributed origins', () => {
     it('claude origin resolves to claude', () => {
       expect(resolveConflictResolveVendor('origin', 'claude', cfg(true, true)))
         .toEqual({ vendor: 'claude', usedHumanFallback: false })
     })
 
-    it('codex origin resolves to codex, no human fallback', () => {
+    // Regression (#284): `Crosscheck-Reviewer: codex` detection makes a
+    // crosscheck-authored Codex fix PR resolve to origin 'codex'. Conflict
+    // resolution is Claude-only, so returning codex would skip the step and leave
+    // the PR's conflicts unresolved (before #284 these PRs were 'human' and the
+    // auto fallback picked Claude). Because the assignment came from origin
+    // detection, substitute the capable vendor rather than skip.
+    it('codex origin substitutes claude — codex cannot resolve conflicts', () => {
       expect(resolveConflictResolveVendor('origin', 'codex', cfg(true, true)))
+        .toEqual({ vendor: 'claude', usedHumanFallback: false, substitutedOriginVendor: 'codex' })
+    })
+
+    it('codex origin with claude disabled: no capable vendor, stays codex so the caller reports the precise skip', () => {
+      expect(resolveConflictResolveVendor('origin', 'codex', cfg(false, true)))
         .toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
   })

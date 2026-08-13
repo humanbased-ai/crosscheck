@@ -448,8 +448,30 @@ function resolveStepVendor(
   origin: PROrigin,
   config: Config,
   fallback?: 'claude' | 'codex',
-): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean } {
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
   const vendor = resolveReviewer(stepReviewer, origin, config, fallback)
+
+  // Origin detection can assign a vendor that cannot run the step: conflict
+  // resolution is Claude-only, so a Codex-origin PR (reviewer: 'origin', origin:
+  // 'codex') resolves to 'codex' and the dispatch skips it as unsupported — the
+  // conflicts never get resolved. (#284's `Crosscheck-Reviewer: codex` detection
+  // introduced this: these crosscheck-authored fix PRs used to detect as 'human'
+  // and the auto fallback picked Claude.) Substitute a capable, enabled vendor.
+  // Scoped to origin-derived assignment only — an explicit reviewer: claude|codex,
+  // reviewer: auto, or routing.fallback_reviewer is an operator decision, left as
+  // written so the caller can report the precise unsupported-step skip.
+  if (
+    stepReviewer === 'origin' &&
+    (origin === 'claude' || origin === 'codex') &&
+    vendor !== null &&
+    !supportsStep(vendor, stepType)
+  ) {
+    const capable: Vendor = vendor === 'claude' ? 'codex' : 'claude'
+    if (config.vendors[capable].enabled && supportsStep(capable, stepType)) {
+      return { vendor: capable, usedHumanFallback: false, substitutedOriginVendor: vendor }
+    }
+  }
+
   if (vendor !== null || origin !== 'human' || stepReviewer !== 'origin') {
     return { vendor, usedHumanFallback: false }
   }
@@ -473,7 +495,7 @@ export function resolveFixVendor(
   origin: PROrigin,
   config: Config,
   fallback?: 'claude' | 'codex',
-): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean } {
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
   return resolveStepVendor('fix', stepReviewer, origin, config, fallback)
 }
 
@@ -485,7 +507,7 @@ export function resolveConflictResolveVendor(
   origin: PROrigin,
   config: Config,
   fallback?: 'claude' | 'codex',
-): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean } {
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
   return resolveStepVendor('conflict-resolve', stepReviewer, origin, config, fallback)
 }
 
@@ -1733,9 +1755,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // resolveConflictResolveVendor extends resolveReviewer with the same human-origin
       // fallback the fix step uses, so a PR crosscheck cannot attribute still gets its
       // conflicts resolved instead of skipping with 'no_vendor'.
-      const { vendor, usedHumanFallback } = resolveConflictResolveVendor(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      const { vendor, usedHumanFallback, substitutedOriginVendor } = resolveConflictResolveVendor(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (usedHumanFallback && vendor) {
         fileLog({ level: 'info', event: 'conflict_resolve_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: 'none', to: vendor, reason: 'human_origin' })
+      } else if (substitutedOriginVendor && vendor) {
+        fileLog({ level: 'info', event: 'conflict_resolve_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: substitutedOriginVendor, to: vendor, reason: 'unsupported_vendor' })
       }
       if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
       if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
