@@ -176,12 +176,20 @@ routing:
 
   # Body and commit pattern matching — checked first, before branch prefix.
   # Patterns are matched against both the PR body and commit messages (Co-Authored-By trailers).
+  # These identify who WROTE the code, not who reviewed it. Crosscheck's own fix
+  # PRs and conflict-resolve commits are included, so a PR crosscheck authored is
+  # not mistaken for a human one. Do not loosen these to match "Reviewed with
+  # [Claude Code]" — every PR Claude reviews would then look Claude-authored.
   codex_reviews_patterns:
     - "Generated with \\[Claude Code\\]"    # PR body attribution footer
     - "Co-Authored-By: Claude"              # commit trailer added by Claude Code
+    - "Fixed with \\[Claude Code\\]"        # crosscheck fix-PR body footer
+    - "Crosscheck-Reviewer: claude"         # crosscheck fix / conflict-resolve commit trailer
   claude_reviews_patterns:
     - "Generated with \\[OpenAI Codex\\]"   # PR body attribution footer
     - "Co-Authored-By: codex"               # commit trailer added by Codex
+    - "Fixed with \\[OpenAI Codex\\]"       # crosscheck fix-PR body footer
+    - "Crosscheck-Reviewer: codex"          # crosscheck fix commit trailer
 
 # ─── Tunnel (watch mode only) ────────────────────────────────────────────────
 # Controls how crosscheck watch receives GitHub webhook events on your laptop.

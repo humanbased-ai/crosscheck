@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as detector from '../github/detector.js'
-import { detectOriginFromBody, detectOriginFromBranch, detectOriginFull, assignReviewer } from '../github/detector.js'
+import { detectOriginFromBody, detectOriginFromBranch, detectOriginFromCommits, detectOriginFull, assignReviewer } from '../github/detector.js'
 import { ConfigSchema, type Config } from '../config/schema.js'
+import { buildAttributionFooter } from '../lib/comment-bodies.js'
+import { buildCommitTrailers } from '../lib/annotation.js'
 
 function buildConfig(overrides: Record<string, unknown> = {}): Config {
   return ConfigSchema.parse({
@@ -26,6 +28,67 @@ describe('detectOriginFromBody', () => {
 
   it('returns null when no pattern matches', () => {
     expect(detectOriginFromBody('just a normal PR body', buildConfig())).toBeNull()
+  })
+})
+
+// Crosscheck was blind to the PRs and commits it writes itself: its fix-PR body
+// says "Fixed with [Claude Code]", not "Generated with [Claude Code]", and its
+// commits carry Crosscheck-* trailers rather than Co-Authored-By. Such a PR
+// detected as origin:human, which skipped conflict-resolve for want of a vendor.
+// These build their fixtures with the real producers so the patterns cannot
+// drift away from the strings crosscheck actually emits.
+describe('origin detection recognises crosscheck-authored work', () => {
+  const fixPrBody = (vendor: 'claude' | 'codex'): string => [
+    'Auto-fix by crosscheck for CR issues found in #2444.',
+    '',
+    'Review: https://github.com/owner/repo/pull/2444',
+    '',
+    buildAttributionFooter({ action: 'Fixed', vendor, model: 'claude-sonnet-5', effort: 'high' }),
+  ].join('\n')
+
+  it('detects claude origin from a crosscheck fix-PR body', () => {
+    expect(detectOriginFromBody(fixPrBody('claude'), buildConfig())).toBe('claude')
+  })
+
+  it('detects codex origin from a crosscheck fix-PR body', () => {
+    expect(detectOriginFromBody(fixPrBody('codex'), buildConfig())).toBe('codex')
+  })
+
+  it('detects claude origin from a crosscheck commit trailer', () => {
+    const message = [
+      '[crosscheck] fix: apply CR fixes from review of PR #2444',
+      '',
+      buildCommitTrailers({ reviewer: 'claude', model: 'claude-sonnet-5', step: 'fix', service: 'crosscheck' }),
+    ].join('\n')
+    expect(detectOriginFromCommits([message], buildConfig())).toBe('claude')
+  })
+
+  it('detects codex origin from a crosscheck commit trailer', () => {
+    const message = [
+      '[crosscheck] fix: apply CR fixes from review of PR #2444',
+      '',
+      buildCommitTrailers({ reviewer: 'codex', model: 'gpt-5.6-sol', step: 'fix', service: 'crosscheck' }),
+    ].join('\n')
+    expect(detectOriginFromCommits([message], buildConfig())).toBe('codex')
+  })
+
+  // The load-bearing negative: reviewing a PR says nothing about who wrote it.
+  // A pattern loose enough to match "Reviewed with [Claude Code]" would route
+  // every claude-reviewed PR back to codex as if claude had authored it.
+  it('does not treat a review attribution as authorship', () => {
+    const reviewFooter = buildAttributionFooter({ action: 'Reviewed', vendor: 'claude', model: 'opus' })
+    expect(detectOriginFromBody(reviewFooter, buildConfig())).toBeNull()
+  })
+
+  // 'Attempted' is the footer on a fix that failed — no code was produced, so it
+  // is no evidence of authorship either.
+  it('does not treat a failed fix attribution as authorship', () => {
+    const attemptedFooter = buildAttributionFooter({ action: 'Attempted', vendor: 'claude', model: 'opus' })
+    expect(detectOriginFromBody(attemptedFooter, buildConfig())).toBeNull()
+  })
+
+  it('leaves an ordinary human PR body undetected', () => {
+    expect(detectOriginFromBody('Fixed the crosscheck config so the reviewer picks up.', buildConfig())).toBeNull()
   })
 })
 

@@ -1176,12 +1176,19 @@ routing:
   #   2. Commit message Co-Authored-By: trailers (API call, non-fatal if it fails)
   #   3. Branch prefix (claude/ or codex/)
   #   4. author_routes fallback (last resort)
+  # These say who WROTE the code, not who reviewed it. Crosscheck's own fix PRs
+  # and conflict-resolve commits count as authorship — without them a PR
+  # crosscheck wrote detects as origin: human.
   codex_reviews_patterns:
     - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
     - "Co-Authored-By: Claude"              # commit trailer
+    - "Fixed with \\[Claude Code\\]"        # crosscheck fix-PR body footer
+    - "Crosscheck-Reviewer: claude"         # crosscheck fix / conflict-resolve commit trailer
   claude_reviews_patterns:
     - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
     - "Co-Authored-By: codex"               # commit trailer
+    - "Fixed with \\[OpenAI Codex\\]"       # crosscheck fix-PR body footer
+    - "Crosscheck-Reviewer: codex"          # crosscheck fix commit trailer
 
   # Branch prefix detection (signal 3). Claude Code uses claude/, Codex uses codex/.
   claude_branch_prefixes:
