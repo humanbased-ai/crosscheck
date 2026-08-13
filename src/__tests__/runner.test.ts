@@ -13,7 +13,9 @@ import {
   buildWorkflowCompleteEvent,
   resolveFixVendor,
   resolveConflictResolveVendor,
+  summariseStepOutcomes,
 } from '../lib/runner.js'
+import type { StepResult } from '../lib/workflow.js'
 
 describe('isRetryableFixError', () => {
   it('returns false for auth failure errors', () => {
@@ -537,5 +539,52 @@ describe('resolveConflictResolveVendor', () => {
       expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true, 'claude'), 'codex'))
         .toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
+  })
+})
+
+describe('summariseStepOutcomes', () => {
+  const results = (entries: Record<string, StepResult>): Record<string, StepResult> => entries
+
+  it('separates steps that ran from steps that skipped', () => {
+    const out = summariseStepOutcomes(['review', 'fix', 'recheck'], results({
+      review: { verdict: 'BLOCK' },
+      fix: { applied_count: 2 },
+      recheck: { skipped: true, skipReason: 'when_condition' },
+    }))
+    expect(out.ran).toEqual(['review', 'fix'])
+    expect(out.skipped).toEqual([{ step: 'recheck', reason: 'when_condition' }])
+  })
+
+  // The reported defect: `crosscheck resolve` dispatches conflict-resolve alone,
+  // it skips for want of a vendor, and verdict is null either way — so only the
+  // empty `ran` list distinguishes this from a review that found nothing.
+  it('reports an empty ran list when every dispatched step skipped', () => {
+    const out = summariseStepOutcomes(['conflict-resolve'], results({
+      'conflict-resolve': { skipped: true, skipReason: 'no_vendor' },
+    }))
+    expect(out.ran).toEqual([])
+    expect(out.skipped).toEqual([{ step: 'conflict-resolve', reason: 'no_vendor' }])
+  })
+
+  it('counts a dispatched step with no recorded result as ran', () => {
+    // Absence of a result is not evidence of a skip; only an explicit skip is.
+    // Guessing the other way would report a working run as a no-op.
+    const out = summariseStepOutcomes(['review'], results({}))
+    expect(out.ran).toEqual(['review'])
+    expect(out.skipped).toEqual([])
+  })
+
+  it('falls back to "unknown" when a skip recorded no reason', () => {
+    const out = summariseStepOutcomes(['fix'], results({ fix: { skipped: true } }))
+    expect(out.skipped).toEqual([{ step: 'fix', reason: 'unknown' }])
+  })
+
+  it('deduplicates a step dispatched more than once', () => {
+    const out = summariseStepOutcomes(['fix', 'fix'], results({ fix: { applied_count: 1 } }))
+    expect(out.ran).toEqual(['fix'])
+  })
+
+  it('returns empty lists when no step was dispatched', () => {
+    expect(summariseStepOutcomes([], results({}))).toEqual({ ran: [], skipped: [] })
   })
 })

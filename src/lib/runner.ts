@@ -316,6 +316,36 @@ export interface WorkflowResult {
     id?: number
     body: string
   }
+  /** What each dispatched step actually did. Lets a caller tell "ran and found
+   *  nothing" apart from "never ran", which the verdict alone cannot express —
+   *  every step of a conflict-resolve run can skip and still leave verdict null,
+   *  exactly like a review that approved nothing. */
+  stepOutcomes?: StepOutcomes
+}
+
+export interface StepOutcomes {
+  /** Steps that executed. A dispatched step with no recorded result counts as
+   *  ran: only an explicit skip is evidence that nothing happened. */
+  ran: string[]
+  /** Steps dispatched but skipped, each with the reason recorded on its
+   *  step_skipped log entry. */
+  skipped: { step: string; reason: string }[]
+}
+
+// stepsRun holds every step the runner dispatched, skips included; results holds
+// what each one did. Split them so callers can report a run where nothing
+// happened without re-deriving the reasons from the log file.
+export function summariseStepOutcomes(
+  stepsRun: readonly string[],
+  results: Record<string, StepResult>,
+): StepOutcomes {
+  const outcomes: StepOutcomes = { ran: [], skipped: [] }
+  for (const name of new Set(stepsRun)) {
+    const result = results[name]
+    if (result?.skipped) outcomes.skipped.push({ step: name, reason: result.skipReason ?? 'unknown' })
+    else outcomes.ran.push(name)
+  }
+  return outcomes
 }
 
 function countComments(reviewText: string): number {
@@ -962,7 +992,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     if (exceedsMaxRounds(effectiveType, step.type, ctx.overrideMaxRounds ?? step.max_rounds, ctx.round)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'max_rounds' })
-      results[step.name] = { skipped: true }
+      results[step.name] = { skipped: true, skipReason: 'max_rounds' }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
       else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
@@ -972,7 +1002,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     // Evaluate when condition — skip step if false
     if (step.when && !evaluateWhen(step.when, results)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'when_condition' })
-      results[step.name] = { skipped: true }
+      results[step.name] = { skipped: true, skipReason: 'when_condition' }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
       else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
@@ -984,7 +1014,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     // review coerced to a recheck (isRecheckRun) is never blocked here.
     if (step.type === 'recheck' && reviewRanThisSession && !anyFixApplied(results)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_change_since_review' })
-      results[step.name] = { skipped: true }
+      results[step.name] = { skipped: true, skipReason: 'no_change_since_review' }
       onPhaseChange('', { phase: 'rechecked' })
       continue
     }
@@ -994,7 +1024,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let reviewer = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
-        results[step.name] = { skipped: true }
+        results[step.name] = { skipped: true, skipReason: 'no_reviewer' }
         continue
       }
 
@@ -1216,7 +1246,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const skipFix = (reason: string) => {
         lastFixSkipReason = reason
         onPhaseChange('', { phase: 'fixed', fixCount: 0 })
-        results[step.name] = { skipped: true }
+        results[step.name] = { skipped: true, skipReason: reason }
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
       }
 
@@ -1554,7 +1584,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     } else if (effectiveType === 'conflict-resolve') {
       const skipConflictResolve = (reason: string) => {
         onPhaseChange('', { phase: 'fixed', fixCount: 0 })
-        results[step.name] = { skipped: true }
+        results[step.name] = { skipped: true, skipReason: reason }
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
       }
 
@@ -1782,6 +1812,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   return {
     verdict: verdict ?? null,
     fixAppliedCount,
+    stepOutcomes: summariseStepOutcomes(stepsRun, results),
     ...(fixAppliedCount === undefined && lastFixSkipReason !== undefined && { fixSkipReason: lastFixSkipReason }),
     ...(latestReviewResult?.commentBody && {
       latestReviewComment: {

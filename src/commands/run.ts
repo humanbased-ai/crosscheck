@@ -573,6 +573,9 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       // fixAppliedCount guard broke out. Gate them, and report the skip rather
       // than a bare formatVerdict(null) with no reason.
       const { strategySkipped } = workflowResult
+      // Captured before the round loops reassign workflowResult — the question the
+      // completion line answers is whether this invocation did any work at all.
+      const initialStepOutcomes = workflowResult.stepOutcomes
 
       // Autonomous fix→recheck loop for --crazy / --halfcrazy
       if (!strategySkipped && opts.roundMode) {
@@ -772,13 +775,32 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       }
 
       activeSpinner.stop()
+      // Read the first round's outcomes, not the loop's last: a later round that
+      // skips everything still followed a round that did the work.
+      const ranNothing = initialStepOutcomes !== undefined
+        && initialStepOutcomes.ran.length === 0
+        && initialStepOutcomes.skipped.length > 0
+
       if (strategySkipped) {
         console.log(chalk.dim(`\n  skipped — ${strategySkipped} class, nothing to review`))
+      } else if (initialStepOutcomes && ranNothing) {
+        // Every dispatched step skipped. `verdict —` on its own reads as "ran and
+        // found nothing", and the green line below then certified a no-op as a
+        // success — which is how conflict-resolve skipping for want of a vendor
+        // went unnoticed across a whole batch of PRs. The reasons are the report.
+        console.log(chalk.yellow(`\n  no step ran`))
+        for (const { step, reason } of initialStepOutcomes.skipped) {
+          console.log(chalk.dim(`    ${step} — ${reason}`))
+        }
       } else {
         console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
       }
 
-      console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
+      // Exit code is unchanged: a skipped step is a legitimate outcome, not a
+      // failure, and the exit codes are part of the CLI contract.
+      console.log(ranNothing && !strategySkipped
+        ? chalk.yellow(`\n⚠  Workflow complete, no step ran — ${prUrl}\n`)
+        : chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
     } catch (err: unknown) {
       workflowError = err
       logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
