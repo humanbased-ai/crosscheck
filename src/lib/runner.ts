@@ -1635,6 +1635,46 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           try {
             remoteOid = parseLsRemoteOid(execFileSync('git', ['ls-remote', '--heads', 'origin', fixBranch], { cwd: tmpDir, env: gitEnv, encoding: 'utf8' }))
           } catch { /* treat an unreadable remote as "branch absent"; the lease catches a wrong guess */ }
+
+          // `--force-with-lease` only protects against changes made *after* this lookup —
+          // it happily accepts a branch a human just created or moved as the lease value
+          // and overwrites it. Confirm the existing tip is crosscheck's own commit (it
+          // carries the `Crosscheck-Reviewer:` trailer this fix step writes) before
+          // treating it as safe to replace; anything else is left alone.
+          if (remoteOid !== null) {
+            let ownedByCrosscheck = false
+            try {
+              const { data: remoteCommit } = await octokit.rest.git.getCommit({ owner, repo: repoName, commit_sha: remoteOid })
+              ownedByCrosscheck = /^Crosscheck-Reviewer:/m.test(remoteCommit.message)
+            } catch { /* unreadable commit — treat as not ours, do not overwrite */ }
+            if (!ownedByCrosscheck) {
+              fileLog({ level: 'warn', event: 'fix_branch_push_skipped', repo: `${owner}/${repoName}`, pr: prNumber, branch: fixBranch, reason: 'branch_not_owned_by_crosscheck' })
+              log(chalk.yellow(`⚠  ${fixBranch} exists but was not created by crosscheck — leaving it in place and posting the fix as a diff instead`))
+              let patch = ''
+              try { patch = execSync('git diff HEAD~1', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* fall through to the empty check */ }
+              if (patch) {
+                await octokit.rest.issues.createComment({
+                  owner, repo: repoName, issue_number: prNumber,
+                  body: [
+                    '### Suggested fixes (crosscheck auto-fix)',
+                    '',
+                    `\`${fixBranch}\` already exists and was not created by crosscheck, so it was left untouched. The fix is posted here instead of overwriting it.`,
+                    '',
+                    '```diff',
+                    patch.slice(0, 16000),
+                    '```',
+                    '',
+                    fixAttributionFooter(),
+                  ].join('\n'),
+                })
+              }
+              onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+              fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'comment', tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
+              results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
+              continue
+            }
+          }
+
           try {
             execFileSync('git', forceWithLeaseArgs(fixBranch, remoteOid), { cwd: tmpDir, env: gitEnv, stdio: 'pipe' })
           } catch (pushErr: unknown) {
