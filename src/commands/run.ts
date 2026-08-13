@@ -14,7 +14,7 @@ import { enrichIssueContext } from '../issues/enrich.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { hintForError } from '../lib/remediation.js'
-import { runWorkflow } from '../lib/runner.js'
+import { runWorkflow, type StepOutcomes } from '../lib/runner.js'
 import { isLinearConfigError, resolveLinearAuth } from '../linear/identity.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, linearWritePossible, type WorkflowStep } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
@@ -52,6 +52,26 @@ function meetsCrazyStopCondition(verdict: string | null, mode: 'crazy' | 'halfcr
   if (mode === 'crazy') return verdict === 'APPROVE'
   // halfcrazy: any non-BLOCK verdict (APPROVE or NEEDS_WORK) is acceptable
   return verdict !== 'BLOCK'
+}
+
+// Merge two StepOutcomes for cross-round accumulation. A step that ran in any
+// round is counted as ran; a step is skipped only if it was skipped in every
+// round it was dispatched and never ran.
+function mergeStepOutcomes(
+  base: StepOutcomes | undefined,
+  next: StepOutcomes | undefined,
+): StepOutcomes | undefined {
+  if (!base) return next
+  if (!next) return base
+  const ranSet = new Set([...base.ran, ...next.ran])
+  const merged: StepOutcomes = {
+    ran: [...ranSet],
+    skipped: [
+      ...base.skipped.filter(s => !ranSet.has(s.step)),
+      ...next.skipped.filter(s => !ranSet.has(s.step)),
+    ],
+  }
+  return merged
 }
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
@@ -573,9 +593,11 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       // fixAppliedCount guard broke out. Gate them, and report the skip rather
       // than a bare formatVerdict(null) with no reason.
       const { strategySkipped } = workflowResult
-      // Captured before the round loops reassign workflowResult — the question the
-      // completion line answers is whether this invocation did any work at all.
-      const initialStepOutcomes = workflowResult.stepOutcomes
+      // Accumulate step outcomes across all rounds so the completion line
+      // reflects whether *any* round did work — not just the first. A first
+      // round that skips everything followed by a crazy/halfcrazy round that
+      // runs a fix is not a "no step ran" run.
+      let accumulatedStepOutcomes = workflowResult.stepOutcomes
 
       // Autonomous fix→recheck loop for --crazy / --halfcrazy
       if (!strategySkipped && opts.roundMode) {
@@ -657,6 +679,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           })
           ;({ verdict, fixAppliedCount } = workflowResult)
           latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
+          accumulatedStepOutcomes = mergeStepOutcomes(accumulatedStepOutcomes, workflowResult.stepOutcomes)
 
           if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
 
@@ -761,6 +784,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
             })
             ;({ verdict, fixAppliedCount } = workflowResult)
             latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
+            accumulatedStepOutcomes = mergeStepOutcomes(accumulatedStepOutcomes, workflowResult.stepOutcomes)
             hasRechecked = true
 
             if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
@@ -775,21 +799,22 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       }
 
       activeSpinner.stop()
-      // Read the first round's outcomes, not the loop's last: a later round that
-      // skips everything still followed a round that did the work.
-      const ranNothing = initialStepOutcomes !== undefined
-        && initialStepOutcomes.ran.length === 0
-        && initialStepOutcomes.skipped.length > 0
+      // A run is "no step ran" only when every step across every round skipped.
+      // If the first round skips everything but a later crazy/halfcrazy round
+      // runs a fix, the overall run did work and should not report "no step ran".
+      const ranNothing = accumulatedStepOutcomes !== undefined
+        && accumulatedStepOutcomes.ran.length === 0
+        && accumulatedStepOutcomes.skipped.length > 0
 
       if (strategySkipped) {
         console.log(chalk.dim(`\n  skipped — ${strategySkipped} class, nothing to review`))
-      } else if (initialStepOutcomes && ranNothing) {
+      } else if (accumulatedStepOutcomes && ranNothing) {
         // Every dispatched step skipped. `verdict —` on its own reads as "ran and
         // found nothing", and the green line below then certified a no-op as a
         // success — which is how conflict-resolve skipping for want of a vendor
         // went unnoticed across a whole batch of PRs. The reasons are the report.
         console.log(chalk.yellow(`\n  no step ran`))
-        for (const { step, reason } of initialStepOutcomes.skipped) {
+        for (const { step, reason } of accumulatedStepOutcomes.skipped) {
           console.log(chalk.dim(`    ${step} — ${reason}`))
         }
       } else {
