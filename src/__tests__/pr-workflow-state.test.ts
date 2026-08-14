@@ -66,14 +66,64 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.round).toBe(1)
   })
 
-  it('routes a non-APPROVE initial review to fix even when HEAD has moved', () => {
+  it('routes a non-APPROVE review to fix while HEAD is still the reviewed commit', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'BLOCK', sha: 'reviewed-sha' }),
-    ], workflow, 'new-head-sha')
+    ], workflow, 'reviewed-sha')
 
     expect(next.step?.type).toBe('fix')
     expect(next.reviewComment?.id).toBe(100)
     expect(next.round).toBe(1)
+  })
+
+  // Previously this routed to fix regardless of HEAD ("even when HEAD has moved").
+  // That is monorepo#2548: the author addressed the BLOCK themselves, the fix ran
+  // against a review of a tree that no longer existed, applied nothing, and — since
+  // a no-op fix records nothing — every later event replayed the same decision, so
+  // the PR sat on a stale BLOCK with no way to advance. The workflow already routes
+  // a moved HEAD to a fresh review when crosscheck's own fix moved it (see 'routes a
+  // stale fix followed by a new HEAD back to review'); who pushed says nothing about
+  // whether the reviewed tree still exists.
+  it('routes a non-APPROVE review to a fresh review once HEAD moves past it', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'reviewed-sha' }),
+    ], workflow, 'new-head-sha')
+
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(2)
+  })
+
+  it('treats the short and long forms of the reviewed SHA as the same commit', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'BLOCK', sha: '59abeb6' }),
+    ], workflow, '59abeb630af4efbc874650db88ecf3dcb02724fb')
+
+    expect(next.step?.type).toBe('fix')
+  })
+
+  // A record that cannot say which commit it describes cannot prove it is stale.
+  // Legacy comments carry no `sha=`, and trading their working fix step for a
+  // re-review on every push would be a regression, so absence keeps the old path.
+  it('routes to fix when the review carries no SHA at all', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'BLOCK' }),
+    ], workflow, 'new-head-sha')
+
+    expect(next.step?.type).toBe('fix')
+    expect(next.reviewComment?.id).toBe(100)
+  })
+
+  // The fix loop still re-engages: the fresh review posts on the new HEAD, and the
+  // fix step runs off that. One extra review is the price of never fixing against a
+  // tree that no longer exists — and unlike the old path, it always terminates.
+  it('reaches fix again after the fresh review lands on the new HEAD', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'reviewed-sha' }),
+      record({ type: 'review', verdict: 'BLOCK', sha: 'new-head-sha', round: 2, commentId: 103 }),
+    ], workflow, 'new-head-sha')
+
+    expect(next.step?.type).toBe('fix')
+    expect(next.reviewComment?.id).toBe(103)
   })
 
   it('routes a non-APPROVE recheck to fix', () => {
@@ -88,16 +138,18 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.round).toBe(1)
   })
 
-  it('routes a non-APPROVE recheck followed by an unannotated HEAD commit to fix', () => {
+  // Same rule one round deeper: a recheck is a verdict on a specific tree too, so a
+  // commit pushed past it re-opens the review rather than feeding a stale findings
+  // list to fix. The round carries forward from the recheck.
+  it('routes a non-APPROVE recheck followed by an unannotated HEAD commit to review', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'BLOCK', sha: 'first-sha', commentId: 100 }),
       record({ type: 'fix', commentId: 101, pushedSha: 'first-fix-sha' }),
       record({ type: 'recheck', verdict: 'NEEDS_WORK', sha: 'rechecked-sha', round: 7, commentId: 102 }),
     ], workflow, 'new-unannotated-head-sha')
 
-    expect(next.step?.type).toBe('fix')
-    expect(next.reviewComment?.id).toBe(102)
-    expect(next.round).toBe(7)
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(8)
   })
 
   it('routes a current-head fix after review to recheck', () => {
@@ -373,6 +425,22 @@ describe('identifyNextWorkflowStep', () => {
 
     // One attempt per review round: a successful resolve pushes a merge commit, which gets
     // reviewed, and that new review makes the PR eligible again if it re-conflicts.
+    // The merge commit a resolve pushes moves HEAD off the reviewed tree and brings
+    // in base content the review never saw. The changelog says this case gets a
+    // fresh review, but the fix step's `when` was still satisfied on a non-APPROVE
+    // verdict, so it took the fix branch first and fixed against the pre-merge
+    // review. Gating that branch on the reviewed SHA makes the code agree with the
+    // documented behaviour.
+    it('routes the merge commit a resolve pushed to a fresh review, not fix', () => {
+      const next = identifyNextWorkflowStep([
+        record({ type: 'review', verdict: 'BLOCK', sha: 'sha-A' }),
+        record({ type: 'conflict-resolve', commentId: 101, pushedSha: 'merge-sha' }),
+      ], workflow, 'merge-sha')
+
+      expect(next.step?.type).toBe('review')
+      expect(next.round).toBe(2)
+    })
+
     it('does not re-offer conflict-resolve when one already ran since the last review', () => {
       const next = identifyNextWorkflowStep([
         record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A' }),
