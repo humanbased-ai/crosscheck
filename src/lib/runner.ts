@@ -14,7 +14,7 @@ import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
-import { autoFixBranchName, autoFixPRIntro } from '../github/superseded-fix-pr.js'
+import { autoFixBranchName, autoFixPRIntro, sourcePRHasMerged } from '../github/superseded-fix-pr.js'
 import { verifyReviewedSha, isVerifiedReviewedSha, reviewedShaRejection } from '../github/reviewed-sha.js'
 import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
@@ -1727,12 +1727,21 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         } else {
           // Fallback: the fix could not land on the PR branch. Push the same commit to
           // a dedicated branch and open a follow-up PR targeting the original branch.
+          const octokit = createGithubClient(token)
+          // The merged-PR handler sweeps for auto-fix PRs once. A PR opened after
+          // that sweep is never seen by it and stays open and mergeable against a
+          // tree that no longer exists. Checked here, immediately before the push,
+          // so the window is one API call rather than the whole fix run — and so a
+          // superseded fix leaves no branch behind either.
+          if (await sourcePRHasMerged(octokit, owner, repoName, prNumber)) {
+            skipFix('source_pr_merged')
+            continue
+          }
           const fixBranch = autoFixBranchName(prNumber)
           execSync(`git push origin HEAD:${fixBranch}`, {
             cwd: tmpDir,
             env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
           })
-          const octokit = createGithubClient(token)
           const fixPrTitle = config.post_review.auto_fix.delivery.pr_title.replace('#{original_pr_title}', pr.title)
           const { data: fixPr } = await octokit.rest.pulls.create({
             owner,

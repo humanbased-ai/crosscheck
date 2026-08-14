@@ -55,9 +55,42 @@ export interface SupersedeOutcome {
   reason?: string
 }
 
+// True once the source PR has merged. A PR closed *unmerged* is not a merge: the
+// source branch is still where that finding gets addressed.
+//
+// The merge handler sweeps for auto-fix PRs exactly once, so a fallback auto-fix
+// PR opened after that sweep is never seen by it and stays open and mergeable —
+// the stale-snapshot regression this module exists to prevent. The fix step asks
+// this immediately before it pushes the branch and opens the PR, which closes
+// the window down to that single call.
+//
+// Fails open: an unreadable state returns false and the fix is delivered as
+// usual. A dropped fix is invisible to everyone, whereas today's behaviour is to
+// create unconditionally — so failing open is no regression, and the merge
+// webhook remains the primary mechanism.
+export async function sourcePRHasMerged(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  sourcePrNumber: number,
+): Promise<boolean> {
+  try {
+    const { data } = await octokit.rest.pulls.get({ owner, repo, pull_number: sourcePrNumber })
+    return data.merged === true
+  } catch {
+    return false
+  }
+}
+
 // Closes every open auto-fix PR cut from `sourcePrNumber`, commenting first so the
-// reason survives on the timeline. Returns one outcome per candidate found; an empty
-// array means there was nothing cut from that PR (the common case).
+// reason survives on the timeline. Returns one outcome per candidate found, in the
+// order GitHub listed them; an empty array means there was nothing cut from that PR
+// (the common case).
+//
+// Candidates are handled concurrently — a comment+close pair is two round-trips,
+// and serialising them makes every later candidate wait on all the earlier ones.
+// Ordering that matters is preserved: comment still precedes close *within* a
+// candidate, and Promise.all keeps the results positional.
 export async function closeSupersededAutoFixPRs(
   octokit: Octokit,
   owner: string,
@@ -70,11 +103,9 @@ export async function closeSupersededAutoFixPRs(
     owner, repo, state: 'open', head: `${owner}:${branch}`,
   })
 
-  const outcomes: SupersedeOutcome[] = []
-  for (const candidate of candidates) {
+  return Promise.all(candidates.map(async (candidate): Promise<SupersedeOutcome> => {
     if (!isCrosscheckAutoFixPR(candidate.body, sourcePrNumber)) {
-      outcomes.push({ prNumber: candidate.number, status: 'not_crosscheck' })
-      continue
+      return { prNumber: candidate.number, status: 'not_crosscheck' }
     }
     try {
       await octokit.rest.issues.createComment({
@@ -82,14 +113,15 @@ export async function closeSupersededAutoFixPRs(
         body: buildSupersededComment({ owner, repo, sourcePrNumber, mergeCommitSha }),
       })
       await octokit.rest.pulls.update({ owner, repo, pull_number: candidate.number, state: 'closed' })
-      outcomes.push({ prNumber: candidate.number, status: 'closed' })
+      return { prNumber: candidate.number, status: 'closed' }
     } catch (err: unknown) {
-      outcomes.push({
+      // Per-candidate catch, so one failure cannot reject the whole batch and
+      // leave the remaining candidates unreported.
+      return {
         prNumber: candidate.number,
         status: 'failed',
         reason: err instanceof Error ? err.message : String(err),
-      })
+      }
     }
-  }
-  return outcomes
+  }))
 }

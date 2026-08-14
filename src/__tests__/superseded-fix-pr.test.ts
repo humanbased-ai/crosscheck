@@ -5,6 +5,7 @@ import {
   isCrosscheckAutoFixPR,
   buildSupersededComment,
   closeSupersededAutoFixPRs,
+  sourcePRHasMerged,
 } from '../github/superseded-fix-pr.js'
 
 const OWNER = 'humanbased-ai'
@@ -154,5 +155,119 @@ describe('closeSupersededAutoFixPRs', () => {
 
     expect(outcomes[0].status).toBe('failed')
     expect(update).not.toHaveBeenCalled()
+  })
+})
+
+describe('closeSupersededAutoFixPRs — concurrency', () => {
+  // AGENTS.md: never await inside a loop. Serialising the candidates makes every
+  // later one wait on the comment+close round-trips of the earlier ones.
+  it('processes candidates concurrently', async () => {
+    const started: number[] = []
+    let releaseAll: () => void = () => {}
+    const gate = new Promise<void>(resolve => { releaseAll = resolve })
+    const createComment = vi.fn(async ({ issue_number }: { issue_number: number }) => {
+      started.push(issue_number)
+      await gate
+      return { data: { id: 1 } }
+    })
+    const octokit = {
+      rest: {
+        pulls: {
+          list: vi.fn(async () => ({ data: [autoFixPR(2532), autoFixPR(2533), autoFixPR(2534)] })),
+          update: vi.fn(async () => ({ data: {} })),
+        },
+        issues: { createComment },
+      },
+    } as never
+
+    const pending = closeSupersededAutoFixPRs(octokit, OWNER, REPO, SOURCE_PR, MERGE_SHA)
+    // Every candidate must be in flight before any of them is allowed to finish.
+    await Promise.resolve()
+    expect(started).toEqual([2532, 2533, 2534])
+    releaseAll()
+    const outcomes = await pending
+    expect(outcomes.map(o => o.prNumber)).toEqual([2532, 2533, 2534])
+    expect(outcomes.every(o => o.status === 'closed')).toBe(true)
+  })
+
+  it('still comments before closing within each candidate', async () => {
+    const order: string[] = []
+    const octokit = {
+      rest: {
+        pulls: {
+          list: vi.fn(async () => ({ data: [autoFixPR(2532), autoFixPR(2533)] })),
+          update: vi.fn(async ({ pull_number }: { pull_number: number }) => {
+            order.push(`close:${pull_number}`)
+            return { data: {} }
+          }),
+        },
+        issues: {
+          createComment: vi.fn(async ({ issue_number }: { issue_number: number }) => {
+            order.push(`comment:${issue_number}`)
+            return { data: { id: 1 } }
+          }),
+        },
+      },
+    } as never
+
+    await closeSupersededAutoFixPRs(octokit, OWNER, REPO, SOURCE_PR, MERGE_SHA)
+
+    expect(order.indexOf('comment:2532')).toBeLessThan(order.indexOf('close:2532'))
+    expect(order.indexOf('comment:2533')).toBeLessThan(order.indexOf('close:2533'))
+  })
+
+  it('keeps one candidate failing from taking down the others', async () => {
+    const octokit = {
+      rest: {
+        pulls: {
+          list: vi.fn(async () => ({ data: [autoFixPR(2532), autoFixPR(2533)] })),
+          update: vi.fn(async ({ pull_number }: { pull_number: number }) => {
+            if (pull_number === 2532) throw new Error('403 Forbidden')
+            return { data: {} }
+          }),
+        },
+        issues: { createComment: vi.fn(async () => ({ data: { id: 1 } })) },
+      },
+    } as never
+
+    const outcomes = await closeSupersededAutoFixPRs(octokit, OWNER, REPO, SOURCE_PR, MERGE_SHA)
+
+    expect(outcomes).toEqual([
+      { prNumber: 2532, status: 'failed', reason: '403 Forbidden' },
+      { prNumber: 2533, status: 'closed' },
+    ])
+  })
+})
+
+describe('sourcePRHasMerged', () => {
+  // The merge handler sweeps once. A fallback auto-fix PR created after that
+  // sweep is never seen by it, so it stays open and mergeable — the exact
+  // stale-snapshot regression this feature exists to prevent. The fix step
+  // asks this immediately before it pushes and opens the PR.
+  const octokitWith = (result: unknown) => ({
+    rest: { pulls: { get: vi.fn(async () => {
+      if (result instanceof Error) throw result
+      return { data: result }
+    }) } },
+  } as never)
+
+  it('is true once the source PR has merged', async () => {
+    expect(await sourcePRHasMerged(octokitWith({ merged: true, state: 'closed' }), OWNER, REPO, SOURCE_PR)).toBe(true)
+  })
+
+  it('is false while the source PR is still open', async () => {
+    expect(await sourcePRHasMerged(octokitWith({ merged: false, state: 'open' }), OWNER, REPO, SOURCE_PR)).toBe(false)
+  })
+
+  it('is false for a PR closed without merging', async () => {
+    // The source branch is still where that finding gets addressed.
+    expect(await sourcePRHasMerged(octokitWith({ merged: false, state: 'closed' }), OWNER, REPO, SOURCE_PR)).toBe(false)
+  })
+
+  it('fails open when the state cannot be read', async () => {
+    // A dropped fix is invisible; an unreadable lookup must not silently discard
+    // work. Today's behaviour is to always create, so failing open is no
+    // regression — the merge webhook remains the primary mechanism.
+    expect(await sourcePRHasMerged(octokitWith(new Error('502 Bad Gateway')), OWNER, REPO, SOURCE_PR)).toBe(false)
   })
 })
