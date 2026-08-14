@@ -18,6 +18,7 @@ const PACKAGE_ROOT = resolve(__dirname, '..', '..')
 
 type Agent = 'claude' | 'codex'
 
+// eslint-disable-next-line no-control-regex -- matching the ESC byte is the point
 const ANSI_RE = /\x1b\[[0-9;]*m/g
 
 export function selectOptimizeAgent(

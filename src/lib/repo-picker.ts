@@ -354,7 +354,6 @@ export async function promptRepoPicker(
         process.stdout.write(`${ERASE_LINE}${hintLine ? `${color}${hintLine}${RESET}` : ''}\n`)
       }
 
-      const total = filtered.length
       const displayedTotal = displayed.length
       const pos = displayedTotal === 0 ? 0 : cursorPos + 1
       const selCount = selected.size

@@ -62,7 +62,6 @@ async function runGit(args: string[], cwd?: string, retryable = false, onProgres
       if (retryable && isTransientGitError(redacted) && attempt < MAX_GIT_RETRIES) {
         // Transient error — wait and retry
         const delay = GIT_RETRY_DELAY_MS * attempt // exponential backoff: 2s, 4s, 6s
-        // eslint-disable-next-line no-console
         console.error(`git: transient error (attempt ${attempt}/${MAX_GIT_RETRIES}), retrying in ${delay / 1000}s...`)
         await sleep(delay)
         lastErr = new Error(redacted)

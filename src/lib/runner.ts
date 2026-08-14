@@ -21,7 +21,7 @@ import { notifyLinear } from '../linear/notify.js'
 import { shouldPostToLinear } from '../linear/comment.js'
 import { getLinearCredentials } from '../config/loader.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
-import { log as fileLog, logError, classifyError } from '../lib/logger.js'
+import { log as fileLog, logError, classifyError, type LogEntry } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { resolveReviewStrategy, escalate, clampToLevels, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
@@ -40,7 +40,6 @@ import { formatSkillAttribution } from '../skills/attribution.js'
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
 const REVIEW_RETRY_DELAY_MS = 2 * 60 * 1000
-const GIT_PUSH_RETRY_DELAY_MS = 3000
 
 // Per-vendor configured timeout (seconds) → execa milliseconds, or undefined when
 // unset so the reviewer falls back to its built-in default. A per-run override
@@ -826,7 +825,11 @@ async function pushWithNonFastForwardHandling(params: {
   branch: string
   token: string
   log: (msg: string) => void
-  fileLog: (entry: Record<string, unknown>) => void
+  // LogEntry, not Record<string, unknown>: callers decorate the entry with a
+  // `phase` before forwarding it to the real fileLog, and a bare Record loses the
+  // guarantee that `level`/`event` survive that spread — which is why all three
+  // call sites had to cast the result to `any`.
+  fileLog: (entry: LogEntry) => void
   owner: string
   repoName: string
   prNumber: number
@@ -1600,7 +1603,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           branch: pr.head.ref,
           token,
           log,
-          fileLog: (entry) => fileLog({ ...entry, phase: 'fix' } as any),
+          fileLog: (entry) => fileLog({ ...entry, phase: 'fix' }),
           owner,
           repoName,
           prNumber,
@@ -1677,7 +1680,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             branch: pr.head.ref,
             token,
             log,
-            fileLog: (entry) => fileLog({ ...entry, phase: 'fix' } as any),
+            fileLog: (entry) => fileLog({ ...entry, phase: 'fix' }),
             owner,
             repoName,
             prNumber,
@@ -1962,7 +1965,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         branch: pr.head.ref,
         token,
         log,
-        fileLog: (entry) => fileLog({ ...entry, phase: 'conflict-resolve' } as any),
+        fileLog: (entry) => fileLog({ ...entry, phase: 'conflict-resolve' }),
         owner,
         repoName,
         prNumber,

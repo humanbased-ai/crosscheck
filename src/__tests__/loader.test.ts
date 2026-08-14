@@ -124,9 +124,9 @@ describe('patchAllowedAuthors', () => {
     // routing: must be a top-level key (no leading spaces)
     expect(out).toMatch(/^routing:/m)
     // allowed_authors must be indented under routing
-    expect(out).toMatch(/^  allowed_authors:/m)
+    expect(out).toMatch(/^ {2}allowed_authors:/m)
     // entry must be indented under allowed_authors
-    expect(out).toMatch(/^    - alice/m)
+    expect(out).toMatch(/^ {4}- alice/m)
   })
 
   // ── Already-populated: should not modify ────────────────────────────────
