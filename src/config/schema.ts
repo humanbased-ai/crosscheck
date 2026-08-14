@@ -112,6 +112,13 @@ export const RepoConfigSchema = z.object({
 })
 
 export const RoutingConfigSchema = z.object({
+  // Patterns that identify who WROTE the code, not who looked at it.
+  // Crosscheck's own attribution (fix-PR footers, Crosscheck-Reviewer commit
+  // trailers) is NOT listed here: these defaults apply only when the field is
+  // absent, so an install that pins its own list would stop recognising
+  // crosscheck's output. Self-recognition is always on, in
+  // github/detector.ts → SELF_AUTHORED_PATTERNS, and these patterns are checked
+  // first so an explicit list still outranks it.
   codex_reviews_patterns: z.array(z.string()).default([
     'Generated with \\[Claude Code\\]',  // PR body attribution footer
     'Co-Authored-By: Claude',            // commit trailer added by Claude Code

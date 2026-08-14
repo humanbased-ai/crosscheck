@@ -340,6 +340,62 @@ export interface WorkflowResult {
     id?: number
     body: string
   }
+  /** What each dispatched step actually did. Lets a caller tell "ran and found
+   *  nothing" apart from "never ran", which the verdict alone cannot express —
+   *  every step of a conflict-resolve run can skip and still leave verdict null,
+   *  exactly like a review that approved nothing. */
+  stepOutcomes?: StepOutcomes
+}
+
+export interface StepOutcomes {
+  /** Steps that executed. A dispatched step with no recorded result counts as
+   *  ran: only an explicit skip is evidence that nothing happened. */
+  ran: string[]
+  /** Steps dispatched but skipped, each with the reason recorded on its
+   *  step_skipped log entry. */
+  skipped: { step: string; reason: string }[]
+}
+
+// stepsRun holds every step the runner dispatched, skips included; results holds
+// what each one did. Split them so callers can report a run where nothing
+// happened without re-deriving the reasons from the log file.
+export function summariseStepOutcomes(
+  stepsRun: readonly string[],
+  results: Record<string, StepResult>,
+): StepOutcomes {
+  const outcomes: StepOutcomes = { ran: [], skipped: [] }
+  for (const name of new Set(stepsRun)) {
+    const result = results[name]
+    if (result?.skipped) outcomes.skipped.push({ step: name, reason: result.skipReason ?? 'unknown' })
+    else outcomes.ran.push(name)
+  }
+  return outcomes
+}
+
+// Accumulates outcomes across the fix→recheck rounds of one invocation, so the
+// completion line reports whether the run as a whole did work: a first round
+// that skips everything followed by a round that applies a fix is not a
+// "no step ran" run.
+//
+// Running once wins over skipping any number of times — the step demonstrably
+// happened. A step skipped in several rounds is reported once, carrying its
+// latest reason: that is the state the run ended in, and listing the same step
+// several times reads as several distinct problems.
+export function mergeStepOutcomes(
+  base: StepOutcomes | undefined,
+  next: StepOutcomes | undefined,
+): StepOutcomes | undefined {
+  if (!base) return next
+  if (!next) return base
+  const ran = [...new Set([...base.ran, ...next.ran])]
+  const ranSet = new Set(ran)
+  // Map.set on an existing key overwrites the reason but keeps the original
+  // position, so order stays first-seen while the reason stays last-seen.
+  const skipped = new Map<string, string>()
+  for (const entry of [...base.skipped, ...next.skipped]) {
+    if (!ranSet.has(entry.step)) skipped.set(entry.step, entry.reason)
+  }
+  return { ran, skipped: [...skipped].map(([step, reason]) => ({ step, reason })) }
 }
 
 function countComments(reviewText: string): number {
@@ -402,21 +458,48 @@ export function conflictResolveCommitSubject(conflictCount: number, vendor: Vend
   return `[crosscheck] resolve: resolve ${conflictCount} conflict${conflictCount !== 1 ? 's' : ''} — by ${vendorDisplayName(vendor)}`
 }
 
-// Extends resolveReviewer with a human-origin fallback for the fix step.
+// Extends resolveReviewer with a human-origin fallback for the steps that write
+// code (fix, conflict-resolve).
 // Scoped to reviewer: 'origin' only — other reviewer types (claude, codex, auto)
 // already encode explicit vendor intent and need no fallback.
 // When origin is 'human' and no vendor resolved, honours routing.fallback_reviewer
-// so the fix step respects the same routing intent as the review step.
-// 'auto' mirrors resolveReviewer's auto path (config-enabled check, codex-first)
-// without async auth calls. null disables the fallback entirely.
-// Exported so callers can detect when the fallback was applied (e.g. for logging).
-export function resolveFixVendor(
+// so the step respects the same routing intent as the review step.
+// 'auto' resolves against the vendors that can actually run stepType, so a step
+// only one vendor supports doesn't fall back to the other and skip a line later.
+// An explicit 'claude'/'codex' is an operator decision and is honoured as written
+// even when that vendor cannot run the step — the caller then reports a precise
+// unsupported-step skip instead of silently substituting a different vendor.
+// null disables the fallback entirely.
+function resolveStepVendor(
+  stepType: string,
   stepReviewer: string,
   origin: PROrigin,
   config: Config,
   fallback?: 'claude' | 'codex',
-): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean } {
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
   const vendor = resolveReviewer(stepReviewer, origin, config, fallback)
+
+  // Origin detection can assign a vendor that cannot run the step: conflict
+  // resolution is Claude-only, so a Codex-origin PR (reviewer: 'origin', origin:
+  // 'codex') resolves to 'codex' and the dispatch skips it as unsupported — the
+  // conflicts never get resolved. (#284's `Crosscheck-Reviewer: codex` detection
+  // introduced this: these crosscheck-authored fix PRs used to detect as 'human'
+  // and the auto fallback picked Claude.) Substitute a capable, enabled vendor.
+  // Scoped to origin-derived assignment only — an explicit reviewer: claude|codex,
+  // reviewer: auto, or routing.fallback_reviewer is an operator decision, left as
+  // written so the caller can report the precise unsupported-step skip.
+  if (
+    stepReviewer === 'origin' &&
+    (origin === 'claude' || origin === 'codex') &&
+    vendor !== null &&
+    !supportsStep(vendor, stepType)
+  ) {
+    const capable: Vendor = vendor === 'claude' ? 'codex' : 'claude'
+    if (config.vendors[capable].enabled && supportsStep(capable, stepType)) {
+      return { vendor: capable, usedHumanFallback: false, substitutedOriginVendor: vendor }
+    }
+  }
+
   if (vendor !== null || origin !== 'human' || stepReviewer !== 'origin') {
     return { vendor, usedHumanFallback: false }
   }
@@ -425,11 +508,35 @@ export function resolveFixVendor(
   if (fb === 'claude') humanFallback = config.vendors.claude.enabled ? 'claude' : null
   else if (fb === 'codex') humanFallback = config.vendors.codex.enabled ? 'codex' : null
   else if (fb !== null) {
-    // 'auto': prefer codex then claude, same as resolveReviewer's auto path
-    humanFallback = config.vendors.codex.enabled ? 'codex' : config.vendors.claude.enabled ? 'claude' : null
+    // 'auto': prefer codex then claude, same as resolveReviewer's auto path,
+    // narrowed to vendors that support this step type.
+    const usable = (v: Vendor): boolean => config.vendors[v].enabled && supportsStep(v, stepType)
+    humanFallback = usable('codex') ? 'codex' : usable('claude') ? 'claude' : null
   }
   if (!humanFallback) return { vendor: null, usedHumanFallback: false }
   return { vendor: humanFallback, usedHumanFallback: true }
+}
+
+// Exported so callers can detect when the fallback was applied (e.g. for logging).
+export function resolveFixVendor(
+  stepReviewer: string,
+  origin: PROrigin,
+  config: Config,
+  fallback?: 'claude' | 'codex',
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
+  return resolveStepVendor('fix', stepReviewer, origin, config, fallback)
+}
+
+// The default workflow gives conflict-resolve `reviewer: origin`, so every PR
+// crosscheck cannot attribute resolved to null here and skipped with 'no_vendor'
+// — the fix step honoured routing.fallback_reviewer, this one did not.
+export function resolveConflictResolveVendor(
+  stepReviewer: string,
+  origin: PROrigin,
+  config: Config,
+  fallback?: 'claude' | 'codex',
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
+  return resolveStepVendor('conflict-resolve', stepReviewer, origin, config, fallback)
 }
 
 // ─── pr_complexity helpers ────────────────────────────────────────────────────
@@ -977,7 +1084,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     if (exceedsMaxRounds(effectiveType, step.type, ctx.overrideMaxRounds ?? step.max_rounds, ctx.round)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'max_rounds' })
-      results[step.name] = { skipped: true }
+      results[step.name] = { skipped: true, skipReason: 'max_rounds' }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
       else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
@@ -987,7 +1094,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     // Evaluate when condition — skip step if false
     if (step.when && !evaluateWhen(step.when, results)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'when_condition' })
-      results[step.name] = { skipped: true }
+      results[step.name] = { skipped: true, skipReason: 'when_condition' }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
       else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
@@ -999,7 +1106,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     // review coerced to a recheck (isRecheckRun) is never blocked here.
     if (step.type === 'recheck' && reviewRanThisSession && !anyFixApplied(results)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_change_since_review' })
-      results[step.name] = { skipped: true }
+      results[step.name] = { skipped: true, skipReason: 'no_change_since_review' }
       onPhaseChange('', { phase: 'rechecked' })
       continue
     }
@@ -1009,7 +1116,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let reviewer = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
-        results[step.name] = { skipped: true }
+        results[step.name] = { skipped: true, skipReason: 'no_reviewer' }
         continue
       }
 
@@ -1270,7 +1377,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const skipFix = (reason: string) => {
         lastFixSkipReason = reason
         onPhaseChange('', { phase: 'fixed', fixCount: 0 })
-        results[step.name] = { skipped: true }
+        results[step.name] = { skipped: true, skipReason: reason }
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
       }
 
@@ -1669,7 +1776,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     } else if (effectiveType === 'conflict-resolve') {
       const skipConflictResolve = (reason: string) => {
         onPhaseChange('', { phase: 'fixed', fixCount: 0 })
-        results[step.name] = { skipped: true }
+        results[step.name] = { skipped: true, skipReason: reason }
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
       }
 
@@ -1712,7 +1819,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      // resolveConflictResolveVendor extends resolveReviewer with the same human-origin
+      // fallback the fix step uses, so a PR crosscheck cannot attribute still gets its
+      // conflicts resolved instead of skipping with 'no_vendor'.
+      const { vendor, usedHumanFallback, substitutedOriginVendor } = resolveConflictResolveVendor(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      if (usedHumanFallback && vendor) {
+        fileLog({ level: 'info', event: 'conflict_resolve_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: 'none', to: vendor, reason: 'human_origin' })
+      } else if (substitutedOriginVendor && vendor) {
+        fileLog({ level: 'info', event: 'conflict_resolve_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: substitutedOriginVendor, to: vendor, reason: 'unsupported_vendor' })
+      }
       if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
       if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
       // Conflict-resolve is mechanical text surgery bounded by the markers —
@@ -1891,6 +2006,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   return {
     verdict: verdict ?? null,
     fixAppliedCount,
+    stepOutcomes: summariseStepOutcomes(stepsRun, results),
     ...(fixAppliedCount === undefined && lastFixSkipReason !== undefined && { fixSkipReason: lastFixSkipReason }),
     ...(latestReviewResult?.commentBody && {
       latestReviewComment: {

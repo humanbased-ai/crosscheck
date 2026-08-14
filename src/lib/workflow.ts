@@ -155,6 +155,10 @@ export interface StepResult {
   commentId?: number
   applied_count?: number
   skipped?: boolean
+  /** Why the step was skipped, matching the reason on its step_skipped log entry
+   *  (e.g. 'no_vendor', 'when_condition', 'no_conflicts'). Set whenever
+   *  `skipped` is — it is what lets the CLI say a run did nothing and why. */
+  skipReason?: string
   tokens_used?: number
   input_tokens?: number
   output_tokens?: number

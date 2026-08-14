@@ -5,7 +5,31 @@ import { checkClaudeAuth } from '../reviewers/claude.js'
 
 export type PROrigin = 'claude' | 'codex' | 'human'
 
-// Applies codex_reviews_patterns / claude_reviews_patterns against a single text block.
+// Crosscheck's own attribution on work crosscheck wrote. Not part of
+// routing.*_reviews_patterns on purpose: Zod defaults apply only when a field is
+// absent, so an install that pinned its own pattern list would never receive
+// these and would keep reading its own fix PRs as human. This is a fact about
+// output crosscheck produced — same footing as the annotation contract — not a
+// routing preference, so it is always checked.
+//
+// Authorship only. The 'Reviewed' footer says who looked at the code and the
+// 'Attempted' footer marks a fix that failed and produced nothing; neither is
+// evidence of authorship, and matching them would route every reviewed PR back
+// to the other vendor as if it were agent-authored.
+const SELF_AUTHORED_PATTERNS: ReadonlyArray<{ pattern: RegExp; origin: PROrigin }> = [
+  // Fix-PR body footer — buildAttributionFooter({ action: 'Fixed', ... }).
+  { pattern: /Fixed with \[Claude Code\]/i, origin: 'claude' },
+  { pattern: /Fixed with \[OpenAI Codex\]/i, origin: 'codex' },
+  // Commit trailer — buildCommitTrailers on fix and conflict-resolve commits.
+  // Anchored to its own line: the field name is quoted in prose (this repo's
+  // changelog and docs do it), and prose is not a trailer.
+  { pattern: /^Crosscheck-Reviewer:[^\S\n]*claude[^\S\n]*$/im, origin: 'claude' },
+  { pattern: /^Crosscheck-Reviewer:[^\S\n]*codex[^\S\n]*$/im, origin: 'codex' },
+]
+
+// Applies codex_reviews_patterns / claude_reviews_patterns against a single text
+// block, then crosscheck's own always-on markers. Configured patterns are
+// checked first: they are explicit routing intent and outrank the default.
 // Returns the detected origin or null if nothing matched.
 function matchPatterns(text: string, config: Config): PROrigin | null {
   for (const pattern of config.routing.codex_reviews_patterns) {
@@ -13,6 +37,9 @@ function matchPatterns(text: string, config: Config): PROrigin | null {
   }
   for (const pattern of config.routing.claude_reviews_patterns) {
     if (new RegExp(pattern, 'i').test(text)) return 'codex'
+  }
+  for (const { pattern, origin } of SELF_AUTHORED_PATTERNS) {
+    if (pattern.test(text)) return origin
   }
   return null
 }

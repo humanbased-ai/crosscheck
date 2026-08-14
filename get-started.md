@@ -1238,6 +1238,13 @@ routing:
   #   2. Commit message Co-Authored-By: trailers (API call, non-fatal if it fails)
   #   3. Branch prefix (claude/ or codex/)
   #   4. author_routes fallback (last resort)
+  # These say who WROTE the code, not who reviewed it.
+  #
+  # Crosscheck's own attribution — its fix-PR footer and `Crosscheck-Reviewer`
+  # commit trailers — is recognised ALWAYS, whatever you put here. Setting either
+  # list replaces the defaults, so if these markers lived in the list a pinned
+  # config would misread crosscheck's own fix PRs as human-authored. Your patterns
+  # are checked first and still win.
   codex_reviews_patterns:
     - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
     - "Co-Authored-By: Claude"              # commit trailer
