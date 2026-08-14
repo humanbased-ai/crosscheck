@@ -9,6 +9,8 @@
 // 2. It pushed with a plain `git push`, so a fix branch left behind by an earlier round
 //    of the same PR made the push non-fast-forward and the fix was lost.
 
+import { autoFixBranchName, isCrosscheckAutoFixPR } from '../github/superseded-fix-pr.js'
+
 export type AutoFixDelivery =
   // The base branch exists — push the branch and open the follow-up PR.
   | { kind: 'pull_request'; base: string }
@@ -51,4 +53,69 @@ export function parseLsRemoteOid(output: string): string | null {
 
 export function isLeaseRejection(message: string): boolean {
   return /stale info|force-with-lease|fetch first|non-fast-forward/i.test(message)
+}
+
+// What GitHub reports about a PR whose head is the fix branch. Structural, so the
+// decision below can be exercised without an Octokit response.
+export interface FixBranchPR {
+  number: number
+  body?: string | null
+  user?: { login: string } | null
+  head: { ref: string }
+}
+
+export type FixBranchOwnership =
+  | { owned: true; fixPrNumber: number }
+  | { owned: false; reason: 'identity_unknown' | 'no_crosscheck_fix_pr' }
+
+// Whether the fix branch that already exists on the remote is crosscheck's own artifact,
+// and so safe to replace.
+//
+// Anything the pusher controls is not evidence: a commit message trailer, an author or
+// committer name, and the branch name itself are all free-form strings that whoever
+// creates `fix/cr-<n>-review-issues` can set to whatever they like — so a human branch
+// carrying a `Crosscheck-Reviewer:` trailer would read as crosscheck's and be
+// force-overwritten. Ownership is instead taken from GitHub's own record: a pull request
+// **opened by the identity crosscheck authenticates as**, from this exact branch, whose
+// body carries the auto-fix marker. Another actor cannot produce that record without
+// crosscheck's credentials.
+//
+// The residual case is an install whose token belongs to a human who also works by hand:
+// there, "crosscheck" and "that person" are one account and no check can separate them.
+//
+// Closed PRs count — the branch is still crosscheck's artifact once it has opened a PR
+// from it. A branch with no such PR (an orphan left by a round that pushed before PR
+// creation failed) is deliberately not replaced: the fix is delivered as a diff instead,
+// which loses the follow-up PR but never someone else's commits.
+export function assessFixBranchOwnership(input: {
+  sourcePrNumber: number
+  crosscheckLogin: string | null
+  candidates: FixBranchPR[]
+}): FixBranchOwnership {
+  if (!input.crosscheckLogin) return { owned: false, reason: 'identity_unknown' }
+  const login = input.crosscheckLogin.toLowerCase()
+  const fixBranch = autoFixBranchName(input.sourcePrNumber)
+  const ours = input.candidates.find(candidate =>
+    candidate.head?.ref === fixBranch
+    && candidate.user?.login?.toLowerCase() === login
+    && isCrosscheckAutoFixPR(candidate.body, input.sourcePrNumber))
+  return ours ? { owned: true, fixPrNumber: ours.number } : { owned: false, reason: 'no_crosscheck_fix_pr' }
+}
+
+// `pulls.create` rejecting the base branch, which is how a source PR that merges between
+// the pre-flight check and the create call reports itself: GitHub deleted the head branch
+// in that window, so the base we validated is gone by the time we ask for the PR.
+export function isInvalidBaseError(err: unknown): boolean {
+  const failure = err as {
+    status?: number
+    message?: string
+    errors?: Array<{ field?: string; code?: string }>
+    response?: { data?: { errors?: Array<{ field?: string; code?: string }> } }
+  }
+  if (failure?.status !== 422) return false
+  const errors = failure.response?.data?.errors ?? failure.errors ?? []
+  if (errors.some(entry => entry?.field === 'base' && entry?.code === 'invalid')) return true
+  // Octokit's RequestError embeds the response body in its message; a shape we don't
+  // recognise field-by-field is still readable there.
+  return /"field"\s*:\s*"base"/.test(failure.message ?? '')
 }
