@@ -23,6 +23,7 @@ import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
+import { buildNoVerdictReport, renderNoVerdictReport } from '../lib/no-verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
@@ -321,12 +322,23 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   // one-step-at-a-time (watch owns continuation via webhooks). For all other
   // triggers (direct user invocation, backtrace, etc.) run all remaining steps
   // from the detected starting point so a standalone `ck run` still works end-to-end.
+
+  // The verdict already on the PR when this run started, if any. Read only for
+  // reporting: a run that ends with no verdict of its own has to say what the PR
+  // still claims, and whether that claim covers the code being reviewed. Taken
+  // from the history the step detection already fetched — an explicit --steps
+  // run skips that fetch, and the report drops the line rather than paying for
+  // a round-trip it would otherwise never make.
+  let standingVerdict: { verdict?: string; sha?: string } | undefined
+
   if (!opts.steps) {
     try {
       const history = await fetchStepHistory(owner, repo, number, token)
       // prData comes from pulls.get, which carries `mergeable` — so routing a conflicted
       // PR to conflict-resolve costs no extra call here.
       const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha, { mergeable: prData.mergeable })
+      const lastJudged = history.filter(r => r.type === 'review' || r.type === 'recheck').at(-1)
+      if (lastJudged?.verdict) standingVerdict = { verdict: lastJudged.verdict, sha: lastJudged.sha }
       if (nextResult.step === null) {
         if (nextResult.stopReason === 'approved') {
           // This commit is approved; a push moves HEAD and re-opens the workflow.
@@ -781,33 +793,56 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       }
 
       activeSpinner.stop()
-      // A run is "no step ran" only when every step across every round skipped.
-      // If the first round skips everything but a later crazy/halfcrazy round
-      // runs a fix, the overall run did work and should not report "no step ran".
-      const ranNothing = accumulatedStepOutcomes !== undefined
-        && accumulatedStepOutcomes.ran.length === 0
-        && accumulatedStepOutcomes.skipped.length > 0
-
-      if (strategySkipped) {
-        console.log(chalk.dim(`\n  skipped — ${strategySkipped} class, nothing to review`))
-      } else if (accumulatedStepOutcomes && ranNothing) {
-        // Every dispatched step skipped. `verdict —` on its own reads as "ran and
-        // found nothing", and the green line below then certified a no-op as a
-        // success — which is how conflict-resolve skipping for want of a vendor
-        // went unnoticed across a whole batch of PRs. The reasons are the report.
-        console.log(chalk.yellow(`\n  no step ran`))
-        for (const { step, reason } of accumulatedStepOutcomes.skipped) {
-          console.log(chalk.dim(`    ${step} — ${reason}`))
-        }
+      // Every run that ends without a verdict gets the same report, whatever the
+      // steps did. Keying on the steps instead — "nothing ran", as this did
+      // before — only moves the blind spot: PR #2548 ran its fix step, applied
+      // nothing, had recheck gated out by `fix.applied_count > 0`, and printed a
+      // bare `verdict —` under a green checkmark. So did a review that ran at
+      // full price and emitted no parseable VERDICT: line. What makes a verdict
+      // missing is what became of the steps that produce one.
+      if (verdict === null) {
+        const report = buildNoVerdictReport({
+          workflowSteps: allSteps,
+          outcomes: accumulatedStepOutcomes,
+          strategySkipped,
+          // Resume narrows the step list too, but it still runs to the end of
+          // the workflow — only an explicit ask counts as deliberate scoping.
+          stepsExplicitlyScoped: opts.steps !== undefined || opts.trigger === 'kickass',
+          prUrl,
+          ...(standingVerdict && { standingVerdict }),
+          headSha: sha,
+        })
+        console.log('')
+        renderNoVerdictReport(report).forEach((line, i) => {
+          if (line === '') return console.log('')
+          // The headline carries the alarm and the recommended command is what
+          // the reader is meant to copy, so neither is dimmed into the body.
+          if (i === 0) return console.log(report.expected ? chalk.dim(`  ${line}`) : chalk.yellow(`  ${line}`))
+          console.log(line.startsWith('→ ') ? `  ${line}` : chalk.dim(`  ${line}`))
+        })
+        fileLog({
+          level: report.expected ? 'info' : 'warn',
+          event: 'workflow_no_verdict',
+          repo: `${owner}/${repo}`,
+          pr: number,
+          cause: report.cause,
+          expected: report.expected,
+          verdict_steps: report.verdictSteps,
+          ...(accumulatedStepOutcomes && {
+            ran: accumulatedStepOutcomes.ran,
+            skipped: accumulatedStepOutcomes.skipped,
+          }),
+        })
+        // Exit code is unchanged: a run with no verdict is a legitimate outcome,
+        // not a failure, and the exit codes are part of the CLI contract. The
+        // marker is the signal — ⚠ only when a verdict was actually in reach.
+        console.log(report.expected
+          ? chalk.green(`\n✓ Workflow complete — ${prUrl}\n`)
+          : chalk.yellow(`\n⚠  Workflow complete, no verdict — ${prUrl}\n`))
       } else {
         console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
+        console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
       }
-
-      // Exit code is unchanged: a skipped step is a legitimate outcome, not a
-      // failure, and the exit codes are part of the CLI contract.
-      console.log(ranNothing && !strategySkipped
-        ? chalk.yellow(`\n⚠  Workflow complete, no step ran — ${prUrl}\n`)
-        : chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
     } catch (err: unknown) {
       workflowError = err
       logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)

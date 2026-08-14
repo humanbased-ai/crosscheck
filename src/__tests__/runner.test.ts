@@ -617,6 +617,39 @@ describe('summariseStepOutcomes', () => {
   it('returns empty lists when no step was dispatched', () => {
     expect(summariseStepOutcomes([], results({}))).toEqual({ ran: [], skipped: [] })
   })
+
+  describe('ranDetail', () => {
+    it('records vendor, tokens and applied count for a step that ran', () => {
+      const out = summariseStepOutcomes(['fix'], results({
+        fix: { applied_count: 0, tokens_used: 3483, vendor: 'claude' },
+      }))
+      expect(out.ranDetail).toEqual({ fix: { vendor: 'claude', tokensUsed: 3483, appliedCount: 0 } })
+    })
+
+    // The distinction the whole no-verdict report rests on: a review that ran and
+    // produced no parseable verdict is in `ran` exactly like one that approved.
+    it('keeps a null verdict, which says the step ran and judged nothing', () => {
+      const out = summariseStepOutcomes(['review'], results({ review: { verdict: null } }))
+      expect(out.ranDetail?.review).toEqual({ verdict: null })
+      expect('verdict' in (out.ranDetail?.review ?? {})).toBe(true)
+    })
+
+    it('omits the verdict key for a step that produces no verdict', () => {
+      const out = summariseStepOutcomes(['fix'], results({ fix: { applied_count: 1 } }))
+      expect('verdict' in (out.ranDetail?.fix ?? {})).toBe(false)
+    })
+
+    // Existing callers compare the whole object; an always-present empty record
+    // would break them for no gain.
+    it('is omitted entirely when nothing was recorded', () => {
+      expect(summariseStepOutcomes(['fix'], results({}))).toEqual({ ran: ['fix'], skipped: [] })
+    })
+
+    it('records nothing for a skipped step', () => {
+      const out = summariseStepOutcomes(['fix'], results({ fix: { skipped: true, skipReason: 'no_vendor' } }))
+      expect(out.ranDetail).toBeUndefined()
+    })
+  })
 })
 
 describe('mergeStepOutcomes', () => {
@@ -667,5 +700,31 @@ describe('mergeStepOutcomes', () => {
     expect(mergeStepOutcomes(undefined, only)).toBe(only)
     expect(mergeStepOutcomes(only, undefined)).toBe(only)
     expect(mergeStepOutcomes(undefined, undefined)).toBeUndefined()
+  })
+
+  describe('ranDetail', () => {
+    // A step the later round ran again is re-described by it wholesale. Merging
+    // field-by-field would leave round 1's `verdict: null` standing after round 2
+    // approved, and the report would call a judged run unjudged.
+    it('lets the later round replace an earlier observation of the same step', () => {
+      const merged = mergeStepOutcomes(
+        { ran: ['review'], skipped: [], ranDetail: { review: { verdict: null, tokensUsed: 900 } } },
+        { ran: ['review'], skipped: [], ranDetail: { review: { verdict: 'APPROVE' } } },
+      )
+      expect(merged?.ranDetail).toEqual({ review: { verdict: 'APPROVE' } })
+    })
+
+    it('keeps detail for a step the later round did not run', () => {
+      const merged = mergeStepOutcomes(
+        { ran: ['fix'], skipped: [], ranDetail: { fix: { appliedCount: 0 } } },
+        { ran: ['recheck'], skipped: [], ranDetail: { recheck: { verdict: 'BLOCK' } } },
+      )
+      expect(merged?.ranDetail).toEqual({ fix: { appliedCount: 0 }, recheck: { verdict: 'BLOCK' } })
+    })
+
+    it('is omitted when neither side recorded any', () => {
+      expect(mergeStepOutcomes({ ran: ['fix'], skipped: [] }, { ran: ['fix'], skipped: [] }))
+        .toEqual({ ran: ['fix'], skipped: [] })
+    })
   })
 })
