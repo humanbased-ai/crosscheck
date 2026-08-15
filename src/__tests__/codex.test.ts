@@ -149,6 +149,23 @@ describe('buildCodexReviewPrompt', () => {
     expect(prompt).toContain('Review only the changes introduced in this PR')
   })
 
+  // The clone creates refs/remotes/origin/<base> and no local <base> branch
+  // (see clonePRForReview), so `git diff staging...HEAD` — the obvious reading of
+  // a bare branch name — fails on any non-default base and can leave the agent
+  // reviewing an empty diff. Review on #298 caught this. Naming the exact command
+  // is the fix: `codex exec review --base` cannot be used instead, because there
+  // --base and a custom prompt are mutually exclusive.
+  it('names a diff command whose ref actually exists in the clone', () => {
+    const prompt = buildCodexReviewPrompt(base)
+    expect(prompt).toContain('git diff origin/staging...HEAD')
+    expect(prompt).not.toMatch(/git diff staging\.\.\.HEAD/)
+  })
+
+  it('scopes the diff command to the PR\'s own base, not a hardcoded one', () => {
+    const prompt = buildCodexReviewPrompt({ ...base, baseBranch: 'release/2.1' })
+    expect(prompt).toContain('git diff origin/release/2.1...HEAD')
+  })
+
   it('always ends with the behaviour block so the verdict rule is last', () => {
     // The verdict rule is the final line of behaviorInstructions and is
     // machine-parsed. Repository guidance is reference material, so it is the

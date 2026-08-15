@@ -157,6 +157,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           undefined,
           undefined,
           skillSession,
+          config.skills.codex_full_access,
         ))
       } else {
         ;({ review: reviewText, tokensUsed, model, effort } = await runClaudeReview(

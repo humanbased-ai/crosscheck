@@ -6,7 +6,9 @@ import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeEffort } from './claude.js'
 import { codexReasoningEffort } from './codex.js'
-import { claudeSkillBrokerArgs, codexSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
+import { claudeSkillBrokerArgs, codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
+import { buildCodexEnv } from './codex-env.js'
+import { withCredentialFreeOrigin } from '../lib/clone.js'
 
 interface ClaudeJsonOutput {
   result?: unknown
@@ -268,6 +270,9 @@ export async function runCodexFixStep(
   // configured effort applied to the review and then silently dropped for the
   // fix; the posted card now reports this value, so it has to be the real one.
   configuredEffort?: string,
+  // skills.codex_full_access — see runCodexReview. The fix step reads the same
+  // untrusted review comment and diff, so it is gated identically.
+  codexFullAccess = false,
 ): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort: string }> {
   const effort = codexReasoningEffort(configuredEffort ?? 'medium')
   let diff = ''
@@ -283,21 +288,25 @@ export async function runCodexFixStep(
     .replace('{PR_TITLE}', prTitle)
     .replace('{REVIEW_COMMENT}', reviewComment.slice(0, 8000))
     .replace('{DIFF}', diff.slice(0, 16000))
-    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
+    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', codexSkillsReachable(skillSession, codexFullAccess) ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
 
   const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
   const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
 
   try {
-    await execa(
+    await withCredentialFreeOrigin(tmpDir, () => execa(
       'codex',
-      ['exec', ...modelArgs, '-c', `model_reasoning_effort="${effort}"`, ...codexSkillBrokerArgs(skillSession), prompt],
+      // --ignore-user-config and the env allowlist for the same reason as the
+      // review path: this step reads an untrusted diff, and with
+      // skills.codex_full_access it runs unsandboxed.
+      ['exec', '--ignore-user-config', ...modelArgs, '-c', `model_reasoning_effort="${effort}"`, ...codexSkillBrokerArgs(skillSession, codexFullAccess), prompt],
       {
         cwd: tmpDir,
         timeout: resolvedTimeout,
-        env: { ...process.env, CODEX_QUIET_MODE: '1', HOME: process.env.HOME ?? '' },
+        extendEnv: false,
+        env: buildCodexEnv({ CODEX_QUIET_MODE: '1' }),
       },
-    )
+    ))
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (/not logged in|auth|credential/i.test(msg)) {

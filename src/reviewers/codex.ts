@@ -9,7 +9,9 @@ import { resolveCodexModel } from '../lib/review-models.js'
 import type { ReviewResult } from './claude.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
-import { codexSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
+import { codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
+import { buildCodexEnv } from './codex-env.js'
+import { withCredentialFreeOrigin } from '../lib/clone.js'
 import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
 
 // Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
@@ -70,7 +72,13 @@ export interface CodexReviewPromptInput {
 }
 
 // `codex review --base` scoped the diff by itself; `codex exec` does not, so the
-// prompt states the base and the scope. Block order matches runClaudeReview
+// prompt has to name the range. It gives the exact command rather than the branch
+// name: the clone creates `refs/remotes/origin/<base>` and no local `<base>`
+// branch, so `git diff <base>...HEAD` — the obvious reading of a bare branch name
+// — fails outright on any non-default base and can leave the agent reviewing an
+// empty diff. `codex exec review --base` is not the alternative it appears to be:
+// there `--base` and a custom prompt are mutually exclusive, so it cannot carry
+// the verdict rule or the skill instructions. Block order matches runClaudeReview
 // exactly, so the same PR gets the same brief whichever vendor draws it:
 // skills before the behaviour block (activation must happen before the review
 // starts, and the behaviour block ends on the verdict rule, so anything after it
@@ -80,6 +88,7 @@ export function buildCodexReviewPrompt(input: CodexReviewPromptInput): string {
   return [
     `You are reviewing a pull request titled: "${input.prTitle}".`,
     `The branch \`${input.baseBranch}\` is the base. Review only the changes introduced in this PR.`,
+    `Read them with \`git diff origin/${input.baseBranch}...HEAD\` — this checkout has the remote-tracking ref \`origin/${input.baseBranch}\`, not a local \`${input.baseBranch}\` branch.`,
     input.issueContext ?? '',
     input.focusLine ?? '',
     input.customPrompt ?? '',
@@ -144,6 +153,9 @@ export async function runCodexReview(
   // the review to the stated goal. Omitted when enrichment is off / unresolved.
   issueContext?: string,
   skillSession?: SkillActivationSession,
+  // skills.codex_full_access. Codex reaches the broker only with the sandbox off,
+  // so this is what decides whether skills are offered to codex at all.
+  codexFullAccess = false,
 ): Promise<ReviewResult> {
   const model = resolveCodexModel(quality, vendor)
   const tierTimeout = tierTimeoutMs(quality.tier)
@@ -166,7 +178,12 @@ export async function runCodexReview(
     issueContext,
     focusLine: focusNote,
     customPrompt: quality.custom_prompt,
-    skillInstructions: skillSession ? renderSkillBrokerInstructions(skillSession) : undefined,
+    // Gated, not merely unused: telling codex to call a tool it cannot reach is
+    // how this failed before — 244 runs obliged to call `list_enabled_skills`,
+    // every call cancelled, 0 activations.
+    skillInstructions: codexSkillsReachable(skillSession, codexFullAccess)
+      ? renderSkillBrokerInstructions(skillSession)
+      : undefined,
     behaviorInstructions: stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS,
     repositoryGuidance: loadRepositoryReviewGuidance(repoDir, baseBranch),
   })
@@ -176,7 +193,7 @@ export async function runCodexReview(
   for (let attempt = 1; attempt <= MAX_CODEX_RETRIES; attempt++) {
     try {
       const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
-      const skillArgs = codexSkillBrokerArgs(skillSession)
+      const skillArgs = codexSkillBrokerArgs(skillSession, codexFullAccess)
       const reasoningEffort = codexReasoningEffort(vendor.effort)
       const effortArgs = ['-c', `model_reasoning_effort="${reasoningEffort}"`]
       // The agent's final message is the review. Reading it from a file rather
@@ -186,30 +203,40 @@ export async function runCodexReview(
       onLog?.(`  running: codex exec --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''} -c model_reasoning_effort="${reasoningEffort}"`)
 
       try {
-        const { result, retried } = await withTimeoutRetry(
+        const { result, retried } = await withCredentialFreeOrigin(repoDir, () => withTimeoutRetry(
           resolvedTimeout,
           (t) => execa(
             'codex',
             // Prompt on stdin (`-`), not argv: it carries repository guidance and
             // tracker-issue context, which the retired profile file kept out of
             // the process list. runClaudeReview feeds its prompt the same way.
-            ['exec', '-c', 'project_doc_max_bytes=0', ...modelArgs, ...effortArgs, ...skillArgs, '--output-last-message', lastMessagePath, '-'],
+            //
+            // --ignore-user-config: `codex exec` reads ~/.codex/config.toml, which
+            // `codex review` never did. That would hand a review of untrusted code
+            // the operator's own MCP servers and plugins — every connected service
+            // reachable from a prompt injection. Crosscheck passes everything it
+            // needs with -c, so there is nothing to lose by ignoring the rest.
+            // Auth is unaffected: it lives in auth.json, not config.toml.
+            ['exec', '--ignore-user-config', '-c', 'project_doc_max_bytes=0', ...modelArgs, ...effortArgs, ...skillArgs, '--output-last-message', lastMessagePath, '-'],
             {
               cwd: repoDir,
               timeout: t,
               input: prompt,
-              env: {
-                ...process.env,
+              // extendEnv: false or execa merges process.env back in and the
+              // allowlist means nothing. Verified: with this, a shell command run
+              // by codex finds neither GITHUB_TOKEN nor any other export.
+              extendEnv: false,
+              env: buildCodexEnv({
                 // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
                 PATH: `${repoDir}/node_modules/.bin:${process.env.PATH ?? ''}`,
-              },
+              }),
             },
           ),
           {
             onRetry: (effectiveMs, delayMs) =>
               (onRetry ?? onLog)?.(`  ⏱ codex timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),
           },
-        )
+        ))
 
         // Fall back to stdout only if the agent wrote no final message — an
         // aborted run leaves the file empty and stdout is then all there is.
