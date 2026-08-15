@@ -3,6 +3,7 @@ import {
   describeVerdictSteps,
   buildNoVerdictReport,
   renderNoVerdictReport,
+  selectStandingVerdict,
   type NoVerdictInput,
 } from '../lib/no-verdict.js'
 import type { StepOutcomes } from '../lib/runner.js'
@@ -365,5 +366,42 @@ describe('renderNoVerdictReport', () => {
 
   it('never renders a trailing blank line', () => {
     expect(renderNoVerdictReport(report).at(-1)).not.toBe('')
+  })
+})
+
+// A review that ran and emitted no parseable VERDICT: line records no verdict.
+// It judged nothing, so it clears nothing — the earlier BLOCK is still what
+// gates the PR, and the report has to keep saying so.
+describe('selectStandingVerdict', () => {
+  const BLOCK_SHA = 'df95a6b1111111111111111111111111111111a'
+
+  it('takes the newest review or recheck that carries a verdict', () => {
+    expect(selectStandingVerdict([
+      { type: 'review', verdict: 'BLOCK', sha: BLOCK_SHA },
+      { type: 'recheck', verdict: 'NEEDS_WORK', sha: '57ef3ef' },
+    ])).toEqual({ verdict: 'NEEDS_WORK', sha: '57ef3ef' })
+  })
+
+  it('keeps the standing verdict when a later review recorded none', () => {
+    expect(selectStandingVerdict([
+      { type: 'review', verdict: 'BLOCK', sha: BLOCK_SHA },
+      { type: 'review' },
+    ])).toEqual({ verdict: 'BLOCK', sha: BLOCK_SHA })
+  })
+
+  it('ignores records that never produce verdicts', () => {
+    expect(selectStandingVerdict([
+      { type: 'review', verdict: 'BLOCK', sha: BLOCK_SHA },
+      { type: 'fix' },
+      { type: 'conflict-resolve' },
+    ])).toEqual({ verdict: 'BLOCK', sha: BLOCK_SHA })
+  })
+
+  it('omits the sha when the record carries none', () => {
+    expect(selectStandingVerdict([{ type: 'review', verdict: 'BLOCK' }])).toEqual({ verdict: 'BLOCK' })
+  })
+
+  it('returns nothing when no record carries a verdict', () => {
+    expect(selectStandingVerdict([{ type: 'review' }, { type: 'fix' }])).toBeUndefined()
   })
 })

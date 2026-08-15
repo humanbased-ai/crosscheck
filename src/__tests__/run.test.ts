@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildFixRecheckSteps, buildRunChildArgs, resolveWorkflowSteps } from '../commands/run.js'
+import { buildFixRecheckSteps, buildRunChildArgs, headShaForStalenessClaim, resolveWorkflowSteps } from '../commands/run.js'
 import type { PRRef } from '../lib/pr-spec.js'
 import type { WorkflowStep } from '../lib/workflow.js'
 
@@ -156,5 +156,43 @@ describe('buildFixRecheckSteps', () => {
       instructions: 'custom recheck',
       reviewer: 'auto',
     })
+  })
+})
+
+// The staleness line is the report's one claim about whether the standing
+// verdict still describes the code. A fix step pushing a commit invalidates the
+// head captured at dispatch, so the claim is measured against a fresh read.
+describe('headShaForStalenessClaim', () => {
+  const PRE_RUN_HEAD = 'df95a6b1111111111111111111111111111111a'
+  const PUSHED_HEAD = '57ef3ef2d46d35af5b0361b362c8069394d7133c'
+
+  it('measures against the head as it is now, not the one captured at dispatch', async () => {
+    const head = await headShaForStalenessClaim(
+      { verdict: 'BLOCK' },
+      async () => PUSHED_HEAD,
+    )
+
+    expect(head).toBe(PUSHED_HEAD)
+    expect(head).not.toBe(PRE_RUN_HEAD)
+  })
+
+  it('reads nothing when there is no standing verdict to measure', async () => {
+    let fetched = false
+    const head = await headShaForStalenessClaim(undefined, async () => {
+      fetched = true
+      return PUSHED_HEAD
+    })
+
+    expect(head).toBeUndefined()
+    expect(fetched).toBe(false)
+  })
+
+  it('drops the claim rather than falling back to a stale head', async () => {
+    const head = await headShaForStalenessClaim(
+      { verdict: 'BLOCK' },
+      async () => { throw new Error('HttpError: 502 Bad Gateway') },
+    )
+
+    expect(head).toBeUndefined()
   })
 })

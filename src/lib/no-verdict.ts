@@ -48,6 +48,32 @@ export interface VerdictStepShape {
   type: string
 }
 
+/** Minimal shape of a step history record — type and verdict are all this needs. */
+export interface JudgedRecordShape {
+  type: string
+  verdict?: string
+  sha?: string
+}
+
+/**
+ * The verdict that still governs the PR: the newest review or recheck that
+ * actually carries one.
+ *
+ * A review can run, post its findings, and record no verdict at all — that is
+ * the `ran_no_verdict` disposition, and it says nothing about the `BLOCK` that
+ * was standing before it. Taking the newest review-or-recheck record
+ * unconditionally would let one malformed review erase a verdict that still
+ * gates the PR, and the report would go quiet about it in exactly the state
+ * that most needs saying out loud.
+ */
+export function selectStandingVerdict(
+  history: readonly JudgedRecordShape[],
+): { verdict: string; sha?: string } | undefined {
+  const judged = history.filter(r => isVerdictStep(r.type) && r.verdict).at(-1)
+  if (!judged?.verdict) return undefined
+  return { verdict: judged.verdict, ...(judged.sha !== undefined && { sha: judged.sha }) }
+}
+
 export interface NoVerdictInput {
   /** The resolved workflow BEFORE step filtering. Filtering is what separates
    *  `not_configured` from `not_dispatched`, so the pre-filter list is required. */

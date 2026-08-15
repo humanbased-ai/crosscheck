@@ -23,7 +23,7 @@ import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
-import { buildNoVerdictReport, renderNoVerdictReport } from '../lib/no-verdict.js'
+import { buildNoVerdictReport, renderNoVerdictReport, selectStandingVerdict } from '../lib/no-verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
@@ -159,6 +159,34 @@ export function buildFixRecheckSteps(
     if (synthetic) fixRecheckSteps = appendAfterLastFix(fixRecheckSteps, synthetic)
   }
   return fixRecheckSteps
+}
+
+/**
+ * The commit the no-verdict report measures the standing verdict against.
+ *
+ * The head captured at dispatch stops describing the PR the moment a step
+ * pushes: a resumed run can land a fix commit and then have its recheck gated
+ * out, which is the exact shape this report exists to explain. Comparing the
+ * standing verdict against the pre-run head there would claim it covers HEAD
+ * while an unjudged fix commit sits on top of it — the inverse of the truth.
+ *
+ * A failed read yields nothing rather than the pre-run head. Reporting the
+ * verdict without a staleness claim is what this report already does for a
+ * verdict whose own SHA is unknown; asserting coverage from a commit the run
+ * itself moved past is the defect. Nothing else consumes the head, so a run
+ * with no standing verdict never pays for the round-trip.
+ */
+export async function headShaForStalenessClaim(
+  standingVerdict: { verdict?: string } | undefined,
+  fetchHead: () => Promise<string>,
+): Promise<string | undefined> {
+  if (!standingVerdict?.verdict) return undefined
+  try {
+    return await fetchHead()
+  } catch {
+    // Best-effort: the report drops the staleness line rather than guessing.
+    return undefined
+  }
 }
 
 function printRoundModeBanner(mode: 'crazy' | 'halfcrazy'): void {
@@ -337,8 +365,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       // prData comes from pulls.get, which carries `mergeable` — so routing a conflicted
       // PR to conflict-resolve costs no extra call here.
       const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha, { mergeable: prData.mergeable })
-      const lastJudged = history.filter(r => r.type === 'review' || r.type === 'recheck').at(-1)
-      if (lastJudged?.verdict) standingVerdict = { verdict: lastJudged.verdict, sha: lastJudged.sha }
+      standingVerdict = selectStandingVerdict(history)
       if (nextResult.step === null) {
         if (nextResult.stopReason === 'approved') {
           // This commit is approved; a push moves HEAD and re-opens the workflow.
@@ -801,6 +828,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       // full price and emitted no parseable VERDICT: line. What makes a verdict
       // missing is what became of the steps that produce one.
       if (verdict === null) {
+        const reportHeadSha = await headShaForStalenessClaim(standingVerdict, async () => {
+          const { data: currentPR } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
+          return currentPR.head.sha
+        })
         const report = buildNoVerdictReport({
           workflowSteps: allSteps,
           outcomes: accumulatedStepOutcomes,
@@ -810,7 +841,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           stepsExplicitlyScoped: opts.steps !== undefined || opts.trigger === 'kickass',
           prUrl,
           ...(standingVerdict && { standingVerdict }),
-          headSha: sha,
+          ...(reportHeadSha !== undefined && { headSha: reportHeadSha }),
         })
         console.log('')
         renderNoVerdictReport(report).forEach((line, i) => {
