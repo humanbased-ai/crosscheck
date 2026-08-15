@@ -16,6 +16,7 @@ import {
   listUserRepos,
   checkRepoAccessible,
 } from '../github/client.js'
+import { closeSupersededAutoFixPRs } from '../github/superseded-fix-pr.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import {
   loadConfig,
@@ -311,6 +312,8 @@ export async function runWatch(opts: WatchOpts = {}) {
     // Feed the review strategy's `risky` class: without these its `or_labels`
     // (risk:T3) and `or_hotfix_to_default_branch` rules can never fire.
     labels?: string[]; defaultBranch?: string;
+    // ISO timestamp the PR was opened — feeds the open→verdict latency metric.
+    createdAt?: string;
   }): Promise<void> {
     lastActivityAt = Date.now()  // reset idle timer on any PR event
     const { owner, repoName, prNumber } = params
@@ -371,6 +374,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         html_url: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
         user: { login: params.author },
         ...(params.labels !== undefined && { labels: params.labels.map(name => ({ name })) }),
+        ...(params.createdAt !== undefined && { created_at: params.createdAt }),
       }
 
       if (!acquirePRLock(owner, repoName, prNumber, params.headSha)) {
@@ -858,6 +862,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         baseRef: pr.base.ref, action: event.action,
         ...(pr.labels !== undefined && { labels: pr.labels.map(l => l.name) }),
         ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
+        ...(pr.created_at !== undefined && { createdAt: pr.created_at }),
       })
     },
     (msg: string) => bLog(chalk.dim(fmtTime()) + '  ' + msg),
@@ -966,11 +971,39 @@ export async function runWatch(opts: WatchOpts = {}) {
             // depending on which trigger ran it.
             ...(prData.labels !== undefined && { labels: prData.labels.map((l: { name: string }) => l.name) }),
             ...(prData.base.repo?.default_branch !== undefined && { defaultBranch: prData.base.repo.default_branch }),
+            ...(prData.created_at !== undefined && { createdAt: prData.created_at }),
           })
           break
         }
       } catch (err: unknown) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'comment_trigger' }, err)
+      }
+    },
+    async (event: PREvent) => {
+      const owner = event.repository.owner.login
+      const repoName = event.repository.name
+      const prNumber = event.number
+
+      try {
+        const octokit = createGithubClient(token)
+        const outcomes = await closeSupersededAutoFixPRs(
+          octokit, owner, repoName, prNumber,
+          event.pull_request.merge_commit_sha ?? null,
+        )
+        for (const outcome of outcomes) {
+          fileLog({
+            level: outcome.status === 'failed' ? 'warn' : 'info',
+            event: 'auto_fix_pr_superseded',
+            repo: `${owner}/${repoName}`, pr: prNumber,
+            fix_pr: outcome.prNumber, status: outcome.status,
+            ...(outcome.reason && { reason: outcome.reason }),
+          })
+          if (outcome.status === 'closed') {
+            bLog(chalk.dim(fmtTime()) + `  closed superseded auto-fix PR ${owner}/${repoName}#${outcome.prNumber} (${prNumber} merged)`)
+          }
+        }
+      } catch (err: unknown) {
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'auto_fix_supersede' }, err)
       }
     },
   )
@@ -1271,6 +1304,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           baseRef: pr.baseRef, action: 'backtrace',
           ...(pr.labels !== undefined && { labels: pr.labels }),
           ...(pr.defaultBranch !== undefined && { defaultBranch: pr.defaultBranch }),
+          createdAt: pr.createdAt,
         })))
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)

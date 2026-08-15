@@ -26,6 +26,7 @@
   - [diagnose](#crosscheck-diagnose)
   - [optimize](#crosscheck-optimize)
   - [impact](#crosscheck-impact)
+  - [adoption](#crosscheck-adoption)
   - [issue](#crosscheck-issue)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
@@ -234,6 +235,8 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
 ```
 
 If this step fails, fix the specific auth, clone, reviewer, or comment-posting error before enabling `watch`.
+
+If you'd rather nothing be written to the PR on a first run, use `crosscheck run <pr-url> --dry-run` instead: it clones, reviews, and prints the comment it would post without touching GitHub. (`--dry-run` lives on `run`, `fix`, `recheck`, and `resolve` — not on `review`, which always posts.) [docs/trust.md](./docs/trust.md) covers what leaves your machine at each step, which permissions each command needs, and exactly what `watch` can change.
 
 ## Step 3 — Choose a deployment mode
 
@@ -978,6 +981,65 @@ crosscheck impact  (all time · 47 reviews)
 | `--json` | Output the full report as JSON |
 | `-c, --config <path>` | Config file path |
 
+---
+
+### `crosscheck adoption`
+
+Reports whether crosscheck is actually being used, and how long a PR waits for a verdict. Where `impact` prices reviews that happened, `adoption` measures activation and reach. Reads from `~/.crosscheck/logs/` — no network calls, nothing transmitted.
+
+```bash
+crosscheck adoption
+crosscheck adoption --since 2026-07-01
+crosscheck adoption --json
+```
+
+```
+crosscheck adoption  (2026-06-15 → 2026-07-14)
+
+  Activation
+  ──────────────────────────────────────────────
+  onboard started            3
+  onboard completed          2
+  abandoned                  1
+
+  Usage
+  ──────────────────────────────────────────────
+  reviews started            51
+  reviews completed          47
+  rechecks completed         12
+  blocking findings posted   19
+  fixes applied              11
+  active repos               6
+
+  Weekly active repos
+  ──────────────────────────────────────────────
+  2026-06-22  ████████          3 repos  14 reviews
+  2026-06-29  ████████████      4 repos  18 reviews
+  2026-07-06  ████████████████  6 repos  15 reviews
+
+  PR open → verdict
+  ──────────────────────────────────────────────
+  median                     22m
+  p90                        1.8h
+  slowest                    2d
+  measured on 41 verdicts
+  ⓘ 6 verdicts had no PR open time in the event — excluded
+
+  First-run failures  (sessions that never reached a verdict)
+  ──────────────────────────────────────────────
+  auth                       2
+
+  ⓘ derived from local logs only (30d retention) — nothing is transmitted. See docs/metrics.md
+```
+
+| Flag | Description |
+|---|---|
+| `--since <YYYY-MM-DD>` | Limit the analysis to logs from this date onward |
+| `--json` | Output the full report as JSON |
+| `-c, --config <path>` | Config file path |
+
+Every field these numbers are derived from is inventoried in **[docs/metrics.md](./docs/metrics.md)**, including what is deliberately never written to disk.
+
 The monetary estimate formula: `(hours_saved × hourly_rate_usd) + (issues_caught × defect_cost_usd)`. Defaults: `$150/hr`, `$150/issue`. Both configurable in `crosscheck.config.yml` under `impact`.
 
 ---
@@ -1187,6 +1249,13 @@ routing:
   #   2. Commit message Co-Authored-By: trailers (API call, non-fatal if it fails)
   #   3. Branch prefix (claude/ or codex/)
   #   4. author_routes fallback (last resort)
+  # These say who WROTE the code, not who reviewed it.
+  #
+  # Crosscheck's own attribution — its fix-PR footer and `Crosscheck-Reviewer`
+  # commit trailers — is recognised ALWAYS, whatever you put here. Setting either
+  # list replaces the defaults, so if these markers lived in the list a pinned
+  # config would misread crosscheck's own fix PRs as human-authored. Your patterns
+  # are checked first and still win.
   codex_reviews_patterns:
     - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
     - "Co-Authored-By: Claude"              # commit trailer

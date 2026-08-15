@@ -14,6 +14,8 @@ import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
+import { autoFixBranchName, autoFixPRIntro, sourcePRHasMerged } from '../github/superseded-fix-pr.js'
+import { verifyReviewedSha, isVerifiedReviewedSha, reviewedShaRejection } from '../github/reviewed-sha.js'
 import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
 import { shouldPostToLinear } from '../linear/comment.js'
@@ -25,6 +27,9 @@ import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { resolveReviewStrategy, escalate, clampToLevels, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
+import { planAutoFixDelivery, forceWithLeaseArgs, parseLsRemoteOid, isLeaseRejection, assessFixBranchOwnership, isInvalidBaseError } from '../lib/auto-fix-branch.js'
+import type { FixBranchPR } from '../lib/auto-fix-branch.js'
+import { prOpenToVerdictMs } from '../lib/adoption.js'
 import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
@@ -338,6 +343,62 @@ export interface WorkflowResult {
     id?: number
     body: string
   }
+  /** What each dispatched step actually did. Lets a caller tell "ran and found
+   *  nothing" apart from "never ran", which the verdict alone cannot express —
+   *  every step of a conflict-resolve run can skip and still leave verdict null,
+   *  exactly like a review that approved nothing. */
+  stepOutcomes?: StepOutcomes
+}
+
+export interface StepOutcomes {
+  /** Steps that executed. A dispatched step with no recorded result counts as
+   *  ran: only an explicit skip is evidence that nothing happened. */
+  ran: string[]
+  /** Steps dispatched but skipped, each with the reason recorded on its
+   *  step_skipped log entry. */
+  skipped: { step: string; reason: string }[]
+}
+
+// stepsRun holds every step the runner dispatched, skips included; results holds
+// what each one did. Split them so callers can report a run where nothing
+// happened without re-deriving the reasons from the log file.
+export function summariseStepOutcomes(
+  stepsRun: readonly string[],
+  results: Record<string, StepResult>,
+): StepOutcomes {
+  const outcomes: StepOutcomes = { ran: [], skipped: [] }
+  for (const name of new Set(stepsRun)) {
+    const result = results[name]
+    if (result?.skipped) outcomes.skipped.push({ step: name, reason: result.skipReason ?? 'unknown' })
+    else outcomes.ran.push(name)
+  }
+  return outcomes
+}
+
+// Accumulates outcomes across the fix→recheck rounds of one invocation, so the
+// completion line reports whether the run as a whole did work: a first round
+// that skips everything followed by a round that applies a fix is not a
+// "no step ran" run.
+//
+// Running once wins over skipping any number of times — the step demonstrably
+// happened. A step skipped in several rounds is reported once, carrying its
+// latest reason: that is the state the run ended in, and listing the same step
+// several times reads as several distinct problems.
+export function mergeStepOutcomes(
+  base: StepOutcomes | undefined,
+  next: StepOutcomes | undefined,
+): StepOutcomes | undefined {
+  if (!base) return next
+  if (!next) return base
+  const ran = [...new Set([...base.ran, ...next.ran])]
+  const ranSet = new Set(ran)
+  // Map.set on an existing key overwrites the reason but keeps the original
+  // position, so order stays first-seen while the reason stays last-seen.
+  const skipped = new Map<string, string>()
+  for (const entry of [...base.skipped, ...next.skipped]) {
+    if (!ranSet.has(entry.step)) skipped.set(entry.step, entry.reason)
+  }
+  return { ran, skipped: [...skipped].map(([step, reason]) => ({ step, reason })) }
 }
 
 function countComments(reviewText: string): number {
@@ -400,21 +461,48 @@ export function conflictResolveCommitSubject(conflictCount: number, vendor: Vend
   return `[crosscheck] resolve: resolve ${conflictCount} conflict${conflictCount !== 1 ? 's' : ''} — by ${vendorDisplayName(vendor)}`
 }
 
-// Extends resolveReviewer with a human-origin fallback for the fix step.
+// Extends resolveReviewer with a human-origin fallback for the steps that write
+// code (fix, conflict-resolve).
 // Scoped to reviewer: 'origin' only — other reviewer types (claude, codex, auto)
 // already encode explicit vendor intent and need no fallback.
 // When origin is 'human' and no vendor resolved, honours routing.fallback_reviewer
-// so the fix step respects the same routing intent as the review step.
-// 'auto' mirrors resolveReviewer's auto path (config-enabled check, codex-first)
-// without async auth calls. null disables the fallback entirely.
-// Exported so callers can detect when the fallback was applied (e.g. for logging).
-export function resolveFixVendor(
+// so the step respects the same routing intent as the review step.
+// 'auto' resolves against the vendors that can actually run stepType, so a step
+// only one vendor supports doesn't fall back to the other and skip a line later.
+// An explicit 'claude'/'codex' is an operator decision and is honoured as written
+// even when that vendor cannot run the step — the caller then reports a precise
+// unsupported-step skip instead of silently substituting a different vendor.
+// null disables the fallback entirely.
+function resolveStepVendor(
+  stepType: string,
   stepReviewer: string,
   origin: PROrigin,
   config: Config,
   fallback?: 'claude' | 'codex',
-): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean } {
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
   const vendor = resolveReviewer(stepReviewer, origin, config, fallback)
+
+  // Origin detection can assign a vendor that cannot run the step: conflict
+  // resolution is Claude-only, so a Codex-origin PR (reviewer: 'origin', origin:
+  // 'codex') resolves to 'codex' and the dispatch skips it as unsupported — the
+  // conflicts never get resolved. (#284's `Crosscheck-Reviewer: codex` detection
+  // introduced this: these crosscheck-authored fix PRs used to detect as 'human'
+  // and the auto fallback picked Claude.) Substitute a capable, enabled vendor.
+  // Scoped to origin-derived assignment only — an explicit reviewer: claude|codex,
+  // reviewer: auto, or routing.fallback_reviewer is an operator decision, left as
+  // written so the caller can report the precise unsupported-step skip.
+  if (
+    stepReviewer === 'origin' &&
+    (origin === 'claude' || origin === 'codex') &&
+    vendor !== null &&
+    !supportsStep(vendor, stepType)
+  ) {
+    const capable: Vendor = vendor === 'claude' ? 'codex' : 'claude'
+    if (config.vendors[capable].enabled && supportsStep(capable, stepType)) {
+      return { vendor: capable, usedHumanFallback: false, substitutedOriginVendor: vendor }
+    }
+  }
+
   if (vendor !== null || origin !== 'human' || stepReviewer !== 'origin') {
     return { vendor, usedHumanFallback: false }
   }
@@ -423,11 +511,35 @@ export function resolveFixVendor(
   if (fb === 'claude') humanFallback = config.vendors.claude.enabled ? 'claude' : null
   else if (fb === 'codex') humanFallback = config.vendors.codex.enabled ? 'codex' : null
   else if (fb !== null) {
-    // 'auto': prefer codex then claude, same as resolveReviewer's auto path
-    humanFallback = config.vendors.codex.enabled ? 'codex' : config.vendors.claude.enabled ? 'claude' : null
+    // 'auto': prefer codex then claude, same as resolveReviewer's auto path,
+    // narrowed to vendors that support this step type.
+    const usable = (v: Vendor): boolean => config.vendors[v].enabled && supportsStep(v, stepType)
+    humanFallback = usable('codex') ? 'codex' : usable('claude') ? 'claude' : null
   }
   if (!humanFallback) return { vendor: null, usedHumanFallback: false }
   return { vendor: humanFallback, usedHumanFallback: true }
+}
+
+// Exported so callers can detect when the fallback was applied (e.g. for logging).
+export function resolveFixVendor(
+  stepReviewer: string,
+  origin: PROrigin,
+  config: Config,
+  fallback?: 'claude' | 'codex',
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
+  return resolveStepVendor('fix', stepReviewer, origin, config, fallback)
+}
+
+// The default workflow gives conflict-resolve `reviewer: origin`, so every PR
+// crosscheck cannot attribute resolved to null here and skipped with 'no_vendor'
+// — the fix step honoured routing.fallback_reviewer, this one did not.
+export function resolveConflictResolveVendor(
+  stepReviewer: string,
+  origin: PROrigin,
+  config: Config,
+  fallback?: 'claude' | 'codex',
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
+  return resolveStepVendor('conflict-resolve', stepReviewer, origin, config, fallback)
 }
 
 // ─── pr_complexity helpers ────────────────────────────────────────────────────
@@ -975,7 +1087,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     if (exceedsMaxRounds(effectiveType, step.type, ctx.overrideMaxRounds ?? step.max_rounds, ctx.round)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'max_rounds' })
-      results[step.name] = { skipped: true }
+      results[step.name] = { skipped: true, skipReason: 'max_rounds' }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
       else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
@@ -985,7 +1097,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     // Evaluate when condition — skip step if false
     if (step.when && !evaluateWhen(step.when, results)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'when_condition' })
-      results[step.name] = { skipped: true }
+      results[step.name] = { skipped: true, skipReason: 'when_condition' }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
       else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
@@ -997,7 +1109,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     // review coerced to a recheck (isRecheckRun) is never blocked here.
     if (step.type === 'recheck' && reviewRanThisSession && !anyFixApplied(results)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_change_since_review' })
-      results[step.name] = { skipped: true }
+      results[step.name] = { skipped: true, skipReason: 'no_change_since_review' }
       onPhaseChange('', { phase: 'rechecked' })
       continue
     }
@@ -1007,7 +1119,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let reviewer = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
-        results[step.name] = { skipped: true }
+        results[step.name] = { skipped: true, skipReason: 'no_reviewer' }
         continue
       }
 
@@ -1131,7 +1243,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ? `${buildRetriedReviewBanner(retried.timeoutMs, retried.delayMs)}\n\n${baseBody}`
         : baseBody
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, skills_activated: activatedSkills.map(skill => skill.name), ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
+      // How long the PR waited for a verdict, measured from when its author opened
+      // it — the number a team feels, as distinct from duration_ms (how long the
+      // reviewer ran). Omitted rather than guessed when the PR event carried no
+      // created_at, so the metric never mixes real latencies with invented ones.
+      const openToVerdictMs = prOpenToVerdictMs(pr.created_at, verdict)
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, ...(openToVerdictMs !== undefined && { open_to_verdict_ms: openToVerdictMs }), tokens_used: tokensUsed, skills_activated: activatedSkills.map(skill => skill.name), ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
@@ -1174,6 +1291,29 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           annotationSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
         } catch { /* fall back to pr.head.sha if git is unavailable */ }
 
+        // ...but the clone's HEAD is only trustworthy once it is in the repo. A fix
+        // commit whose push failed leaves HEAD one commit ahead of the remote, and
+        // stamping it attributes this verdict to code that does not exist — an APPROVE
+        // on a phantom sha clears the previous BLOCK and reads as routine on the PR
+        // page. Refuse to post rather than post an unattributable verdict: a missing
+        // review is recoverable (the run fails, the pending status releases as
+        // failure, the PR stays blocked), a phantom approval is not.
+        const shaVerification = await verifyReviewedSha(octokit, owner, repoName, prNumber, annotationSha)
+        if (!isVerifiedReviewedSha(shaVerification.status)) {
+          const rejection = reviewedShaRejection(shaVerification, annotationSha, verdict)
+          fileLog({ level: 'error', event: 'verdict_sha_unverified', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, verdict, sha: annotationSha, head_sha: shaVerification.headSha, verification: shaVerification.status, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+          log(chalk.red(`✗ ${rejection}`))
+          // The review itself cost vendor tokens — surface it rather than lose it.
+          log(chalk.dim(`\n--- unposted review ---\n${commentBody}\n--- end ---`))
+          throw new Error(rejection)
+        }
+        if (shaVerification.status === 'descendant') {
+          // The reviewed commit is real but ahead of the PR head — the fix landed on a
+          // separate auto-fix branch. Recorded so a verdict that does not cover HEAD is
+          // explicable from the log rather than looking like the head-matching case.
+          fileLog({ level: 'warn', event: 'verdict_sha_off_head', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, verdict, sha: annotationSha, head_sha: shaVerification.headSha, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+        }
+
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
           origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, annotationSha,
@@ -1190,6 +1330,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
+
+        // A posted verdict that blocks the merge is the product's whole reason to
+        // exist, so it gets its own event rather than being re-derived downstream.
+        // BLOCK blocks by definition; a NEEDS WORK that reached here survived the
+        // severity gate, which only lets it through when a Critical/High/Medium
+        // finding backs it — a nit-only review was already downgraded to APPROVE.
+        // Logged only here, after the comment actually posted, so dry runs and
+        // failed postReviewComment calls are never counted as posted findings.
+        if (verdict === 'BLOCK' || verdict === 'NEEDS WORK') {
+          fileLog({ level: 'info', event: 'blocking_finding_posted', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+        }
 
         // Mirror the verdict onto the PR's Linear issue. `run` and `watch` both
         // land here, so this is the path that matters — reviews posted from
@@ -1229,7 +1380,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const skipFix = (reason: string) => {
         lastFixSkipReason = reason
         onPhaseChange('', { phase: 'fixed', fixCount: 0 })
-        results[step.name] = { skipped: true }
+        results[step.name] = { skipped: true, skipReason: reason }
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
       }
 
@@ -1576,38 +1727,226 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           }
           results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
         } else {
-          // Fallback: the fix could not land on the PR branch. Push the same commit to
-          // a dedicated branch and open a follow-up PR targeting the original branch.
-          const fixBranch = `fix/cr-${prNumber}-review-issues`
-          execSync(`git push origin HEAD:${fixBranch}`, {
-            cwd: tmpDir,
-            env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
-          })
+          // Fallback: the fix could not land on the PR branch. Push the same commit to a
+          // dedicated branch and open a follow-up PR targeting the original branch.
+          const fixBranch = autoFixBranchName(prNumber)
+          const gitEnv = { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token }
           const octokit = createGithubClient(token)
+
+          // The fallback commit exists only in this clone until something pushes it, so
+          // every path that ends without delivering it as a PR has to put HEAD back on the
+          // PR head. Otherwise a later recheck reviews that commit and stamps its verdict
+          // either with a sha the repository cannot resolve — which verifyReviewedSha
+          // refuses to post (#290) — or with one no open PR carries.
+          const restorePRHeadInClone = () => {
+            execSync('git reset --hard HEAD~1', { cwd: tmpDir, stdio: 'pipe' })
+          }
+
+          // Deliver the fix as a diff on the original PR. Used wherever opening the
+          // follow-up PR would either create a stale artifact or overwrite a branch that
+          // is not ours: the work still reaches a human, just not as a branch.
+          const deliverFixAsComment = async (outcome: { event: string; reason: string; branch: string; notice: string; explanation: string }) => {
+            fileLog({ level: 'warn', event: outcome.event, repo: `${owner}/${repoName}`, pr: prNumber, branch: outcome.branch, reason: outcome.reason })
+            log(chalk.yellow(`⚠  ${outcome.notice}`))
+            let patch = ''
+            try { patch = execSync('git diff HEAD~1', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* fall through to the empty check */ }
+            if (patch) {
+              await octokit.rest.issues.createComment({
+                owner, repo: repoName, issue_number: prNumber,
+                body: [
+                  '### Suggested fixes (crosscheck auto-fix)',
+                  '',
+                  outcome.explanation,
+                  '',
+                  '```diff',
+                  patch.slice(0, 16000),
+                  '```',
+                  '',
+                  fixAttributionFooter(),
+                ].join('\n'),
+              })
+            }
+            restorePRHeadInClone()
+            onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+            fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'comment', tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
+            results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
+          }
+
+          // Ask whether the intended base still exists BEFORE pushing anything. The most
+          // common reason the PR-branch push failed is that the PR merged and GitHub
+          // deleted its branch — and `pulls.create` rejects a missing base with
+          // `field: base, code: invalid`. That used to throw after the branch was already
+          // pushed, losing the fix and orphaning the branch (19 times in logged runs).
+          let baseBranchExists = true
+          try {
+            await octokit.rest.repos.getBranch({ owner, repo: repoName, branch: pr.head.ref })
+          } catch (err: unknown) {
+            if ((err as { status?: number })?.status === 404) baseBranchExists = false
+            else throw err
+          }
+          const delivery = planAutoFixDelivery(baseBranchExists, pr.head.ref)
+
+          if (delivery.kind === 'comment') {
+            // A PR cut from this snapshot would be stale the moment it opened — it is
+            // exactly the artifact the superseded-auto-fix cleanup exists to close. Post
+            // the fix as a diff instead, so the work is still delivered and reviewable.
+            await deliverFixAsComment({
+              event: 'fix_pr_skipped',
+              reason: delivery.reason,
+              branch: pr.head.ref,
+              notice: `${pr.head.ref} no longer exists — posting the fix as a diff instead of opening a stale follow-up PR`,
+              explanation: `\`${pr.head.ref}\` no longer exists, so this PR has merged and there is no branch to land on. The fix is below rather than in a follow-up PR — a PR cut from the pre-merge state would reintroduce whatever the merged version changed.`,
+            })
+            continue
+          }
+
+          // A fix branch left behind by an earlier round of this PR made a plain push
+          // non-fast-forward and lost the fix (12 times in logged runs). Replace it under
+          // a lease: this round's fix is built on the newer PR head and supersedes it,
+          // and the lease still refuses if anything other than us moved the branch.
+          let remoteOid: string | null = null
+          try {
+            remoteOid = parseLsRemoteOid(execFileSync('git', ['ls-remote', '--heads', 'origin', fixBranch], { cwd: tmpDir, env: gitEnv, encoding: 'utf8' }))
+          } catch { /* treat an unreadable remote as "branch absent"; the lease catches a wrong guess */ }
+
+          // `--force-with-lease` only protects against changes made *after* this lookup —
+          // it happily accepts a branch a human just created or moved as the lease value
+          // and overwrites it. So establish that the branch is crosscheck's own artifact
+          // before replacing it, from GitHub's record of who opened the PR from it rather
+          // than from anything the pusher can write into a commit.
+          if (remoteOid !== null) {
+            let crosscheckLogin: string | null = null
+            let candidates: FixBranchPR[] = []
+            try {
+              const [{ data: viewer }, { data: branchPrs }] = await Promise.all([
+                octokit.rest.users.getAuthenticated(),
+                octokit.rest.pulls.list({ owner, repo: repoName, state: 'all', head: `${owner}:${fixBranch}` }),
+              ])
+              crosscheckLogin = viewer.login
+              candidates = branchPrs
+            } catch { /* unreadable identity or PR list — treated as not ours, never overwrite */ }
+            const ownership = assessFixBranchOwnership({ sourcePrNumber: prNumber, crosscheckLogin, candidates })
+            if (!ownership.owned) {
+              await deliverFixAsComment({
+                event: 'fix_branch_push_skipped',
+                reason: ownership.reason,
+                branch: fixBranch,
+                notice: `${fixBranch} exists but crosscheck has no PR of its own from it — leaving it in place and posting the fix as a diff instead`,
+                explanation: `\`${fixBranch}\` already exists and crosscheck cannot show it opened a pull request from it, so the branch was left untouched rather than force-replaced. The fix is posted here instead.`,
+              })
+              continue
+            }
+          }
+
+          // From #296: the merged-PR handler sweeps for auto-fix PRs once, so a PR opened
+          // after that sweep is never seen by it and stays open and mergeable against a
+          // tree that no longer exists. The base-exists check above already covers a merge
+          // that deleted the branch; this catches a merge in a repo that keeps its
+          // branches. It sits immediately before the push — every lookup above widens the
+          // window it has to close, and nothing has been written to the remote yet, so a
+          // skip here cannot orphan a branch.
+          if (await sourcePRHasMerged(octokit, owner, repoName, prNumber)) {
+            restorePRHeadInClone()
+            skipFix('source_pr_merged')
+            continue
+          }
+
+          try {
+            execFileSync('git', forceWithLeaseArgs(fixBranch, remoteOid), { cwd: tmpDir, env: gitEnv, stdio: 'pipe' })
+          } catch (pushErr: unknown) {
+            const pushMsg = pushErr instanceof Error ? pushErr.message : String(pushErr)
+            fileLog({
+              level: 'error', event: 'fix_branch_push_failed', repo: `${owner}/${repoName}`, pr: prNumber,
+              branch: fixBranch, lease: remoteOid ?? 'absent',
+              reason: isLeaseRejection(pushMsg) ? 'lease_rejected' : 'push_failed',
+              error: pushMsg.slice(0, 500),
+            })
+            throw pushErr
+          }
+          if (remoteOid !== null) {
+            fileLog({ level: 'info', event: 'fix_branch_replaced', repo: `${owner}/${repoName}`, pr: prNumber, branch: fixBranch, previous_sha: remoteOid, sha: newSha })
+          }
+
+          // Undo this run's push when the follow-up PR turns out not to be creatable after
+          // all. Only a branch this run brought into existence is removed — one that was
+          // already crosscheck's is left at the newer commit rather than deleted out from
+          // under whatever else references it.
+          const rollBackPushedFixBranch = () => {
+            if (remoteOid !== null) return
+            try {
+              execFileSync('git', ['push', 'origin', '--delete', fixBranch], { cwd: tmpDir, env: gitEnv, stdio: 'pipe' })
+              fileLog({ level: 'info', event: 'fix_branch_rolled_back', repo: `${owner}/${repoName}`, pr: prNumber, branch: fixBranch, sha: newSha })
+            } catch (deleteErr: unknown) {
+              fileLog({ level: 'warn', event: 'fix_branch_rollback_failed', repo: `${owner}/${repoName}`, pr: prNumber, branch: fixBranch, error: deleteErr instanceof Error ? deleteErr.message.slice(0, 500) : String(deleteErr) })
+            }
+          }
+
+          // The source PR can still merge in the window between the check above and this
+          // point. Asking again here is what keeps the push from becoming a stale fix PR:
+          // the branch is already on the remote, so the answer decides whether it stays.
+          if (await sourcePRHasMerged(octokit, owner, repoName, prNumber)) {
+            rollBackPushedFixBranch()
+            restorePRHeadInClone()
+            skipFix('source_pr_merged')
+            continue
+          }
+
           const fixPrTitle = config.post_review.auto_fix.delivery.pr_title.replace('#{original_pr_title}', pr.title)
-          const { data: fixPr } = await octokit.rest.pulls.create({
-            owner,
-            repo: repoName,
-            head: fixBranch,
-            base: pr.head.ref,
-            title: fixPrTitle,
-            body: [
-              `Auto-fix by crosscheck for CR issues found in #${prNumber}.`,
-              '',
-              `Review: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
-              '',
-              fixAttributionFooter(),
-            ].join('\n'),
+          // An earlier round may already have an open PR from this branch; the force-push
+          // above updated it, so opening a second one would be rejected as a duplicate.
+          const { data: existingFixPrs } = await octokit.rest.pulls.list({
+            owner, repo: repoName, state: 'open', head: `${owner}:${fixBranch}`,
           })
+          let fixPrNumber: number
+          if (existingFixPrs.length > 0) {
+            fixPrNumber = existingFixPrs[0].number
+            fileLog({ level: 'info', event: 'fix_pr_updated', repo: `${owner}/${repoName}`, pr: prNumber, fix_pr: fixPrNumber, sha: newSha })
+          } else {
+            let fixPr: { number: number }
+            try {
+              const created = await octokit.rest.pulls.create({
+                owner,
+                repo: repoName,
+                head: fixBranch,
+                base: delivery.base,
+                title: fixPrTitle,
+                body: [
+                  autoFixPRIntro(prNumber),
+                  '',
+                  `Review: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
+                  '',
+                  fixAttributionFooter(),
+                ].join('\n'),
+              })
+              fixPr = created.data
+            } catch (createErr: unknown) {
+              // A merge landing in a repo that deletes its branches takes the base away
+              // between the checks above and this call, and `pulls.create` reports that as
+              // `field: base, code: invalid` — the original failure this fallback exists to
+              // stop, just in a narrower window. Take the branch back out and deliver the
+              // fix as a diff rather than leaving it orphaned.
+              if (!isInvalidBaseError(createErr)) throw createErr
+              rollBackPushedFixBranch()
+              await deliverFixAsComment({
+                event: 'fix_pr_create_failed',
+                reason: 'base_branch_gone_after_push',
+                branch: delivery.base,
+                notice: `${delivery.base} disappeared while the fix branch was being pushed — posting the fix as a diff instead of opening a stale follow-up PR`,
+                explanation: `\`${delivery.base}\` existed when this fix started and was gone by the time the follow-up PR was opened, so this PR merged mid-run. The fix is below rather than in a follow-up PR — a PR cut from the pre-merge state would reintroduce whatever the merged version changed.`,
+              })
+              continue
+            }
+            fixPrNumber = fixPr.number
+          }
           if (config.post_review.auto_fix.delivery.label) {
             try {
               await octokit.rest.issues.addLabels({
-                owner, repo: repoName, issue_number: fixPr.number, labels: [config.post_review.auto_fix.delivery.label],
+                owner, repo: repoName, issue_number: fixPrNumber, labels: [config.post_review.auto_fix.delivery.label],
               })
             } catch { /* label may not exist in this repo — skip */ }
           }
           onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-          fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
+          fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPrNumber, tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
           results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
         }
 
@@ -1628,7 +1967,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     } else if (effectiveType === 'conflict-resolve') {
       const skipConflictResolve = (reason: string) => {
         onPhaseChange('', { phase: 'fixed', fixCount: 0 })
-        results[step.name] = { skipped: true }
+        results[step.name] = { skipped: true, skipReason: reason }
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
       }
 
@@ -1671,7 +2010,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      // resolveConflictResolveVendor extends resolveReviewer with the same human-origin
+      // fallback the fix step uses, so a PR crosscheck cannot attribute still gets its
+      // conflicts resolved instead of skipping with 'no_vendor'.
+      const { vendor, usedHumanFallback, substitutedOriginVendor } = resolveConflictResolveVendor(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      if (usedHumanFallback && vendor) {
+        fileLog({ level: 'info', event: 'conflict_resolve_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: 'none', to: vendor, reason: 'human_origin' })
+      } else if (substitutedOriginVendor && vendor) {
+        fileLog({ level: 'info', event: 'conflict_resolve_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: substitutedOriginVendor, to: vendor, reason: 'unsupported_vendor' })
+      }
       if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
       if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
       // Conflict-resolve is mechanical text surgery bounded by the markers —
@@ -1850,6 +2197,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   return {
     verdict: verdict ?? null,
     fixAppliedCount,
+    stepOutcomes: summariseStepOutcomes(stepsRun, results),
     ...(fixAppliedCount === undefined && lastFixSkipReason !== undefined && { fixSkipReason: lastFixSkipReason }),
     ...(latestReviewResult?.commentBody && {
       latestReviewComment: {

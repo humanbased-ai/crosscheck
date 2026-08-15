@@ -179,7 +179,7 @@ Full walkthrough: **[docs/linear-identity.md](./docs/linear-identity.md)**.
 | `crosscheck alter <repo>` | Set a per-repo pipeline depth |
 | `crosscheck detect-step <pr>` | Show step history and the next step to run |
 | `crosscheck linear-test [issue]` | Dry-run Linear write-back |
-| `crosscheck diagnose` / `optimize` / `impact` / `issue` | Analyse logs, tune config, report value, file tickets |
+| `crosscheck diagnose` / `optimize` / `impact` / `adoption` / `issue` | Analyse logs, tune config, report value, report usage, file tickets |
 
 Multi-PR forms work where sensible — comma lists, bare numbers, and ranges:
 
@@ -334,6 +334,7 @@ Deployment mode decides scope: `personal` monitors your own repos and reviews on
 | | |
 |---|---|
 | **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, every flag, complete config reference, FAQ |
+| **[docs/trust.md](./docs/trust.md)** | What leaves your machine, which GitHub permissions are needed, what Crosscheck can and cannot change, and how to try it read-only first |
 | **[docs/dynamic-thoroughness.md](./docs/dynamic-thoroughness.md)** | How Crosscheck picks a model and effort per PR — and the 400-PR census behind it |
 | **[docs/linear-identity.md](./docs/linear-identity.md)** | Linear write-back and the attribution ladder |
 | **[docs/linear-identity-contract.md](./docs/linear-identity-contract.md)** | The identity contract, as a spec for other tools |

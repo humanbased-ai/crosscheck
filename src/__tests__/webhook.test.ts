@@ -211,3 +211,70 @@ describe('createWebhookServer — issue_comment handling', () => {
     }
   })
 })
+
+const closedPREvent = (merged: boolean): PREvent => ({
+  action: 'closed', number: 2527,
+  pull_request: {
+    title: 'feat: campaign chip', body: '', html_url: 'https://github.com/acme/repo/pull/2527',
+    head: { ref: 'feat/chip', sha: 'e358bdba7', repo: { full_name: 'acme/repo' } },
+    base: { ref: 'staging', repo: { full_name: 'acme/repo' } },
+    user: { login: 'bob' },
+    merged,
+    merge_commit_sha: merged ? '8ae3dc694' : null,
+  },
+  repository: { name: 'repo', owner: { login: 'acme' }, clone_url: '' },
+})
+
+describe('createWebhookServer — merged pull_request handling', () => {
+  it('calls onMerged for a PR closed as merged', async () => {
+    const merged: PREvent[] = []
+    const prReceived: PREvent[] = []
+    const server = createWebhookServer(
+      config, secret, e => prReceived.push(e), () => {}, undefined, undefined,
+      e => merged.push(e),
+    )
+    await startServer(server)
+    try {
+      const status = await postWebhook(server, 'pull_request', closedPREvent(true))
+      await new Promise(r => setImmediate(r))
+      expect(status).toBe(200)
+      expect(merged).toHaveLength(1)
+      expect(merged[0].pull_request.merge_commit_sha).toBe('8ae3dc694')
+      // A merge is not a review trigger.
+      expect(prReceived).toHaveLength(0)
+    } finally {
+      await stopServer(server)
+    }
+  })
+
+  it('does not call onMerged for a PR closed unmerged', async () => {
+    const merged: PREvent[] = []
+    const server = createWebhookServer(
+      config, secret, () => {}, () => {}, undefined, undefined,
+      e => merged.push(e),
+    )
+    await startServer(server)
+    try {
+      const status = await postWebhook(server, 'pull_request', closedPREvent(false))
+      await new Promise(r => setImmediate(r))
+      expect(status).toBe(200)
+      expect(merged).toHaveLength(0)
+    } finally {
+      await stopServer(server)
+    }
+  })
+
+  it('acknowledges a merged PR when no onMerged handler is provided', async () => {
+    const prReceived: PREvent[] = []
+    const server = createWebhookServer(config, secret, e => prReceived.push(e), () => {})
+    await startServer(server)
+    try {
+      const status = await postWebhook(server, 'pull_request', closedPREvent(true))
+      await new Promise(r => setImmediate(r))
+      expect(status).toBe(200)
+      expect(prReceived).toHaveLength(0)
+    } finally {
+      await stopServer(server)
+    }
+  })
+})

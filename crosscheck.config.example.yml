@@ -187,6 +187,15 @@ routing:
 
   # Body and commit pattern matching — checked first, before branch prefix.
   # Patterns are matched against both the PR body and commit messages (Co-Authored-By trailers).
+  # These identify who WROTE the code, not who reviewed it. Do not loosen them to
+  # match "Reviewed with [Claude Code]" — every PR Claude reviews would then look
+  # Claude-authored and get routed back to the other vendor.
+  #
+  # Crosscheck's own attribution (its fix-PR footer and Crosscheck-Reviewer commit
+  # trailers) is recognised ALWAYS and is deliberately not listed here: setting
+  # either list replaces the defaults entirely, and an install that pinned its own
+  # patterns would then misread crosscheck's own fix PRs as human-authored. Your
+  # patterns below are still checked first, so they outrank it.
   codex_reviews_patterns:
     - "Generated with \\[Claude Code\\]"    # PR body attribution footer
     - "Co-Authored-By: Claude"              # commit trailer added by Claude Code

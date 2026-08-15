@@ -14,7 +14,7 @@ import { enrichIssueContext } from '../issues/enrich.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { hintForError } from '../lib/remediation.js'
-import { runWorkflow } from '../lib/runner.js'
+import { runWorkflow, mergeStepOutcomes } from '../lib/runner.js'
 import { isLinearConfigError, resolveLinearAuth } from '../linear/identity.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, linearWritePossible, type WorkflowStep } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
@@ -53,6 +53,7 @@ function meetsCrazyStopCondition(verdict: string | null, mode: 'crazy' | 'halfcr
   // halfcrazy: any non-BLOCK verdict (APPROVE or NEEDS_WORK) is acceptable
   return verdict !== 'BLOCK'
 }
+
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -396,6 +397,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     html_url: prData.html_url,
     user: { login: prData.user?.login ?? '' },
     ...(prData.labels !== undefined && { labels: prData.labels.map((l: { name: string }) => ({ name: l.name })) }),
+    ...(prData.created_at !== undefined && { created_at: prData.created_at }),
   }
 
   const { sha } = prData.head
@@ -573,6 +575,11 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       // fixAppliedCount guard broke out. Gate them, and report the skip rather
       // than a bare formatVerdict(null) with no reason.
       const { strategySkipped } = workflowResult
+      // Accumulate step outcomes across all rounds so the completion line
+      // reflects whether *any* round did work — not just the first. A first
+      // round that skips everything followed by a crazy/halfcrazy round that
+      // runs a fix is not a "no step ran" run.
+      let accumulatedStepOutcomes = workflowResult.stepOutcomes
 
       // Autonomous fix→recheck loop for --crazy / --halfcrazy
       if (!strategySkipped && opts.roundMode) {
@@ -654,6 +661,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           })
           ;({ verdict, fixAppliedCount } = workflowResult)
           latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
+          accumulatedStepOutcomes = mergeStepOutcomes(accumulatedStepOutcomes, workflowResult.stepOutcomes)
 
           if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
 
@@ -758,6 +766,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
             })
             ;({ verdict, fixAppliedCount } = workflowResult)
             latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
+            accumulatedStepOutcomes = mergeStepOutcomes(accumulatedStepOutcomes, workflowResult.stepOutcomes)
             hasRechecked = true
 
             if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
@@ -772,13 +781,33 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       }
 
       activeSpinner.stop()
+      // A run is "no step ran" only when every step across every round skipped.
+      // If the first round skips everything but a later crazy/halfcrazy round
+      // runs a fix, the overall run did work and should not report "no step ran".
+      const ranNothing = accumulatedStepOutcomes !== undefined
+        && accumulatedStepOutcomes.ran.length === 0
+        && accumulatedStepOutcomes.skipped.length > 0
+
       if (strategySkipped) {
         console.log(chalk.dim(`\n  skipped — ${strategySkipped} class, nothing to review`))
+      } else if (accumulatedStepOutcomes && ranNothing) {
+        // Every dispatched step skipped. `verdict —` on its own reads as "ran and
+        // found nothing", and the green line below then certified a no-op as a
+        // success — which is how conflict-resolve skipping for want of a vendor
+        // went unnoticed across a whole batch of PRs. The reasons are the report.
+        console.log(chalk.yellow(`\n  no step ran`))
+        for (const { step, reason } of accumulatedStepOutcomes.skipped) {
+          console.log(chalk.dim(`    ${step} — ${reason}`))
+        }
       } else {
         console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
       }
 
-      console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
+      // Exit code is unchanged: a skipped step is a legitimate outcome, not a
+      // failure, and the exit codes are part of the CLI contract.
+      console.log(ranNothing && !strategySkipped
+        ? chalk.yellow(`\n⚠  Workflow complete, no step ran — ${prUrl}\n`)
+        : chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
     } catch (err: unknown) {
       workflowError = err
       logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
