@@ -104,6 +104,17 @@ skills:
     # - code-review         # preloaded, opt-in · @mattpocock (MIT)
     # - codebase-design     # preloaded, opt-in · @mattpocock (MIT)
 
+  # Codex only. Codex reaches the skill broker (an MCP server) only when its
+  # sandbox is disabled: under -s read-only, -s workspace-write, -a never and
+  # --full-auto alike it cancels every tool call, so skills silently do nothing.
+  # Turning this on lets codex run unsandboxed against the PR checkout — which is
+  # untrusted code — in exchange for skills actually working. Crosscheck removes
+  # the git credential from the checkout and passes codex an allowlisted
+  # environment (no GITHUB_TOKEN) either way, but a prompt injection can still
+  # read the working tree and reach the network. Claude needs none of this: its
+  # broker works sandboxed.
+  codex_full_access: false
+
 # ─── Budget ──────────────────────────────────────────────────────────────────
 budget:
   codex_monthly_usd: 20     # null = unlimited (use if on subscription)

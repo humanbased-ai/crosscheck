@@ -216,12 +216,45 @@ export function claudeSkillBrokerArgs(session?: SkillActivationSession): string[
   })]
 }
 
-export function codexSkillBrokerArgs(session?: SkillActivationSession): string[] {
-  if (!session) return []
+// Whether codex can actually reach the broker on this run.
+//
+// Codex starts the MCP server and lists its tools under any sandbox, then
+// cancels each tools/call with "user cancelled MCP tool call" unless the sandbox
+// is danger-full-access: an MCP server is a local process outside the sandbox,
+// so calling one is treated as requiring full-access trust, and headless there
+// is nobody to approve it. Measured against codex-cli 0.147 — `-a never`,
+// `--full-auto`, `-s read-only`, `-s workspace-write`, `approval_policy="never"`
+// and per-tool `approval_mode` all leave the call cancelled; only the sandbox
+// setting moves it.
+//
+// So codex skills cost the codex sandbox, on a step that reads untrusted PR
+// content. That price is the operator's to accept, not onboarding's to assume:
+// without `skills.codex_full_access`, codex runs sandboxed and is told nothing
+// about skills. Registering the broker anyway would be worse than not
+// registering it — the prompt would oblige codex to call a tool whose every
+// invocation is cancelled, which is precisely the 0-activations-in-244-runs
+// failure this all started from.
+export function codexSkillsReachable(
+  session: SkillActivationSession | undefined,
+  fullAccessAllowed: boolean,
+): session is SkillActivationSession {
+  return session !== undefined && fullAccessAllowed
+}
+
+// Every argument codex needs to actually *use* the broker — registering the
+// server is not enough on its own. Returns nothing unless the operator opted in,
+// so the sandbox override and the broker registration travel together and
+// neither can be enabled without the other.
+export function codexSkillBrokerArgs(
+  session: SkillActivationSession | undefined,
+  fullAccessAllowed: boolean,
+): string[] {
+  if (!codexSkillsReachable(session, fullAccessAllowed)) return []
   const broker = skillBrokerCommand(session)
   return [
     '-c', `mcp_servers.crosscheck.command=${JSON.stringify(broker.command)}`,
     '-c', `mcp_servers.crosscheck.args=${JSON.stringify(broker.args)}`,
+    '-c', 'sandbox_mode="danger-full-access"',
   ]
 }
 

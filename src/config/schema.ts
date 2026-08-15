@@ -67,6 +67,14 @@ export const QualityConfigSchema = z.object({
 
 export const SkillsConfigSchema = z.object({
   enabled: z.array(z.string()).default([]),
+  // Codex reaches the skill broker only with sandbox_mode="danger-full-access":
+  // an MCP server is a local process outside the sandbox, so codex cancels every
+  // tools/call under -s read-only, -s workspace-write, -a never and --full-auto
+  // alike (measured against codex-cli 0.147). That means codex skills cost the
+  // codex sandbox, and a review reads untrusted PR content — so it is opt-in and
+  // off by default rather than something `crosscheck onboard` turns on for you.
+  // Claude is unaffected: its broker works sandboxed and needs no override.
+  codex_full_access: z.boolean().default(false),
 })
 
 export const BudgetConfigSchema = z.object({

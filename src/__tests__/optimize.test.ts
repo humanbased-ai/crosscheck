@@ -18,7 +18,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], allowed_authors: [], author_routes: {}, fallback_reviewer: 'auto' },
     server: { port: 7892, webhook_path: '/webhook' },
     quality: { tier: 'balanced', mode: 'fixed', focus: [], custom_prompt: undefined },
-    skills: { enabled: [] },
+    skills: { enabled: [], codex_full_access: false },
     budget: { codex_monthly_usd: null, per_review_usd: 1 },
     vendors: {
       claude: { enabled: claudeEnabled, model: null, auth: 'subscription', effort: 'medium', timeout_sec: null },

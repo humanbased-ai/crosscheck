@@ -214,13 +214,51 @@ describe('runCodexFixStep', () => {
     const { loadBundledSkills } = await import('../skills/catalog.js')
     const session = createSkillActivationSession('fix', ['code-review-skill'], loadBundledSkills())
     try {
-      await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '', 'default', undefined, session)
+      await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '', 'default', undefined, session, undefined, true)
       const args = execaMock.mock.calls[0][1] as string[]
       expect(args).toContainEqual(expect.stringContaining('mcp_servers.crosscheck.command='))
       expect(args.at(-1)).toContain('Call `list_enabled_skills`')
     } finally {
       session.close()
     }
+  })
+
+  // Without skills.codex_full_access the broker is unreachable — codex cancels
+  // every tools/call under a sandbox — so neither the registration nor the
+  // instruction to call it should be there. Obliging codex to call a tool that is
+  // always cancelled is the original 0-activations bug, not a graceful fallback.
+  it('offers codex no skills when full access was not granted', async () => {
+    const { runCodexFixStep } = await import('../reviewers/fix.js')
+    const { createSkillActivationSession } = await import('../skills/broker.js')
+    const { loadBundledSkills } = await import('../skills/catalog.js')
+    const session = createSkillActivationSession('fix', ['code-review-skill'], loadBundledSkills())
+    try {
+      await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '', 'default', undefined, session)
+      const args = execaMock.mock.calls[0][1] as string[]
+      expect(args.join(' ')).not.toContain('mcp_servers.crosscheck')
+      expect(args.join(' ')).not.toContain('danger-full-access')
+      expect(args.at(-1)).not.toContain('list_enabled_skills')
+    } finally {
+      session.close()
+    }
+  })
+
+  // The operator's own MCP servers and plugins must not be loaded into a run that
+  // reads an untrusted diff.
+  it('ignores user config on every codex fix run', async () => {
+    const { runCodexFixStep } = await import('../reviewers/fix.js')
+    await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '', 'default')
+    const args = execaMock.mock.calls[0][1] as string[]
+    expect(args).toContain('--ignore-user-config')
+  })
+
+  // Nothing that is not in the process can be exfiltrated from it.
+  it('hands codex an allowlisted environment, not the operator\'s', async () => {
+    const { runCodexFixStep } = await import('../reviewers/fix.js')
+    await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '', 'default')
+    const opts = execaMock.mock.calls[0][2] as { env: Record<string, string>; extendEnv?: boolean }
+    expect(opts.extendEnv).toBe(false)
+    expect(opts.env).not.toHaveProperty('GITHUB_TOKEN')
   })
 })
 
