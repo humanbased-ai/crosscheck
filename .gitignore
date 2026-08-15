@@ -3,3 +3,6 @@ dist/
 .env
 *.local
 crosscheck.config.yml
+# Claude Code scratch: agent worktrees (a full checkout of this repo, gitdir
+# pointing back into .git/worktrees) and local launch config. Never committed.
+.claude/

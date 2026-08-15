@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { codexReasoningEffort, inferVerdictFromCodexOutput, stripRepoDirPaths } from '../reviewers/codex.js'
+import { buildCodexReviewPrompt, codexReasoningEffort, inferVerdictFromCodexOutput, parseCodexTokensUsed, stripRepoDirPaths } from '../reviewers/codex.js'
 
 const CODEX_FOOTER = '\n\n---\n_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
 
@@ -129,5 +129,107 @@ describe('codexReasoningEffort', () => {
   it('falls back to medium for values outside the whitelist', () => {
     expect(codexReasoningEffort('turbo')).toBe('medium')
     expect(codexReasoningEffort('')).toBe('medium')
+  })
+})
+
+describe('buildCodexReviewPrompt', () => {
+  const base = {
+    prTitle: 'feat: add lineage drawer',
+    baseBranch: 'staging',
+    behaviorInstructions: 'Structure your output as: ## Summary.\nVERDICT: APPROVE',
+  }
+
+  // `codex review --base` scoped the diff itself. `codex exec` does not, so the
+  // prompt has to say what to review — same two opening lines claude gets, so a
+  // PR reviewed by either vendor is given the same brief.
+  it('names the PR and the base branch, and scopes the review to the PR', () => {
+    const prompt = buildCodexReviewPrompt(base)
+    expect(prompt).toContain('feat: add lineage drawer')
+    expect(prompt).toContain('`staging` is the base')
+    expect(prompt).toContain('Review only the changes introduced in this PR')
+  })
+
+  // The clone creates refs/remotes/origin/<base> and no local <base> branch
+  // (see clonePRForReview), so `git diff staging...HEAD` — the obvious reading of
+  // a bare branch name — fails on any non-default base and can leave the agent
+  // reviewing an empty diff. Review on #298 caught this. Naming the exact command
+  // is the fix: `codex exec review --base` cannot be used instead, because there
+  // --base and a custom prompt are mutually exclusive.
+  it('names a diff command whose ref actually exists in the clone', () => {
+    const prompt = buildCodexReviewPrompt(base)
+    expect(prompt).toContain('git diff origin/staging...HEAD')
+    expect(prompt).not.toMatch(/git diff staging\.\.\.HEAD/)
+  })
+
+  it('scopes the diff command to the PR\'s own base, not a hardcoded one', () => {
+    const prompt = buildCodexReviewPrompt({ ...base, baseBranch: 'release/2.1' })
+    expect(prompt).toContain('git diff origin/release/2.1...HEAD')
+  })
+
+  it('always ends with the behaviour block so the verdict rule is last', () => {
+    // The verdict rule is the final line of behaviorInstructions and is
+    // machine-parsed. Repository guidance is reference material, so it is the
+    // one block allowed after it.
+    const prompt = buildCodexReviewPrompt({ ...base, skillInstructions: '## Agent Skills\nCall list_enabled_skills.' })
+    expect(prompt.indexOf('## Agent Skills')).toBeLessThan(prompt.indexOf('VERDICT: APPROVE'))
+  })
+
+  it('places skill instructions before the behaviour block', () => {
+    // Activation has to happen before the review starts; after the verdict rule
+    // it reads as boilerplate past the end of the prompt.
+    const prompt = buildCodexReviewPrompt({
+      ...base,
+      skillInstructions: '## Agent Skills\nCall list_enabled_skills.',
+      repositoryGuidance: '## Repo guidance\nPrefer X.',
+    })
+    expect(prompt.indexOf('## Agent Skills')).toBeLessThan(prompt.indexOf('## Summary'))
+    expect(prompt.indexOf('## Repo guidance')).toBeGreaterThan(prompt.indexOf('VERDICT: APPROVE'))
+  })
+
+  it('includes focus, custom prompt and issue context when supplied', () => {
+    const prompt = buildCodexReviewPrompt({
+      ...base,
+      issueContext: 'Tracker: IN-3243 — show lineage.',
+      focusLine: 'Focus areas: security, types.',
+      customPrompt: 'Be concise.',
+    })
+    expect(prompt).toContain('IN-3243')
+    expect(prompt).toContain('Focus areas: security, types.')
+    expect(prompt).toContain('Be concise.')
+  })
+
+  it('omits absent blocks without leaving blank runs', () => {
+    const prompt = buildCodexReviewPrompt(base)
+    expect(prompt).not.toMatch(/\n{3,}/)
+  })
+})
+
+describe('parseCodexTokensUsed', () => {
+  // `codex exec` reports usage as a "tokens used" heading with the count on the
+  // next line; `codex review` used an inline "tokens: N". Both are accepted so
+  // the telemetry survived the move between subcommands.
+  it('reads the codex exec two-line form', () => {
+    expect(parseCodexTokensUsed('codex\nreview text\ntokens used\n15,646\n')).toBe(15646)
+  })
+
+  it('reads the inline form', () => {
+    expect(parseCodexTokensUsed('some output\ntokens: 4,200')).toBe(4200)
+  })
+
+  it('is case-insensitive and tolerates no thousands separator', () => {
+    expect(parseCodexTokensUsed('Tokens Used\n900')).toBe(900)
+  })
+
+  it('returns undefined when no usage line is present', () => {
+    expect(parseCodexTokensUsed('just a review, no usage line')).toBeUndefined()
+  })
+
+  it('returns undefined rather than reading an unrelated number', () => {
+    // "tokens" appearing in review prose must not be mistaken for usage.
+    expect(parseCodexTokensUsed('The parser splits tokens by whitespace, all 12 of them.')).toBeUndefined()
+  })
+
+  it('takes the last report when a run retried', () => {
+    expect(parseCodexTokensUsed('tokens used\n100\nretry\ntokens used\n250')).toBe(250)
   })
 })

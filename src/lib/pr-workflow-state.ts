@@ -382,7 +382,11 @@ export function identifyNextWorkflowStep(
 
   const reviewComment = { id: lastReview.commentId, body: lastReview.commentBody }
 
-  const reviewedCurrentSha = lastReview.sha !== undefined && lastReview.sha === currentSha
+  // shaCovers, not `===`: annotations carry the short or the long form, and the
+  // approval stop above already asks this question that way. Two definitions of
+  // "the same commit" in one function is exactly the drift shaCovers exists to
+  // prevent.
+  const reviewedCurrentSha = shaCovers(lastReview.sha, currentSha)
   const fixedCurrentSha = lastFixAfterReview?.pushedSha !== undefined && lastFixAfterReview.pushedSha === currentSha
 
   if (fixedCurrentSha) {
@@ -405,7 +409,27 @@ export function identifyNextWorkflowStep(
     }
   }
 
-  const fixStep = firstRunnableFixStep(steps, syntheticResults)
+  // A review describes the tree it ran against. Once HEAD moves past that tree the
+  // findings may already be resolved — the author fixes their own PR — and running
+  // fix against them applies nothing. A no-op fix records nothing on the PR, so the
+  // history is unchanged and the next event replays this same decision: the PR sits
+  // on a stale verdict forever, burning a vendor call each time, with no step able
+  // to advance it (monorepo#2548).
+  //
+  // The branch above already re-reviews when crosscheck's OWN fix moved HEAD. Who
+  // pushed says nothing about whether the reviewed tree still exists, so the same
+  // answer applies here; the `!reviewedCurrentSha` branch below is where both land,
+  // and it already knows to prefer a recheck in a workflow that cannot fix. One
+  // extra review is the price, and unlike the old path it always terminates: the
+  // fresh review lands on the new HEAD and the fix loop re-engages from there.
+  //
+  // Only a review that can PROVE it is stale is diverted. shaCovers treats an absent
+  // SHA as proving nothing, and legacy comments carry none — trading their working
+  // fix step for a re-review on every push would be a regression, so they keep the
+  // old path.
+  const reviewSupersededByPush = lastReview.sha !== undefined && !reviewedCurrentSha
+
+  const fixStep = reviewSupersededByPush ? null : firstRunnableFixStep(steps, syntheticResults)
   if (fixStep) {
     return {
       step: fixStep,
