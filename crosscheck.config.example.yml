@@ -231,8 +231,9 @@ post_review:
   auto_fix:
     delivery:
       mode: pull_request        # pull_request | commit | comment
-      # pull_request → fix PR targets the original branch; human approves before merge
-      # commit       → fixes pushed directly onto the original PR branch
+      # pull_request → fixes land on the original PR branch; a separate fix PR is
+      #                opened only if that push can't land (branch merged/deleted/protected)
+      # commit       → fixes pushed directly onto the original PR branch (no fallback)
       # comment      → suggested fixes posted as review comments only
       pr_title: "fix: address CR issues in #{original_pr_title}"
       label: cr-autofix         # GitHub label applied to the fix PR

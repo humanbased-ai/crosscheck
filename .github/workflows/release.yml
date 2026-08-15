@@ -45,9 +45,11 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           dry_run: true
           default_bump: ${{ inputs.bump || 'patch' }}
-          major_string_token: 'BREAKING CHANGE'
-          minor_string_token: 'feat'
-          patch_string_token: 'fix,perf,refactor'
+          # v6 has no *_string_token inputs — passing them only produced an
+          # "Unexpected input(s)" annotation and was silently ignored. Its
+          # defaults already give BREAKING CHANGE → major, feat → minor and
+          # fix/perf → patch, so only the refactor rule needs declaring.
+          custom_release_rules: 'refactor:patch'
 
       - name: Resolve version
         id: ver
@@ -74,12 +76,17 @@ jobs:
         if: steps.ver.outputs.new_tag == ''
         run: echo "No version-worthy commits since last tag — skipping publish."
 
-  # ── Job 2: publish — runs unattended; no approval gate (removed in 79893b5) ──
+  # ── Job 2: publish — gated by the `production` environment ───────────────────
+  # Everything with an outward effect (git tag, npm publish, GitHub Release)
+  # lives in this job, so the gate holds all of it until a reviewer approves.
+  # GitHub cancels an unapproved deployment after 30 days and reports the run as
+  # failed; approve or reject promptly rather than letting one age out.
   publish:
     name: Publish to npm
     needs: compute
     if: needs.compute.outputs.new_tag != ''
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: write        # push git tag and version-bump commit
       id-token: write        # npm provenance
@@ -168,33 +175,56 @@ jobs:
             ${{ needs.compute.outputs.changelog }}
 
       - name: Sync release version to staging
-        # Staging is a protected branch — a direct push is never permitted.
-        # Open a PR instead; enable auto-merge so it lands without manual work
-        # when no required checks block it. The step is non-fatal: @beta must
-        # publish even if the version-sync PR can't be created for any reason.
+        # Staging is a protected branch — a direct push is never permitted, so
+        # the bump goes through a PR. The step is non-fatal: the package is
+        # already on npm by now, and a failed sync must not turn a completed
+        # release red. It is not silent either — a failure that only shows as a
+        # green run is how staging drifted to 1.0.0 while npm was on 1.2.0.
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          # GITHUB_TOKEN cannot open PRs: the org disallows GitHub Actions
+          # creating or approving them, so `gh pr create` fails with
+          # "GitHub Actions is not permitted to create or approve pull requests".
+          # RELEASE_TOKEN (a PAT) is not subject to that policy.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          NEW_TAG: ${{ needs.compute.outputs.new_tag }}
         run: |
           git fetch origin staging
           git fetch --tags
           git checkout staging
-          git checkout "${{ needs.compute.outputs.new_tag }}" -- package.json package-lock.json
+          git checkout "$NEW_TAG" -- package.json package-lock.json
           if git diff --cached --quiet; then
-            echo "staging already at ${{ needs.compute.outputs.new_tag }} — nothing to sync"
+            echo "staging already at $NEW_TAG — nothing to sync"
             exit 0
           fi
-          SYNC_BRANCH="ci/sync-${{ needs.compute.outputs.new_tag }}-to-staging"
+          SYNC_BRANCH="ci/sync-$NEW_TAG-to-staging"
           git checkout -b "$SYNC_BRANCH"
-          git commit -m "chore: sync ${{ needs.compute.outputs.new_tag }} version to staging"
-          git push origin "$SYNC_BRANCH"
-          gh pr create \
-            --base staging \
-            --head "$SYNC_BRANCH" \
-            --title "chore: sync ${{ needs.compute.outputs.new_tag }} version to staging" \
-            --body "Automated version sync from release ${{ needs.compute.outputs.new_tag }}."
-          gh pr merge "$SYNC_BRANCH" --merge --auto \
-            || echo "auto-merge not available — PR opened, merge manually or enable auto-merge in repo settings"
+          git commit -m "chore: sync $NEW_TAG version to staging"
+          # The branch is CI-owned and disposable; force past any leftover from
+          # an earlier attempt at the same tag.
+          git push --force origin "$SYNC_BRANCH"
+
+          # Leave no branch behind when the PR cannot be opened for a reason
+          # other than one already being open for this tag — unreviewable
+          # ci/sync-* branches accumulated for ten releases that way. But a
+          # rerun must not close the only open sync PR for this tag.
+          if ! PR_CREATE_OUTPUT="$(gh pr create \
+              --base staging \
+              --head "$SYNC_BRANCH" \
+              --title "chore: sync $NEW_TAG version to staging" \
+              --body "Automated version sync from release $NEW_TAG." 2>&1)"; then
+            echo "$PR_CREATE_OUTPUT"
+            if ! echo "$PR_CREATE_OUTPUT" | grep -qi "already exists"; then
+              git push origin --delete "$SYNC_BRANCH" || true
+              echo "::error::Could not open the $NEW_TAG version-sync PR — staging still carries the previous version. Set the RELEASE_TOKEN secret (a PAT with contents+pull-requests write), or bump staging's package.json to $NEW_TAG by hand."
+              exit 1
+            fi
+            echo "$NEW_TAG sync PR already exists for $SYNC_BRANCH — reusing it."
+          fi
+
+          gh pr merge "$SYNC_BRANCH" --merge \
+            || gh pr merge "$SYNC_BRANCH" --merge --auto \
+            || echo "::warning::$NEW_TAG sync PR is open but not merged — merge it to bring staging up to date."
 
       - name: Trigger @beta publish on staging
         uses: actions/github-script@v7

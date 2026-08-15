@@ -4,6 +4,7 @@
 // without exercising the runner.
 import { CROSSCHECK_REPO_URL } from './product.js'
 import { modelDisplayName } from './review-models.js'
+import { vendorDisplayName } from './vendor.js'
 import { renderSkillAttributionLine } from '../skills/attribution.js'
 import type { SkillMetadata } from '../skills/broker.js'
 
@@ -28,9 +29,11 @@ export interface AttributionFooterInput {
 }
 
 export function buildAttributionFooter(input: AttributionFooterInput): string {
-  const vendorLink = input.vendor === 'codex'
-    ? '[OpenAI Codex](https://openai.com/codex)'
-    : '[Claude Code](https://claude.ai/code)'
+  // Same name the commit subjects credit, from the same helper — a card and the
+  // commit it describes must not disagree about who did the work.
+  const vendor = input.vendor === 'codex' ? 'codex' : 'claude'
+  const vendorUrl = vendor === 'codex' ? 'https://openai.com/codex' : 'https://claude.ai/code'
+  const vendorLink = `[${vendorDisplayName(vendor)}](${vendorUrl})`
   const sentence = input.override
     || `_${input.action} with ${vendorLink} via [Crosscheck](${CROSSCHECK_REPO_URL})_`
   // Its own italic run so a branded override keeps whatever markdown it uses.

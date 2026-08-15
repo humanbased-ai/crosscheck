@@ -12,3 +12,10 @@ export function normalizeVendor(value: string | undefined): Vendor | null {
 }
 
 export const VENDOR_ALIAS_HINT = 'claude (aliases: claude-code, cc, anthropic) | codex (aliases: openai)'
+
+// The product name a vendor is credited under in anything a human reads —
+// commit subjects and the attribution footer. One definition, so a commit
+// cannot end up crediting one vendor while its own trailers name the other.
+export function vendorDisplayName(vendor: Vendor): string {
+  return vendor === 'codex' ? 'OpenAI Codex' : 'Claude Code'
+}
