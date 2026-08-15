@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildFixRecheckSteps, buildRunChildArgs, headShaForStalenessClaim, resolveWorkflowSteps } from '../commands/run.js'
+import { buildFixRecheckSteps, buildRunChildArgs, headShaForStalenessClaim, resolveWorkflowSteps, standingVerdictForReport } from '../commands/run.js'
 import type { PRRef } from '../lib/pr-spec.js'
 import type { WorkflowStep } from '../lib/workflow.js'
 
@@ -194,5 +194,47 @@ describe('headShaForStalenessClaim', () => {
     )
 
     expect(head).toBeUndefined()
+  })
+})
+
+// The run itself is one of the things that can change what the PR says. A run
+// that posts a BLOCK and then rechecks with unparseable output ends with
+// verdict === null while that BLOCK is what governs the PR — and pre-run
+// history has never heard of it.
+describe('standingVerdictForReport', () => {
+  const OLD_REVIEW = { type: 'review', verdict: 'NEEDS_WORK', sha: 'df95a6b1111111111111111111111111111111a' }
+  const POSTED_THIS_RUN = { type: 'review', verdict: 'BLOCK', sha: '57ef3ef2d46d35af5b0361b362c8069394d7133c' }
+
+  it('reports the verdict this run posted, not the one it superseded', async () => {
+    const standing = await standingVerdictForReport(
+      { verdict: 'NEEDS_WORK', sha: OLD_REVIEW.sha },
+      async () => [OLD_REVIEW, POSTED_THIS_RUN, { type: 'recheck' }],
+    )
+
+    expect(standing).toEqual({ verdict: 'BLOCK', sha: POSTED_THIS_RUN.sha })
+  })
+
+  it('reads a verdict the run never saw when step detection never fetched', async () => {
+    const standing = await standingVerdictForReport(undefined, async () => [OLD_REVIEW])
+
+    expect(standing).toEqual({ verdict: 'NEEDS_WORK', sha: OLD_REVIEW.sha })
+  })
+
+  it('does not resurrect a pre-run verdict the fresh read no longer finds', async () => {
+    const standing = await standingVerdictForReport(
+      { verdict: 'NEEDS_WORK', sha: OLD_REVIEW.sha },
+      async () => [{ type: 'review' }],
+    )
+
+    expect(standing).toBeUndefined()
+  })
+
+  it('falls back to the pre-run selection when the read fails', async () => {
+    const standing = await standingVerdictForReport(
+      { verdict: 'NEEDS_WORK', sha: OLD_REVIEW.sha },
+      async () => { throw new Error('HttpError: 502 Bad Gateway') },
+    )
+
+    expect(standing).toEqual({ verdict: 'NEEDS_WORK', sha: OLD_REVIEW.sha })
   })
 })

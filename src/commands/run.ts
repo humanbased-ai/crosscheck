@@ -23,7 +23,7 @@ import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
-import { buildNoVerdictReport, renderNoVerdictReport, selectStandingVerdict } from '../lib/no-verdict.js'
+import { buildNoVerdictReport, renderNoVerdictReport, selectStandingVerdict, type JudgedRecordShape } from '../lib/no-verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
@@ -159,6 +159,34 @@ export function buildFixRecheckSteps(
     if (synthetic) fixRecheckSteps = appendAfterLastFix(fixRecheckSteps, synthetic)
   }
   return fixRecheckSteps
+}
+
+/**
+ * The verdict standing on the PR when the report is printed — which this run is
+ * one of the things that can have changed.
+ *
+ * A run can post a `BLOCK` review and then have its recheck emit no parseable
+ * verdict: the workflow ends with `verdict === null` because the recheck is the
+ * last step to record one, while the `BLOCK` it just posted is what actually
+ * governs the PR. Pre-run history has never heard of that comment, so reporting
+ * from it either says nothing stands or names the verdict the run superseded —
+ * pointing the reader at an older commit while a fresh judgment sits on HEAD.
+ *
+ * A successful read supersedes the pre-run selection outright rather than being
+ * merged with it: it is the same fetch over the same comments, one workflow
+ * later, so where the two disagree the later one is the PR's current state. The
+ * pre-run selection is the fallback for a failed read, not a floor.
+ */
+export async function standingVerdictForReport(
+  preRun: { verdict: string; sha?: string } | undefined,
+  fetchHistory: () => Promise<readonly JudgedRecordShape[]>,
+): Promise<{ verdict: string; sha?: string } | undefined> {
+  try {
+    return selectStandingVerdict(await fetchHistory())
+  } catch {
+    // Best-effort: fall back to what step detection already read this run.
+    return preRun
+  }
 }
 
 /**
@@ -351,13 +379,12 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   // triggers (direct user invocation, backtrace, etc.) run all remaining steps
   // from the detected starting point so a standalone `ck run` still works end-to-end.
 
-  // The verdict already on the PR when this run started, if any. Read only for
-  // reporting: a run that ends with no verdict of its own has to say what the PR
-  // still claims, and whether that claim covers the code being reviewed. Taken
-  // from the history the step detection already fetched — an explicit --steps
-  // run skips that fetch, and the report drops the line rather than paying for
-  // a round-trip it would otherwise never make.
-  let standingVerdict: { verdict?: string; sha?: string } | undefined
+  // The verdict already on the PR when this run started, if any — taken from the
+  // history step detection has to fetch anyway, so it costs nothing here. The
+  // no-verdict report re-reads at reporting time and prefers that; this is what
+  // it falls back to when the re-read fails, and all an explicit --steps run
+  // (which never fetches here) has to fall back to is nothing.
+  let standingVerdict: { verdict: string; sha?: string } | undefined
 
   if (!opts.steps) {
     try {
@@ -828,7 +855,13 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       // full price and emitted no parseable VERDICT: line. What makes a verdict
       // missing is what became of the steps that produce one.
       if (verdict === null) {
-        const reportHeadSha = await headShaForStalenessClaim(standingVerdict, async () => {
+        // Both claims the report makes about the PR — what verdict stands, and
+        // whether it covers HEAD — are claims about now, so both are read now.
+        const standingNow = await standingVerdictForReport(
+          standingVerdict,
+          () => fetchStepHistory(owner, repo, number, token),
+        )
+        const reportHeadSha = await headShaForStalenessClaim(standingNow, async () => {
           const { data: currentPR } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
           return currentPR.head.sha
         })
@@ -840,7 +873,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           // the workflow — only an explicit ask counts as deliberate scoping.
           stepsExplicitlyScoped: opts.steps !== undefined || opts.trigger === 'kickass',
           prUrl,
-          ...(standingVerdict && { standingVerdict }),
+          ...(standingNow && { standingVerdict: standingNow }),
           ...(reportHeadSha !== undefined && { headSha: reportHeadSha }),
         })
         console.log('')
