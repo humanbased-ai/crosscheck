@@ -1149,7 +1149,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // this is config.quality untouched.
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, codexVendor, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext, skillSession))
+          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, codexVendor, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext, skillSession, config.skills.codex_full_access))
           inputTokens = undefined
           outputTokens = undefined
         } else {
@@ -1472,7 +1472,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           return runCodexFixStep(
             tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
             codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs, skillSession,
-            codexVendor.effort,
+            codexVendor.effort, config.skills.codex_full_access,
           )
         }
         // roundConfig, not config: runFixStep reads vendors.claude.effort and

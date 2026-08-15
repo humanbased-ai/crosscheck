@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from 'node:timers/promises'
+import { execFileSync } from 'child_process'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 
@@ -116,5 +117,41 @@ export async function clonePRForReview(params: {
     await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir, true)
   } catch {
     onBaseFetchFailed?.()
+  }
+}
+
+// Runs `fn` with the clone's `origin` URL stripped of its embedded credentials.
+//
+// An HTTPS clone stores `https://x-access-token:<token>@github.com/...` in
+// .git/config, so the checkout carries a writable GitHub token as a plain file.
+// That is fine while only crosscheck runs there, and not fine once a vendor
+// agent executes shell commands in it — reading .git/config or simply running
+// `git push` is then enough to act on the repository as the token's owner.
+//
+// The token is not needed while an agent runs: reviews only read, and the fix
+// step's push happens back in the runner after the agent has exited. So it is
+// removed for the duration and restored in `finally`, whether `fn` returned or
+// threw. A crash hard enough to skip the finally loses only the throwaway clone.
+//
+// SSH remotes carry no credential and are left untouched.
+export async function withCredentialFreeOrigin<T>(repoDir: string, fn: () => Promise<T>): Promise<T> {
+  let original: string | undefined
+  try {
+    original = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repoDir, encoding: 'utf8' }).trim()
+  } catch {
+    // No origin (or no repo) — nothing to strip, and nothing to restore.
+    return fn()
+  }
+
+  const scrubbed = original.replace(/^https:\/\/[^@/]*@github\.com\//, 'https://github.com/')
+  if (scrubbed === original) return fn()
+
+  execFileSync('git', ['remote', 'set-url', 'origin', scrubbed], { cwd: repoDir })
+  try {
+    return await fn()
+  } finally {
+    try {
+      execFileSync('git', ['remote', 'set-url', 'origin', original], { cwd: repoDir })
+    } catch { /* clone is disposable; a failed restore must not mask fn's result */ }
   }
 }

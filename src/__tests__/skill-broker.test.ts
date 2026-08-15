@@ -6,6 +6,7 @@ import {
   callSkillBrokerTool,
   claudeSkillBrokerArgs,
   codexSkillBrokerArgs,
+  codexSkillsReachable,
   createSkillActivationSession,
   handleSkillBrokerRequest,
   renderSkillBrokerInstructions,
@@ -169,10 +170,57 @@ describe('skill activation broker', () => {
     expect(claudeSkillBrokerArgs(session)).toEqual([
       '--mcp-config', expect.stringContaining('crosscheck'),
     ])
-    expect(codexSkillBrokerArgs(session)).toEqual([
+    expect(codexSkillBrokerArgs(session, true)).toEqual([
       '-c', expect.stringContaining('mcp_servers.crosscheck.command='),
       '-c', expect.stringContaining('mcp_servers.crosscheck.args='),
+      '-c', 'sandbox_mode="danger-full-access"',
     ])
+  })
+
+  // Codex registers the MCP server and lists its tools under any sandbox, then
+  // cancels every tools/call ("user cancelled MCP tool call") unless the sandbox
+  // is danger-full-access. Measured against codex-cli 0.147: -a never,
+  // --full-auto, -s read-only, -s workspace-write, approval_policy="never" and
+  // per-tool approval_mode all leave the call cancelled. Without this arg the
+  // broker is reachable but unusable — which is why codex logged 0 skill
+  // activations across 244 production runs while claude logged 131.
+  it('widens the codex sandbox so broker tool calls are not cancelled', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    expect(codexSkillBrokerArgs(session, true)).toContain('sandbox_mode="danger-full-access"')
+  })
+
+  // The override is the price of reaching the broker, so it is scoped to exactly
+  // that: no skills, no widened sandbox.
+  it('does not widen the sandbox when there is no session', () => {
+    expect(codexSkillBrokerArgs(undefined, true)).toEqual([])
+  })
+
+  // Reviews read untrusted PR content, and reaching the broker costs the codex
+  // sandbox, so the operator has to say yes to that trade — onboarding does not
+  // say it for them. Six BLOCK reviews on #298 landed on this point.
+  it('registers nothing when the operator has not opted into full access', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    expect(codexSkillBrokerArgs(session, false)).toEqual([])
+  })
+
+  // The broker registration and the sandbox override travel together: half of
+  // this pair is the 0-activations bug (broker present, every call cancelled) and
+  // the other half is an unsandboxed run with nothing to show for it.
+  it('never registers the broker without the sandbox override, or vice versa', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    for (const allowed of [true, false]) {
+      const args = codexSkillBrokerArgs(session, allowed)
+      const hasBroker = args.some(a => a.includes('mcp_servers.crosscheck.command='))
+      const hasSandbox = args.includes('sandbox_mode="danger-full-access"')
+      expect(hasBroker).toBe(hasSandbox)
+    }
+  })
+
+  it('codexSkillsReachable gates on both a session and the opt-in', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    expect(codexSkillsReachable(session, true)).toBe(true)
+    expect(codexSkillsReachable(session, false)).toBe(false)
+    expect(codexSkillsReachable(undefined, true)).toBe(false)
   })
 
   it('removes the session endpoint on close', () => {
