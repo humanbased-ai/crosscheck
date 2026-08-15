@@ -130,14 +130,6 @@ export function buildCommitTrailers(input: CrosscheckCommitTrailerInput): string
   ].join('\n')
 }
 
-function parseFields(attrs: string): Map<string, string> {
-  const fields = new Map<string, string>()
-  for (const match of attrs.matchAll(/\b([a-z_]+)=([^\s]+)/g)) {
-    fields.set(match[1], match[2])
-  }
-  return fields
-}
-
 function parseType(value: string | undefined): CrosscheckStepType | string {
   if (value === undefined) return DEFAULT_TYPE
   return STEP_TYPES.has(value as CrosscheckStepType) ? (value as CrosscheckStepType) : value

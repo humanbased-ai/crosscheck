@@ -18,6 +18,7 @@ import {
   resolveFixLanding,
 } from '../lib/runner.js'
 import type { StepResult } from '../lib/workflow.js'
+import type { Config } from '../config/schema.js'
 
 describe('isRetryableFixError', () => {
   it('returns false for auth failure errors', () => {
@@ -401,14 +402,16 @@ describe('buildWorkflowCompleteEvent', () => {
 })
 
 describe('resolveFixVendor', () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
     },
     routing: { fallback_reviewer: fallbackReviewer },
-  }) as any
+    // Partial fixture: these resolvers read only vendors.* and routing.*, and
+    // building a whole Config here would bury what the case is actually about.
+  }) as unknown as Config
 
   describe('human-origin fallback — respects routing.fallback_reviewer', () => {
     it('auto (default): prefers codex when both enabled', () => {
@@ -472,14 +475,16 @@ describe('resolveFixVendor', () => {
 })
 
 describe('resolveConflictResolveVendor', () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
     },
     routing: { fallback_reviewer: fallbackReviewer },
-  }) as any
+    // Partial fixture: these resolvers read only vendors.* and routing.*, and
+    // building a whole Config here would bury what the case is actually about.
+  }) as unknown as Config
 
   describe('human-origin fallback — the no_vendor regression', () => {
     // The default workflow gives conflict-resolve `reviewer: origin`. A PR whose

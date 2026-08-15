@@ -8,7 +8,7 @@
 import chalk from 'chalk'
 import { loadConfig, getLinearCredentials } from '../config/loader.js'
 import { verifyLinearIdentity } from '../linear/verify.js'
-import { resolveLinearAuth, withWorker, renderIcon, renderSignature } from '../linear/identity.js'
+import { withWorker, renderIcon, renderSignature } from '../linear/identity.js'
 import { findIssueByIdentifier } from '../linear/client.js'
 import { buildLinearCommentBody, shouldPostToLinear } from '../linear/comment.js'
 import { extractLinearRef } from '../linear/ref.js'

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { resolveLinearAuth, withWorker, type FetchLike, type ResolvedLinearAuth } from '../linear/identity.js'
 import { LinearConfigSchema } from '../config/schema.js'
 

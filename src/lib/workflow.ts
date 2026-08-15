@@ -110,7 +110,10 @@ export function loadHarnessSection(ref: string, baseDir?: string): string | null
     const harnesPath = join(dir, filePart)
     if (!existsSync(harnesPath)) continue
     const raw = readFileSync(harnesPath, 'utf8')
-    const sectionRegex = new RegExp(`^## ${section}\s*$`, 'm')
+    // `\\s`, not `\s`: this is a template literal, so `\s` is just `s` and the
+    // pattern became `^## <section>s*$` — it failed on a heading with trailing
+    // whitespace and matched `## Overviewsss`. Caught by no-useless-escape.
+    const sectionRegex = new RegExp(`^## ${section}\\s*$`, 'm')
     const nextSectionRegex = /^## /m
     const start = raw.search(sectionRegex)
     if (start === -1) return null
