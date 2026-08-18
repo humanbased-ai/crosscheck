@@ -26,8 +26,9 @@ clone_protocol: ssh
 vendors:
   codex:
     enabled: true
-    model: gpt-5.6-terra    # gpt-5.6-luna | gpt-5.6-terra | gpt-5.6-sol
+    model: gpt-5.6-terra    # gpt-5.6-luna | gpt-5.6-terra | gpt-5.6-sol; unset = tier model (api-key) / CLI default (subscription)
     auth: subscription      # subscription (device-auth OAuth) | api-key
+    effort: medium          # low | medium | high | xhigh | max | ultra (ultra: terra/sol only)
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
@@ -38,18 +39,49 @@ vendors:
 
 # ─── Quality & Focus ─────────────────────────────────────────────────────────
 quality:
+  mode: smart               # smart (default) | fixed
+  #
+  # smart  - dynamically adjust model + effort based on task type. The PR is
+  #          classified from its changed-file list against the versioned policy
+  #          in src/config/review-strategy.json: a lockfile-only PR is skipped
+  #          entirely, a docs PR gets review with no fix loop, a PR touching
+  #          auth or a migration is promoted to `thorough`.
+  #
+  #          Every comment cites the strategy version, class, and tier it ran
+  #          under, so a past review stays explicable after the policy changes.
+  #          Full rationale: docs/dynamic-thoroughness.md
+  #
+  # fixed  - every agent call uses `tier` below, regardless of what changed.
+  #
+  # NOTE: leave vendors.*.model unset under smart. An explicit model outranks
+  # the strategy, so pinning one makes per-PR selection a no-op — and crosscheck
+  # then withholds the tier from the comment rather than citing one that did not
+  # run. `crosscheck onboard` clears the pin (and says so) when you pick smart.
+  #
+  # vendors.*.effort behaves the opposite way: under smart the class's effort
+  # wins over the value below. `effort` always has a value (it has a schema
+  # default), so crosscheck cannot tell a deliberate setting from an unset one,
+  # and honoring it would disable effort escalation for every install. Use
+  # `mode: fixed` if you want a hand-set effort applied to every call.
+
   tier: balanced            # fast | balanced | thorough
   #
-  # Tier determines the model and effort level used for each vendor:
+  # Under `fixed` this is the tier for every call. Under `smart` it is the
+  # fallback used when a PR's file list cannot be read.
   #
-  #   tier       claude               codex        time     cost
-  #   ─────────  ───────────────────  ───────────  ───────  ──────
-  #   fast       Haiku 4.5 · low      GPT-5.6 Luna · low    ~10s  lowest
-  #   balanced   Sonnet 5 · medium    GPT-5.6 Terra · med   ~30s  standard
-  #   thorough   Opus 4.8 · max       GPT-5.6 Sol · high    ~60s  higher
+  # Cost is output-token cost at 48k output tokens, the measured median for one
+  # review. A review is an agentic session, so it takes 10-16 minutes of wall
+  # clock (median 643s over 43 logged runs) - the tier changes depth and the
+  # subprocess timeout, not seconds-scale latency.
   #
-  # crosscheck onboard writes these automatically when you pick a tier.
-  # You can override individual vendor settings in the vendors: block below.
+  #   tier       claude          codex           claude $   codex $
+  #   ---------  --------------  --------------  ---------  --------
+  #   fast       Haiku 4.5       GPT-5.6 Luna        0.24      0.06
+  #   balanced   Sonnet 5        GPT-5.6 Terra       0.72      0.58
+  #   thorough   Opus 5          GPT-5.6 Sol         1.20      1.44
+  #
+  # claude-fable-5 is banned from review: 2x Opus 5's price for a lower coding
+  # benchmark score. See src/config/review-strategy.json.
 
   focus:                    # optional — narrows review scope
     - security
@@ -61,6 +93,27 @@ quality:
 
   custom_prompt: |          # optional — appended to every review
     Focus on correctness and security. Be concise.
+
+# ─── Agent skills ────────────────────────────────────────────────────────────
+# Enabled skills are available to coding agents. Each skill's own description
+# and the agent decide when it is activated for a workflow step.
+skills:
+  enabled:
+    - code-review-skill     # recommended · @awesome-skills (MIT)
+    - diagnosing-bugs       # recommended · @mattpocock (MIT)
+    # - code-review         # preloaded, opt-in · @mattpocock (MIT)
+    # - codebase-design     # preloaded, opt-in · @mattpocock (MIT)
+
+  # Codex only. Codex reaches the skill broker (an MCP server) only when its
+  # sandbox is disabled: under -s read-only, -s workspace-write, -a never and
+  # --full-auto alike it cancels every tool call, so skills silently do nothing.
+  # Turning this on lets codex run unsandboxed against the PR checkout — which is
+  # untrusted code — in exchange for skills actually working. Crosscheck removes
+  # the git credential from the checkout and passes codex an allowlisted
+  # environment (no GITHUB_TOKEN) either way, but a prompt injection can still
+  # read the working tree and reach the network. Claude needs none of this: its
+  # broker works sandboxed.
+  codex_full_access: false
 
 # ─── Budget ──────────────────────────────────────────────────────────────────
 budget:
@@ -134,6 +187,15 @@ routing:
 
   # Body and commit pattern matching — checked first, before branch prefix.
   # Patterns are matched against both the PR body and commit messages (Co-Authored-By trailers).
+  # These identify who WROTE the code, not who reviewed it. Do not loosen them to
+  # match "Reviewed with [Claude Code]" — every PR Claude reviews would then look
+  # Claude-authored and get routed back to the other vendor.
+  #
+  # Crosscheck's own attribution (its fix-PR footer and Crosscheck-Reviewer commit
+  # trailers) is recognised ALWAYS and is deliberately not listed here: setting
+  # either list replaces the defaults entirely, and an install that pinned its own
+  # patterns would then misread crosscheck's own fix PRs as human-authored. Your
+  # patterns below are still checked first, so they outrank it.
   codex_reviews_patterns:
     - "Generated with \\[Claude Code\\]"    # PR body attribution footer
     - "Co-Authored-By: Claude"              # commit trailer added by Claude Code
@@ -178,8 +240,9 @@ post_review:
   auto_fix:
     delivery:
       mode: pull_request        # pull_request | commit | comment
-      # pull_request → fix PR targets the original branch; human approves before merge
-      # commit       → fixes pushed directly onto the original PR branch
+      # pull_request → fixes land on the original PR branch; a separate fix PR is
+      #                opened only if that push can't land (branch merged/deleted/protected)
+      # commit       → fixes pushed directly onto the original PR branch (no fallback)
       # comment      → suggested fixes posted as review comments only
       pr_title: "fix: address CR issues in #{original_pr_title}"
       label: cr-autofix         # GitHub label applied to the fix PR
@@ -231,6 +294,56 @@ logs:
 #     cr_needs_work: yellow  # CR bar + verdict label when NEEDS WORK
 #     cr_block: red          # CR bar + verdict label when BLOCK
 #     fix_fill: cyan         # filled segments on the FIX bar
+
+
+# ─── Linear ──────────────────────────────────────────────────────────────────
+# Mirror review verdicts onto the Linear issue a PR belongs to.
+# Disabled by default. See docs/linear-identity.md for the full setup guide.
+#
+# Two identity tiers:
+#   api_key            (T0) — your own Linear key. Writes carry a signature line
+#                             but Linear still attributes them to your account.
+#   client_credentials (T1) — an OAuth app in your workspace. crosscheck mints a
+#                             token per run and writes render as the app itself
+#                             (botActor), not as a human. Recommended.
+#
+# A failed T1 token mint ABORTS the run — crosscheck never silently falls back to
+# an API key, because that would re-attribute agent writes to a person.
+# linear:
+#   enabled: true
+#   auth:
+#     mode: client_credentials          # api_key | client_credentials
+#     # Env var NAMES — never put secrets in this file.
+#     api_key_env: LINEAR_API_KEY       # used when mode: api_key
+#     client_id_env: LINEAR_CLIENT_ID
+#     client_secret_env: LINEAR_CLIENT_SECRET
+#     # NOTE: "read,write" does NOT cover initiatives — initiative:read and
+#     # initiative:write are separate scopes you must request explicitly.
+#     scopes: "read,write"
+#   identity:
+#     actor: crosscheck                 # createAsUser name in T1
+#     # First line of every Linear write. Placeholders: {actor} {product} {model}
+#     # {reviewer} {icon}. Ones with no value resolve to empty and the leftover
+#     # separators are tidied, so this reads correctly either way.
+#     signature: "🤖 {actor} · {model}"
+#     # Optional logo, rendered inline where {icon} appears in the signature.
+#     # The better route is the OAuth app avatar (T1) — Linear renders it natively
+#     # beside the comment. Inline images may render block-level; test first.
+#     icon_url: ""
+#     # Suffix the actor with the step that produced the write, so a review, a fix
+#     # and a recheck are distinguishable: crosscheck/review, crosscheck/fix, ...
+#     # Set false for one flat actor name.
+#     per_step_actor: true
+#   # Which verdicts get mirrored. Defaults to the ones needing action — add
+#   # APPROVE if you also want a comment on every clean review.
+#   comment_on:
+#     - NEEDS_WORK
+#     - BLOCK
+#   # Team key prefixes that may be matched as bare refs (IN-2269) in a branch,
+#   # title, or body. Leave empty to only follow explicit linear.app issue URLs —
+#   # without this, tokens like UTF-8 and SHA-256 have the same shape as a ref.
+#   team_keys:
+#     - IN
 
 
 # ─── Branding ────────────────────────────────────────────────────────────────

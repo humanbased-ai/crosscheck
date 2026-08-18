@@ -44,7 +44,8 @@ function formatPRSignature(pr: PRStatus): string {
   return `${pr.owner}/${pr.repo}/PR#${pr.number}`
 }
 
-export function actionGroupLabel(pr: PRStatus): 'CR' | 'fix' | 'recheck' | 'merge' {
+export function actionGroupLabel(pr: PRStatus): 'CR' | 'resolve' | 'fix' | 'recheck' | 'merge' {
+  if (pr.nextAction === 'resolve') return 'resolve'
   if (pr.nextAction === 'fix') return 'fix'
   if (pr.nextAction === 'recheck') return 'recheck'
   if (pr.nextAction === 'merge') return 'merge'
@@ -69,11 +70,13 @@ export function parseSelection(answer: string, prs: PRStatus[]): PRStatus[] {
 }
 
 function actionOrder(pr: PRStatus): number {
-  if (pr.nextAction === 'review') return 0
-  if (pr.nextAction === 'fix') return 1
-  if (pr.nextAction === 'recheck') return 2
-  if (pr.nextAction === 'merge') return 3
-  return 4
+  // resolve first: a conflicted PR blocks everything downstream of it.
+  if (pr.nextAction === 'resolve') return 0
+  if (pr.nextAction === 'review') return 1
+  if (pr.nextAction === 'fix') return 2
+  if (pr.nextAction === 'recheck') return 3
+  if (pr.nextAction === 'merge') return 4
+  return 5
 }
 
 function pickerDescription(pr: PRStatus): string {

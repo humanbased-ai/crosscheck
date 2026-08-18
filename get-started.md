@@ -22,9 +22,11 @@
   - [Multi-PR syntax](#multi-pr-syntax)
   - [watch](#crosscheck-watch)
   - [status](#crosscheck-status)
+  - [skill install](#crosscheck-skill-install-source)
   - [diagnose](#crosscheck-diagnose)
   - [optimize](#crosscheck-optimize)
   - [impact](#crosscheck-impact)
+  - [adoption](#crosscheck-adoption)
   - [issue](#crosscheck-issue)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
@@ -156,6 +158,52 @@ export LINEAR_API_KEY=lin_api_...
 If it's unset while enrichment is on, crosscheck just skips enrichment and
 reviews the diff as usual — it never errors.
 
+### Linear identity — for writing back to Linear (optional)
+
+Separate from enrichment above, which only *reads*. When `linear.enabled: true`,
+crosscheck mirrors each review verdict onto the PR's Linear issue.
+
+`crosscheck onboard` asks which rung of the attribution ladder you want and writes
+the config for you.
+
+**Start with `api_key`.** It reuses `LINEAR_API_KEY`, works immediately, and posts
+the comment — the feature is fully functional. Comments attribute to your Linear
+account, led by a `🤖 crosscheck · <model>` signature line.
+
+Climb to `client_credentials` when more than one thing writes to your workspace and
+you need them told apart. It uses an OAuth app — one per workspace, not per user —
+so comments post as crosscheck itself with its own icon:
+
+```bash
+export LINEAR_CLIENT_ID=...
+export LINEAR_CLIENT_SECRET=...
+```
+
+A failed T1 token mint aborts the run rather than falling back to `api_key` —
+a silent downgrade would put agent writes back under a human's name.
+
+`crosscheck onboard` walks you through the choice:
+
+<p align="center">
+  <img src="./assets/linear-onboard.svg" alt="crosscheck onboard — choosing a Linear attribution rung" width="700" />
+</p>
+
+Before opening a PR, `crosscheck linear-test` exercises the whole path and posts nothing —
+identity, issue lookup, verdict filter, and the exact comment body:
+
+<p align="center">
+  <img src="./assets/linear-test.svg" alt="crosscheck linear-test — dry-run verification" width="700" />
+</p>
+
+`crosscheck status` shows which rung is active whenever `linear.enabled` is true:
+
+<p align="center">
+  <img src="./assets/linear-status.svg" alt="crosscheck status — the Linear identity section" width="620" />
+</p>
+
+Full walkthrough, including the two Linear UI gotchas that trip people up:
+[docs/linear-identity.md](docs/linear-identity.md).
+
 ---
 
 ## Step 1 — Check your setup
@@ -187,6 +235,8 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
 ```
 
 If this step fails, fix the specific auth, clone, reviewer, or comment-posting error before enabling `watch`.
+
+If you'd rather nothing be written to the PR on a first run, use `crosscheck run <pr-url> --dry-run` instead: it clones, reviews, and prints the comment it would post without touching GitHub. (`--dry-run` lives on `run`, `fix`, `recheck`, and `resolve` — not on `review`, which always posts.) [docs/trust.md](./docs/trust.md) covers what leaves your machine at each step, which permissions each command needs, and exactly what `watch` can change.
 
 ## Step 3 — Choose a deployment mode
 
@@ -345,6 +395,8 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 **Step 6 — Review quality.** Choose the speed/thoroughness tier for review prompts and reviewer timeouts.
 
+**Step 6.5 — Agent skills.** Choose which preloaded or custom-installed skills are enabled for coding agents. New setups preselect `code-review-skill (by @awesome-skills, MIT)` and `diagnosing-bugs (by @mattpocock, MIT)`. Matt Pocock's `code-review` and `codebase-design` are available but off by default. Re-running onboard preserves your selection. Skills are made available across workflow operations, and each skill's description plus the coding agent decides when it applies.
+
 **Step 7 — Workflow pipeline.** Choose what happens after a review:
 
 ```
@@ -397,6 +449,12 @@ crosscheck onboard
   Step 6 — review quality
   [1] fast  [2] balanced  [3] thorough
   Choice [2]: 2
+
+  Step 6.5 — agent skills
+  [ ] code-review       (by @mattpocock, MIT)
+  [x] code-review-skill (by @awesome-skills, MIT)
+  [x] codebase-design   (by @mattpocock, MIT)
+  [x] diagnosing-bugs   (by @mattpocock, MIT)
 
   Step 7 — workflow pipeline
   [1] review only  [2] review → fix  [3] review → fix → re-check
@@ -472,6 +530,8 @@ crosscheck alter humanbased-ai/xny-monorepo --reset                  # remove th
 | `--reset` | Remove the override; revert to the global default |
 
 The depths differ in what happens after the initial review:
+
+In every depth, an `APPROVE` stops all work on the commit it covers, and a later push re-opens the PR — see [What happens after a PR is approved?](#what-happens-after-a-pr-is-approved).
 
 - **`review`** — review each new SHA; never modify code.
 - **`review,fix`** — crosscheck auto-applies fixes when the verdict isn't `APPROVE`, and stops there; its own fix commit is not re-reviewed.
@@ -624,7 +684,7 @@ crosscheck scan --json
 
 ### `crosscheck kickass`
 
-Selects all actionable PRs (any PR where a next step is needed: review, fix, recheck) and advances each one. Stale PRs are shown first. APPROVE PRs appear as a read-only "needs merge (manual)" section — visible so you know what's ready, but not dispatched automatically. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
+Selects all actionable PRs (any PR where a next step is needed: resolve, review, fix, recheck) and advances each one. A PR with merge conflicts is dispatched as a `resolve` leg first — conflicts block everything downstream, and a base-branch move that conflicts a PR fires no webhook, so a scan is the only thing that notices. Stale PRs are shown first. APPROVE PRs appear as a read-only "needs merge (manual)" section — visible so you know what's ready, but not dispatched automatically. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
 
 Each PR dispatch uses `detect-step` to read live PR comment history and advances **exactly the next needed step** — kickass drives one step per PR, then `watch` picks up continuation via the webhooks that step produces.
 
@@ -721,6 +781,8 @@ crosscheck status
   Config
     mode                   cross-vendor
     quality tier           balanced
+    installed skills       code-review (by @mattpocock, MIT), code-review-skill (by @awesome-skills, MIT), codebase-design (by @mattpocock, MIT), diagnosing-bugs (by @mattpocock, MIT)
+    enabled skills         code-review-skill (by @awesome-skills, MIT), diagnosing-bugs (by @mattpocock, MIT)
     codex auth             subscription
     claude model           sonnet
     per-review budget      $2.00/review
@@ -741,6 +803,41 @@ crosscheck status
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Check status against a specific config file |
+
+---
+
+### `crosscheck skill install <source>`
+
+Installs an Agent Skill from a Git URL or local directory into `~/.crosscheck/skills`. Crosscheck validates `SKILL.md`, rejects unsafe names and symbolic links, and records source, revision, author, license, and package integrity. Installation does not enable a skill automatically.
+
+Crosscheck itself ships with this preloaded catalog:
+
+| Skill | Onboarding default | Best fit |
+|---|---:|---|
+| [`code-review-skill`](https://github.com/awesome-skills/code-review-skill) (by `@awesome-skills`, MIT) | On | General default: broad language, correctness, security, performance, and architecture coverage |
+| [`codebase-design`](https://github.com/mattpocock/skills/tree/main/skills/engineering/codebase-design) (by `@mattpocock`, MIT) | On | Architecture-heavy changes: deep modules, small interfaces, clean seams, and testability |
+| [`diagnosing-bugs`](https://github.com/mattpocock/skills/tree/main/skills/engineering/diagnosing-bugs) (by `@mattpocock`, MIT) | On | Hard bugs and regressions: reproducible signals, ranked hypotheses, and regression evidence |
+| [`code-review`](https://github.com/mattpocock/skills/tree/main/skills/engineering/code-review) (by `@mattpocock`, MIT) | Off | Evidence-rich repositories: separately checks documented standards and issue/PRD fidelity |
+
+`code-review` and `code-review-skill` are competing review baselines. The onboarding picker highlights the conflict and will not enable one until the selected counterpart is deselected; the runtime broker also rejects activation of a second baseline. The other bundled skills are complementary.
+
+```bash
+crosscheck skill install https://github.com/owner/my-skill.git
+crosscheck skill install /path/to/my-skill
+crosscheck onboard  # enable installed skills
+```
+
+The Git repository or local directory must have `SKILL.md` at its root. For a skill nested in a monorepo, clone it and pass the nested local directory.
+
+`crosscheck status` distinguishes the full installed catalog from the enabled selection and renders attributed identities as `skill-name (by @author, license)`.
+
+At runtime, Crosscheck distinguishes three states: **installed** skills are in the catalog, **enabled** skills are available to agents, and **activated** skills were actually loaded for one workflow step. A skill becomes activated only when the agent successfully calls the Crosscheck broker's `activate_skill` tool for an enabled skill and receives its `SKILL.md` instructions. Listing enabled skills, seeing a skill description, or merely enabling a skill does not count.
+
+Activation is scoped to one step session, such as review, fix, recheck, or conflict resolution. Repeated activation in that session is idempotent, and the receipt survives retries or a reviewer fallback within the same step. Every later step gets a separate empty session, and Crosscheck deletes all step sessions when the workflow run ends. The terminal, logs, and PR comment preserve the completed step's attribution as historical evidence; they do not pre-activate future sessions. For example: `code-review-skill (by @awesome-skills, MIT)`.
+
+Upgrading from an earlier Crosscheck release is opt-in: existing configs default to `skills.enabled: []`. Re-run `crosscheck onboard` to choose the recommended bundle or any additional installed skills.
+
+Review and recheck also honor repository practices in `AGENTS.md` and `CLAUDE.md`. These repository-defined practices take precedence over bundled skill advice. Crosscheck reads the root files plus any nested files whose directory contains a changed path, orders them from broadest to most specific, and lets nested guidance override root guidance. It reads these files from the PR's base branch and disables vendor-native discovery for the run, so guidance added or modified by the PR cannot influence its own review.
 
 ---
 
@@ -884,6 +981,65 @@ crosscheck impact  (all time · 47 reviews)
 | `--json` | Output the full report as JSON |
 | `-c, --config <path>` | Config file path |
 
+---
+
+### `crosscheck adoption`
+
+Reports whether crosscheck is actually being used, and how long a PR waits for a verdict. Where `impact` prices reviews that happened, `adoption` measures activation and reach. Reads from `~/.crosscheck/logs/` — no network calls, nothing transmitted.
+
+```bash
+crosscheck adoption
+crosscheck adoption --since 2026-07-01
+crosscheck adoption --json
+```
+
+```
+crosscheck adoption  (2026-06-15 → 2026-07-14)
+
+  Activation
+  ──────────────────────────────────────────────
+  onboard started            3
+  onboard completed          2
+  abandoned                  1
+
+  Usage
+  ──────────────────────────────────────────────
+  reviews started            51
+  reviews completed          47
+  rechecks completed         12
+  blocking findings posted   19
+  fixes applied              11
+  active repos               6
+
+  Weekly active repos
+  ──────────────────────────────────────────────
+  2026-06-22  ████████          3 repos  14 reviews
+  2026-06-29  ████████████      4 repos  18 reviews
+  2026-07-06  ████████████████  6 repos  15 reviews
+
+  PR open → verdict
+  ──────────────────────────────────────────────
+  median                     22m
+  p90                        1.8h
+  slowest                    2d
+  measured on 41 verdicts
+  ⓘ 6 verdicts had no PR open time in the event — excluded
+
+  First-run failures  (sessions that never reached a verdict)
+  ──────────────────────────────────────────────
+  auth                       2
+
+  ⓘ derived from local logs only (30d retention) — nothing is transmitted. See docs/metrics.md
+```
+
+| Flag | Description |
+|---|---|
+| `--since <YYYY-MM-DD>` | Limit the analysis to logs from this date onward |
+| `--json` | Output the full report as JSON |
+| `-c, --config <path>` | Config file path |
+
+Every field these numbers are derived from is inventoried in **[docs/metrics.md](./docs/metrics.md)**, including what is deliberately never written to disk.
+
 The monetary estimate formula: `(hours_saved × hourly_rate_usd) + (issues_caught × defect_cost_usd)`. Defaults: `$150/hr`, `$150/issue`. Both configurable in `crosscheck.config.yml` under `impact`.
 
 ---
@@ -965,7 +1121,7 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 
 On re-runs, `onboard` updates only the fields it collected answers for. Everything else survives unchanged.
 
-**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
+**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `skills.enabled`, `tunnel.*`, `post_review.auto_fix.*`
 
 **Never touched by onboard:** per-repo overrides in `~/.crosscheck/workflows/` (owned by `crosscheck alter`), and `~/.crosscheck/workflow.yml` after its first write
 
@@ -1015,7 +1171,8 @@ vendors:
   codex:
     enabled: true
     auth: subscription      # subscription | api-key
-    model: gpt-5.6-terra    # only used when auth: api-key
+    model: gpt-5.6-terra    # pins the review model; unset = tier model (api-key) / CLI default (subscription)
+    effort: medium          # low | medium | high | xhigh | max | ultra (ultra: terra/sol only)
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
@@ -1026,13 +1183,35 @@ vendors:
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:
-  tier: balanced            # fast | balanced | thorough
+  mode: smart               # smart (default) | fixed — see Review thoroughness
+  tier: balanced            # fast | balanced | thorough (fallback under smart)
   focus:                    # narrows review scope (optional)
     - security
     - types
     - performance
   custom_prompt: |          # appended to every review prompt
     Be concise. Flag only issues that would block a merge.
+
+# ── Agent skills ──────────────────────────────────────────────────────────────
+# Enabled means available to every coding-agent operation. The skill description
+# and agent decide whether to activate it for a particular step.
+skills:
+  enabled:
+    - code-review-skill     # recommended · @awesome-skills, MIT
+    - diagnosing-bugs       # recommended · @mattpocock, MIT
+    # - code-review         # preloaded, opt-in · @mattpocock, MIT
+    # - codebase-design     # preloaded, opt-in · @mattpocock, MIT
+
+  # Codex only. Codex reaches the skill broker (an MCP server) only when its
+  # sandbox is disabled: under -s read-only, -s workspace-write, -a never and
+  # --full-auto alike it cancels every tool call, so skills silently do nothing.
+  # Turning this on lets codex run unsandboxed against the PR checkout — which is
+  # untrusted code — in exchange for skills actually working. Crosscheck removes
+  # the git credential from the checkout and passes codex an allowlisted
+  # environment (no GITHUB_TOKEN) either way, but a prompt injection can still
+  # read the working tree and reach the network. Claude needs none of this: its
+  # broker works sandboxed.
+  codex_full_access: false
 
 # ── Budget ────────────────────────────────────────────────────────────────────
 budget:
@@ -1070,6 +1249,13 @@ routing:
   #   2. Commit message Co-Authored-By: trailers (API call, non-fatal if it fails)
   #   3. Branch prefix (claude/ or codex/)
   #   4. author_routes fallback (last resort)
+  # These say who WROTE the code, not who reviewed it.
+  #
+  # Crosscheck's own attribution — its fix-PR footer and `Crosscheck-Reviewer`
+  # commit trailers — is recognised ALWAYS, whatever you put here. Setting either
+  # list replaces the defaults, so if these markers lived in the list a pinned
+  # config would misread crosscheck's own fix PRs as human-authored. Your patterns
+  # are checked first and still win.
   codex_reviews_patterns:
     - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
     - "Co-Authored-By: Claude"              # commit trailer
@@ -1118,8 +1304,9 @@ post_review:
   auto_fix:
     delivery:
       mode: pull_request      # pull_request | commit | comment
-      # pull_request → fix PR targets original branch; human approves before merge
-      # commit       → fixes pushed directly onto the original PR branch
+      # pull_request → fixes land on the original PR branch; a separate fix PR is
+      #                opened only if that push can't land (branch merged/deleted/protected)
+      # commit       → fixes pushed directly onto the original PR branch (no fallback)
       # comment      → suggested fixes posted as review comments only
       pr_title: "fix: address CR issues in #{original_pr_title}"
       label: cr-autofix       # GitHub label applied to the fix PR
@@ -1144,15 +1331,93 @@ post_review:
 server:
   port: 7891
   webhook_path: /webhook
+
+linear:                       # write review verdicts back to a Linear issue (opt-in)
+  enabled: false
+  auth:
+    mode: api_key             # api_key | client_credentials
+    api_key_env: LINEAR_API_KEY
+    client_id_env: LINEAR_CLIENT_ID
+    client_secret_env: LINEAR_CLIENT_SECRET
+    scopes: "read,write"      # comma-separated; initiative:* are separate scopes
+  identity:
+    actor: crosscheck
+    signature: "🤖 {actor} · {model}"   # {actor} {product} {model} {reviewer} {icon}
+    icon_url: ""              # rendered where {icon} appears; app avatar is preferred
+    per_step_actor: true      # crosscheck/review vs crosscheck/fix in Linear
+  comment_on:                 # verdicts mirrored to the issue (default omits APPROVE)
+    - NEEDS_WORK
+    - BLOCK
+  team_keys: []               # e.g. [IN] — required to match bare refs like IN-42
 ```
+
+### Review thoroughness
+
+**`quality.mode: smart` is the default.** Crosscheck classifies each PR from its
+changed-file list and adjusts model and effort to match, rather than applying one
+tier to everything. Classification runs on the already-cloned working copy, so it
+costs one `git diff` and no API call. Set `mode: fixed` to opt out.
+
+| # | PR class | Detected by | Tier | Steps |
+|---|---|---|---|---|
+| 1 | Generated / vendored | every file is a lockfile or build output | — | **PR skipped** |
+| 2 | Security / data-critical | auth, crypto, payment, migration paths; `risk:T3`; hotfix→default | `thorough` | full loop |
+| 3 | Deletion-only | ≤ 5 additions with ≥ 20 deletions | `fast` | review |
+| 4 | Docs / spec | ≥ 50% Markdown | `balanced` | review |
+| 5 | Test-only | every file is a test | `fast` | review, fix |
+| 6 | Config / infra | ≥ 50% config, no source | `balanced` | full loop |
+| 7 | Trivial | ≤ 3 files, ≤ 150 lines | `fast` | review, fix |
+| 8 | Standard | everything else | `balanced` | full loop |
+
+First match wins, and security sits second so it dominates every cheapening rule
+below it — a deletion that removes auth code, or a two-file migration, is never
+routed to `fast`.
+
+The class's step set narrows the configured pipeline and never widens it, so a
+repo pinned to review-only with `crosscheck alter` stays review-only. Rounds past
+the first escalate on measured non-convergence: effort rises where the model
+supports it, the tier is promoted where it does not.
+
+Note that classes 3 and 4 narrow to `review` alone, which also drops
+`conflict-resolve` — review-only never touches code, and auto-conflict-resolve
+is code modification. That rule normally follows an operator's explicit
+`crosscheck alter --review-only`; under smart mode the *classifier* can reach it
+too, so a docs-only or deletion-only PR with a merge conflict is reviewed but not
+auto-resolved. Set `mode: fixed` if you want auto-conflict-resolve on every PR.
+
+Every comment cites the policy that produced it:
+
+```
+<!-- crosscheck: … verdict=BLOCK strategy=1.1.0 class=risky tier=thorough … -->
+```
+
+> **Leave `vendors.*.model` unset under smart mode.** An explicit model outranks
+> the strategy, so pinning one makes per-PR selection a no-op. When that happens
+> crosscheck **withholds** the tier from the comment rather than citing one that
+> did not run. `crosscheck onboard` clears the pin — and prints what it cleared —
+> when you choose smart.
+
+Verify the policy is current with `npm run verify:strategy`. Full rationale:
+[docs/dynamic-thoroughness.md](./docs/dynamic-thoroughness.md).
 
 ### Quality tiers
 
-| Tier | Speed | Depth | Best for |
-|---|---|---|---|
-| `fast` | ~10s | Top issues only | High-volume repos, draft PRs |
-| `balanced` | ~30s | Full review, all issues explained | Default for most teams |
-| `thorough` | ~60–90s | Deep multi-pass, architecture + security | Before merging to main |
+Under `fixed`, the tier applies to every call. Under `smart`, it is the fallback
+when a PR's file list cannot be read.
+
+| Tier | Claude | Codex | Cost per review | Best for |
+|---|---|---|---|---|
+| `fast` | Haiku 4.5 | GPT-5.6 Luna | $0.24 · $0.06 | High-volume repos, draft PRs |
+| `balanced` | Sonnet 5 | GPT-5.6 Terra | $0.72 · $0.58 | Default for most teams |
+| `thorough` | Opus 5 | GPT-5.6 Sol | $1.20 · $1.44 | Before merging to main |
+
+Cost is output-token cost at 48k output tokens, the measured median for one
+review. A review is an agentic session, not a single call — expect 10–16 minutes
+of wall clock (median 643s, p90 984s across 43 logged runs). Tier changes depth
+and the subprocess timeout, not seconds-scale latency.
+
+`claude-fable-5` is banned from review: 2× Opus 5's price for a lower coding
+benchmark score.
 
 ### Issue enrichment
 
@@ -1274,7 +1539,9 @@ If none match, origin is `human` and the PR is skipped in cross-vendor mode.
 codex review --base <base-branch> --title "<pr-title>"
 ```
 
-The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. With `auth: subscription`, no model flag is passed. With `auth: api-key`, the model is selected by quality tier (`fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `thorough` → `gpt-5.6-sol`).
+The `--base` flag diffs current HEAD against the base branch — exactly the PR diff. An explicit `vendors.codex.model` (or matching `model_tiers` entry) is passed as `-c model=...` under either auth mode. When unset: `auth: subscription` passes no model flag (the Codex CLI picks its default), while `auth: api-key` selects the model by quality tier (`fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `thorough` → `gpt-5.6-sol`).
+
+Reasoning effort comes from `vendors.codex.effort` and is always passed through as `-c model_reasoning_effort=...` — for the review step and for the auto-fix step (`codex exec`) alike. The values match the codex CLI tiers 1:1 — `low` (Light), `medium`, `high`, `xhigh` (Extra High), `max`, `ultra`. Not every model supports every tier: `ultra` is terra/sol only, and pre-5.6 models stop at `xhigh` — the CLI rejects unsupported combinations. Higher tiers can multiply review wall-clock time; pair them with `timeout_sec`.
 
 ### How Claude reviews run
 
@@ -1289,7 +1556,16 @@ claude \
   "<prompt>"
 ```
 
-`--bare` makes execution fast and deterministic. `--allowedTools` limits Claude to read-only git operations on the cloned repo.
+`--bare` makes execution fast and deterministic. `--allowedTools` limits Claude to read-only git operations on the cloned repo. `vendors.claude.effort` drives `--effort` for every Claude step — review, recheck, auto-fix and conflict-resolve.
+
+Every comment crosscheck posts closes with the model and effort the step actually ran with, plus any skills the agent activated:
+
+```
+---
+_Reviewed with Claude Code via Crosscheck_ _(Opus 5 · high effort)_
+
+_Skills: code-review-skill (by @awesome-skills, MIT)_
+```
 
 ### Deduplication
 
@@ -1309,6 +1585,9 @@ The fix (file lock for same-machine + GitHub commit status for cross-machine) is
 - **Temp isolation** — each PR cloned into a fresh temp dir, deleted after review
 - **Read-only tools** — Claude restricted to `git diff` and `git log` only
 - **Temp credential isolation** — with `clone_protocol: ssh` (default) no tokens touch disk; with `clone_protocol: https` a short-lived token is embedded in the temp clone's remote URL and removed when the temp dir is deleted after review
+- **Skill package validation** — installs reject unsafe names, attribution injection, symbolic links, packages over 1,000 files or 10 MiB, and collisions; Git sources record their checked-out commit
+- **Skill integrity** — Crosscheck verifies every installed package against its SHA-256 receipt before exposing it to agents; modified or malformed packages fail closed and appear as unavailable in `crosscheck status`
+- **Skill execution boundary** — the activation broker exposes instructions and referenced files but never executes bundled scripts itself. Skills are third-party instructions: inspect their source and license before enabling them; the selected coding agent still operates under its normal sandbox and permissions
 
 ---
 
@@ -1333,7 +1612,7 @@ agent opens PR #42  →  opposite vendor reviews  →  issues found?
 | Setting | Default | Why |
 |---|---|---|
 | `fixer: same-as-author` | the vendor that wrote the PR also fixes it | The authoring agent knows its own code and style best |
-| `delivery: pull_request` | opens a new PR, doesn't push directly | You stay in the loop — no code lands without your approval |
+| `delivery: pull_request` | pushes the fix onto the PR's own branch, so the fix, recheck, and approval stay on one PR; opens a separate fix PR only when that push can't land | Keeps everything on the original PR while still covering merged/protected branches |
 | `trigger: on_issues` | only fires when the reviewer found warnings or worse | Skips the fix step on clean PRs |
 | `min_severity: warning` | ignores info/cosmetic findings | Avoids noisy fix PRs for style-only comments |
 
@@ -1448,11 +1727,38 @@ Each cycle is one `[crosscheck]` fix commit followed by one recheck. The loop st
 
 `max_rounds` is respected by both `crosscheck watch` and `crosscheck run`. `watch` re-triggers on each pushed fix commit; `run` loops inline within the same session.
 
+### My PR became conflicted — will crosscheck resolve it?
+
+Yes, if your workflow has a `conflict-resolve` step (the `onboard` default does). Conflicts are handled independently of the review ladder, because a PR usually conflicts when the **base branch** moves — which changes nothing about the code that was reviewed.
+
+The catch is that a base-branch move fires no webhook on your PR, so `watch` never hears about it. `crosscheck scan` and `crosscheck kickass` are what notice: a conflicted PR shows `next=resolve` and is dispatched ahead of review, fix, and recheck. An approved PR that can no longer merge is resolved too — the merge commit then moves HEAD off the approved SHA, so the merged code gets a fresh review.
+
+```bash
+crosscheck kickass          # picks up conflicted PRs along with everything else
+crosscheck resolve <pr-url> # or force just the conflict-resolve step
+```
+
+Fork PRs are skipped, same as with auto-fix — crosscheck cannot push to them. Repos narrowed to `review` or `review,recheck` never resolve conflicts either, since that would modify code.
+
+### What happens after a PR is approved?
+
+Crosscheck stops working on that commit. Once the newest verdict is `APPROVE` and it covers the PR's current HEAD, no further step runs — not a recheck, not a re-review. `watch` skips further events on that SHA, `crosscheck run` prints `this commit is already approved — nothing to do until new commits land`, and `kickass` lists the PR under "needs merge (manual)" instead of dispatching it.
+
+**A push re-opens it.** New commits materially change what was approved, so the approval no longer applies: the next event runs a fresh review (round *n*+1) on the new code, and the full fix/recheck loop resumes from there. An `APPROVE` posted before the annotation carried a `sha=` field can't prove which commit it covers, so it is treated the same way — one review re-establishes it.
+
+To force another pass on the approved commit itself, name the steps explicitly — that bypasses history detection:
+
+```bash
+crosscheck run https://github.com/owner/repo/pull/123 --steps review
+```
+
+`crosscheck detect-step <pr-url>` shows the stop reason for any PR.
+
 ### Can I disable the auto-fix step?
 
 Yes. Set `post_review.auto_fix.enabled: false` in your config, or set `trigger: never`. You can also raise `min_severity` to `error` to limit fixes to blocking issues only.
 
-To push fixes directly without a separate PR (skipping your review), switch to `delivery: commit`. To get suggested fixes as review comments without any code push, use `delivery: comment`.
+Both `delivery: pull_request` (the default) and `delivery: commit` push the fix directly onto the PR's own branch. The only difference is the fallback: `pull_request` opens a separate fix PR if that push can't land (branch merged, deleted, or protected), whereas `commit` surfaces the push failure instead. To get suggested fixes as review comments without any code push, use `delivery: comment`.
 
 ### Why does the fixer use the same vendor that wrote the PR?
 

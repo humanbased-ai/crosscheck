@@ -9,13 +9,14 @@ import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
 import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken, getLinearApiKey } from '../config/loader.js'
+import { loadConfig, getGithubToken, getLinearApiKey, getLinearCredentials } from '../config/loader.js'
 import { enrichIssueContext } from '../issues/enrich.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { hintForError } from '../lib/remediation.js'
-import { runWorkflow } from '../lib/runner.js'
-import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
+import { runWorkflow, mergeStepOutcomes } from '../lib/runner.js'
+import { isLinearConfigError, resolveLinearAuth } from '../linear/identity.js'
+import { DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS, loadWorkflow, linearWritePossible, type WorkflowStep } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps } from '../lib/repo-workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
@@ -52,6 +53,7 @@ function meetsCrazyStopCondition(verdict: string | null, mode: 'crazy' | 'halfcr
   // halfcrazy: any non-BLOCK verdict (APPROVE or NEEDS_WORK) is acceptable
   return verdict !== 'BLOCK'
 }
+
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -322,8 +324,16 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   if (!opts.steps) {
     try {
       const history = await fetchStepHistory(owner, repo, number, token)
-      const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha)
+      // prData comes from pulls.get, which carries `mergeable` — so routing a conflicted
+      // PR to conflict-resolve costs no extra call here.
+      const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha, { mergeable: prData.mergeable })
       if (nextResult.step === null) {
+        if (nextResult.stopReason === 'approved') {
+          // This commit is approved; a push moves HEAD and re-opens the workflow.
+          // --steps skips detection entirely, so it forces a pass on the same commit.
+          console.log(chalk.dim('  this commit is already approved — nothing to do until new commits land (use --steps review to force another pass)'))
+          return
+        }
         // Workflow already complete for this SHA
         console.log(chalk.dim('  workflow already complete for this SHA — nothing to do'))
         return
@@ -376,10 +386,18 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     },
     base: {
       ref: prData.base.ref,
-      repo: { full_name: `${owner}/${repo}` },
+      repo: {
+        full_name: `${owner}/${repo}`,
+        // Feeds the review strategy's `risky` class: without these its
+        // `or_hotfix_to_default_branch` and `or_labels` (risk:T3) rules cannot
+        // fire, leaving two security promotion paths inert.
+        ...(prData.base.repo?.default_branch !== undefined && { default_branch: prData.base.repo.default_branch }),
+      },
     },
     html_url: prData.html_url,
     user: { login: prData.user?.login ?? '' },
+    ...(prData.labels !== undefined && { labels: prData.labels.map((l: { name: string }) => ({ name: l.name })) }),
+    ...(prData.created_at !== undefined && { created_at: prData.created_at }),
   }
 
   const { sha } = prData.head
@@ -485,6 +503,23 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
     let workflowError: unknown
     try {
+      // One token for the whole command run, resolved before the clone: a
+      // misconfiguration should fail without spending a clone, and runWorkflow is
+      // re-entered per fix/recheck round so resolving inside it would mint every
+      // round. Inside the try, so a failure still reaches the completion handler.
+      // Only when the selected workflow can actually write a verdict — the public
+      // `fix` and `resolve` aliases run steps that never call notifyLinear, and a
+      // missing credential must not abort work that was never going to write.
+      // --crazy / --halfcrazy synthesise a recheck after a fix, so a fix-only
+      // selection can still reach a verdict write. Resolving once here keeps the
+      // one-token-per-run contract; leaving it null made every loop round mint its
+      // own, and a late outage could abort after fixes had already been pushed.
+      const roundModeCanWrite = opts.roundMode !== undefined
+      const linearAuth = !opts.dryRun
+        && linearWritePossible(config.linear, roundModeCanWrite ? undefined : filteredSteps)
+        ? await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+        : null
+
       await clonePRForReview({
         owner, repo, prNumber: number, baseRef: prData.base.ref,
         tmpDir, token, protocol: config.clone_protocol,
@@ -510,6 +545,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
       const sharedCtx = {
         owner, repoName: repo, prNumber: number, token, config, origin,
+        linearAuth,
         log: (msg: string) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
         onPhaseChange: (label: string) => { activeSpinner.text = label },
         crosscheckShas: new Set<string>(),
@@ -533,9 +569,20 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       })
       let { verdict, fixAppliedCount } = workflowResult
       let latestReviewComment = workflowResult.latestReviewComment ?? initialReviewComment
+      // A class-skipped PR (e.g. lockfile-only) never ran a review. Both round
+      // loops below would still spin at least once — meetsCrazyStopCondition(null)
+      // is false — costing a pulls.get and a second full runWorkflow before the
+      // fixAppliedCount guard broke out. Gate them, and report the skip rather
+      // than a bare formatVerdict(null) with no reason.
+      const { strategySkipped } = workflowResult
+      // Accumulate step outcomes across all rounds so the completion line
+      // reflects whether *any* round did work — not just the first. A first
+      // round that skips everything followed by a crazy/halfcrazy round that
+      // runs a fix is not a "no step ran" run.
+      let accumulatedStepOutcomes = workflowResult.stepOutcomes
 
       // Autonomous fix→recheck loop for --crazy / --halfcrazy
-      if (opts.roundMode) {
+      if (!strategySkipped && opts.roundMode) {
         const mode = opts.roundMode
         const fixRecheckSteps = buildFixRecheckSteps(filteredSteps, allSteps, assignedReviewer, stepVendorOverrides)
         let activeFixRecheckSteps = fixRecheckSteps
@@ -614,6 +661,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           })
           ;({ verdict, fixAppliedCount } = workflowResult)
           latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
+          accumulatedStepOutcomes = mergeStepOutcomes(accumulatedStepOutcomes, workflowResult.stepOutcomes)
 
           if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
 
@@ -633,7 +681,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
               try {
                 execFileSync('git', ['reset', '--hard', 'HEAD'], { cwd: tmpDir, stdio: 'pipe' })
                 execFileSync('git', ['clean', '-fd'], { cwd: tmpDir, stdio: 'pipe' })
-              } catch (resetErr) {
+              } catch {
                 fileLog({ level: 'warn', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'worktree_reset_failed', mode, round: loopRound })
                 console.log(chalk.red(`✗  could not reset worktree after fix_error — stopping`))
                 break
@@ -662,7 +710,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           console.log(`  round ${loopRound}  verdict ${verdict ?? '--'} — continuing...`)
         }
 
-      } else {
+      } else if (!strategySkipped) {
         // Autonomous fix→recheck cycling based on max_rounds from workflow.yml
         const allFixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
         const maxRounds = allFixRecheckSteps.length > 0
@@ -718,6 +766,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
             })
             ;({ verdict, fixAppliedCount } = workflowResult)
             latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
+            accumulatedStepOutcomes = mergeStepOutcomes(accumulatedStepOutcomes, workflowResult.stepOutcomes)
             hasRechecked = true
 
             if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
@@ -732,9 +781,33 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       }
 
       activeSpinner.stop()
-      console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
+      // A run is "no step ran" only when every step across every round skipped.
+      // If the first round skips everything but a later crazy/halfcrazy round
+      // runs a fix, the overall run did work and should not report "no step ran".
+      const ranNothing = accumulatedStepOutcomes !== undefined
+        && accumulatedStepOutcomes.ran.length === 0
+        && accumulatedStepOutcomes.skipped.length > 0
 
-      console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
+      if (strategySkipped) {
+        console.log(chalk.dim(`\n  skipped — ${strategySkipped} class, nothing to review`))
+      } else if (accumulatedStepOutcomes && ranNothing) {
+        // Every dispatched step skipped. `verdict —` on its own reads as "ran and
+        // found nothing", and the green line below then certified a no-op as a
+        // success — which is how conflict-resolve skipping for want of a vendor
+        // went unnoticed across a whole batch of PRs. The reasons are the report.
+        console.log(chalk.yellow(`\n  no step ran`))
+        for (const { step, reason } of accumulatedStepOutcomes.skipped) {
+          console.log(chalk.dim(`    ${step} — ${reason}`))
+        }
+      } else {
+        console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
+      }
+
+      // Exit code is unchanged: a skipped step is a legitimate outcome, not a
+      // failure, and the exit codes are part of the CLI contract.
+      console.log(ranNothing && !strategySkipped
+        ? chalk.yellow(`\n⚠  Workflow complete, no step ran — ${prUrl}\n`)
+        : chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
     } catch (err: unknown) {
       workflowError = err
       logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
@@ -751,7 +824,9 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       releasePRLock(owner, repo, number, sha)
       if (acquiredTmpDir) rmSync(acquiredTmpDir, { force: true, recursive: true })
     }
-    if (workflowError) process.exit(2)
+    // Exit 1 for a Linear misconfiguration — a user error under the CLI contract,
+    // and what `crosscheck review` already returns for the same condition.
+    if (workflowError) process.exit(isLinearConfigError(workflowError) ? 1 : 2)
   } finally {
     process.removeListener('SIGINT', earlySignalHandler)
     process.removeListener('SIGTERM', earlySignalHandler)

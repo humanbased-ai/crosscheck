@@ -10,9 +10,23 @@ export interface PREvent {
     title: string
     body: string
     head: { ref: string; sha: string; repo: { full_name: string } | null }
-    base: { ref: string; repo: { full_name: string } }
+    // `default_branch` lets the review strategy tell a hotfix aimed at the
+    // trunk from one aimed at a release branch. Optional: it is absent from
+    // hand-built events in tests and from some third-party redeliveries.
+    base: { ref: string; repo: { full_name: string; default_branch?: string } }
     html_url: string
     user: { login: string }
+    // Present on real webhook deliveries; used by the strategy's risk class.
+    labels?: Array<{ name: string }>
+    // Only meaningful on `closed`: true when the PR merged, false when it was
+    // closed unmerged. Absent from hand-built events in tests.
+    merged?: boolean
+    merge_commit_sha?: string | null
+    // ISO timestamp the PR was opened. Feeds the open→verdict latency in
+    // `crosscheck adoption`. Optional: absent from hand-built events in tests
+    // and from third-party redeliveries, in which case the metric skips the PR
+    // rather than guessing a start time.
+    created_at?: string
   }
   repository: {
     name: string
@@ -53,6 +67,7 @@ export function createWebhookServer(
   onLog: (msg: string) => void,
   onFileLog?: (entry: WebhookFileLogEntry) => void,
   onComment?: (event: IssueCommentEvent) => void,
+  onMerged?: (event: PREvent) => void,
 ) {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const { pathname } = new URL(req.url ?? '/', `http://localhost`)
@@ -133,6 +148,12 @@ export function createWebhookServer(
       res.writeHead(200).end('ok')
       // async — don't block the webhook response
       setImmediate(() => onPR(body))
+    } else if (body.action === 'closed' && body.pull_request.merged === true && onMerged) {
+      // A merge freezes any auto-fix PR cut from this one into a snapshot of a tree
+      // that no longer exists; the handler closes it. Closed-unmerged is not the same
+      // case — the source PR's branch is still the place the finding gets addressed.
+      res.writeHead(200).end('ok')
+      setImmediate(() => onMerged(body))
     } else {
       res.writeHead(200).end('ok')
     }

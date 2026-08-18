@@ -68,6 +68,43 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
+  // A conflicted PR (#282) is dispatched as a single conflict-resolve leg. The step's own
+  // no_conflicts pre-check decides whether there is anything to do, so pinning the step
+  // is safe even if GitHub's mergeable flag flips between the scan and the run.
+  it('pins --steps conflict-resolve for resolve actions', () => {
+    const plan = buildPreflightPlan([pr({ nextAction: 'resolve' })])
+
+    expect(plan[0].action).toBe('resolve')
+    expect(plan[0].transition).toBe('Conflicted -> Resolve')
+    expect(buildKickassRunArgs(plan[0])).toEqual([
+      'run',
+      'https://github.com/acme/web/pull/7',
+      '--steps',
+      'conflict-resolve',
+      '--expected-head-sha',
+      'abc123456789',
+      '--trigger',
+      'kickass',
+    ])
+  })
+
+  it('does not put a resolve leg into a round-mode loop', () => {
+    const plan = buildPreflightPlan([pr({ nextAction: 'resolve' })], 'crazy')
+
+    const args = buildKickassRunArgs(plan[0], 'crazy')
+    expect(args).not.toContain('--crazy')
+    expect(args).toContain('--no-timeout')
+  })
+
+  // Resolve pushes a merge commit, which a fork PR cannot accept — same constraint as fix.
+  it('skips a conflicted fork PR', () => {
+    const plan = buildPreflightPlan([pr({ nextAction: 'resolve', headRepo: 'someone-else/web' })])
+
+    expect(plan[0].action).toBe('skip')
+    expect(plan[0].skipReason).toBe('fork_pr')
+    expect(buildKickassRunArgs(plan[0])).toEqual([])
+  })
+
   it('omits --steps for commit-delivered fix actions', () => {
     const plan = buildPreflightPlan([pr({
       nextAction: 'fix',

@@ -110,7 +110,6 @@ export async function runInit(configPath?: string) {
 
   if (aiCliCount === 0) {
     // Neither AI CLI is authenticated — hard failure
-    const total = nonAiFailures.length + 1 // +1 for "no AI CLI" pseudo-failure
     console.log(chalk.red(`\nAt least one AI CLI (codex or claude) must be authenticated before crosscheck can run.\n`))
     if (nonAiFailures.length > 0) {
       console.log(chalk.yellow(`${nonAiFailures.length} other issue(s) also need attention.\n`))
@@ -143,7 +142,7 @@ export async function runInit(configPath?: string) {
       if (login) {
         // Uncomment allowed_authors placeholder
         content = content.replace(
-          /  # allowed_authors:\n(  #[^\n]*\n)+/,
+          / {2}# allowed_authors:\n( {2}#[^\n]*\n)+/,
           `  allowed_authors:\n    - ${login}  # auto-detected from gh auth\n`,
         )
         // author_routes is intentionally left commented out. In cross-vendor mode with

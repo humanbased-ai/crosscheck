@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "version": "1.1.0",
+  "_version_note": "1.1.0 — deletion_only gained a floor on deletions; `additions_max` alone also matched a small edit, so a +2/-2 typo fix was routed to a review-only class. Routing changed, so the version changes with it: a comment citing 1.0.0 has to stay explicable by 1.0.0.",
+  "updated": "2026-08-07",
+  "generated_at": "2026-08-07T05:00:00Z",
+  "review_interval_days": 60,
+  "report": "docs/dynamic-thoroughness.md",
+  "runtime_status": "active",
+  "_tier_map_note": "resolveClaudeModel/resolveCodexModel read tier->model from review-model-tiers.json, not from `vendors` below. The two agree today and CI verifies both against the same provider docs; `vendors` here is the documented policy and the tier map is the runtime lookup.",
+  "_runtime_status_note": "Read at runtime by src/lib/review-strategy.ts. The runner classifies each PR from the cloned working copy and folds the result into the quality config the reviewers receive; the version, class, and tier are stamped into every annotation.",
+  "_comment": "Single source of truth for how crosscheck picks a model, effort, and step set. Every review comment cites `version` so a past review can be explained by the policy in force when it ran. Supersedes review-model-tiers.json, which is retained for backwards compat. Re-verify every review_interval_days with `npm run verify:strategy`.",
+
+  "sources": [
+    {
+      "name": "Anthropic model catalog",
+      "url": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "checks": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]
+    },
+    {
+      "name": "Anthropic effort parameter",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/effort",
+      "checks": ["xhigh", "effort"]
+    },
+    {
+      "name": "OpenAI model catalog",
+      "url": "https://developers.openai.com/api/docs/models",
+      "checks": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
+    }
+  ],
+
+  "benchmarks": {
+    "swe_bench_verified": {
+      "measures": "Resolving real GitHub issues in Python repositories. Backend/general proxy only.",
+      "source": "https://benchlm.ai/benchmarks/sweVerified",
+      "as_of": "2026-08-06",
+      "caveat": "Comparable within one leaderboard run. Cross-leaderboard positions are indicative only."
+    },
+    "frontend_code_arena": {
+      "measures": "Blind pairwise human preference on generated frontend output: visual fidelity, interaction design, function.",
+      "source": "https://thenewstack.io/kimi-k3-open-weight-coding/",
+      "as_of": "2026-07-18",
+      "caveat": "Measures generation, not defect detection. Claude Opus 5 is absent from the retrieved leaderboard - a missing measurement, not a low score."
+    }
+  },
+
+  "models": {
+    "claude-opus-5":             { "vendor": "claude", "license": "closed", "in_usd_mtok": 5,    "out_usd_mtok": 25,   "context": 1000000, "swe_bench_verified": 0.960, "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
+    "claude-sonnet-5":           { "vendor": "claude", "license": "closed", "in_usd_mtok": 3,    "out_usd_mtok": 15,   "context": 1000000, "swe_bench_verified": 0.852, "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
+    "claude-haiku-4-5-20251001": { "vendor": "claude", "license": "closed", "in_usd_mtok": 1,    "out_usd_mtok": 5,    "context": 200000,  "swe_bench_verified": 0.733, "frontend_elo": null, "effort_levels": [] },
+    "gpt-5.6-sol":               { "vendor": "codex",  "license": "closed", "in_usd_mtok": 5,    "out_usd_mtok": 30,   "context": 1050000, "swe_bench_verified": null,  "frontend_elo": 1618, "effort_levels": ["none","low","medium","high","xhigh","max"] },
+    "gpt-5.6-terra":             { "vendor": "codex",  "license": "closed", "in_usd_mtok": 2,    "out_usd_mtok": 12,   "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["none","low","medium","high","xhigh","max"] },
+    "gpt-5.6-luna":              { "vendor": "codex",  "license": "closed", "in_usd_mtok": 0.2,  "out_usd_mtok": 1.2,  "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["none","low","medium","high","xhigh","max"] },
+
+    "kimi-k3":            { "vendor": "opencode", "license": "Modified MIT", "in_usd_mtok": 3,     "out_usd_mtok": 15,   "context": 1000000, "swe_bench_verified": null,  "frontend_elo": 1679, "effort_levels": [], "status": "planned" },
+    "glm-5.2":            { "vendor": "opencode", "license": "MIT",          "in_usd_mtok": 1.4,   "out_usd_mtok": 4.4,  "context": 1000000, "swe_bench_verified": null,  "frontend_elo": 1587, "effort_levels": [], "status": "planned" },
+    "deepseek-v4-pro":    { "vendor": "opencode", "license": "MIT",          "in_usd_mtok": 0.435, "out_usd_mtok": 0.87, "context": 1000000, "swe_bench_verified": 0.806, "frontend_elo": null, "effort_levels": ["none","high","max"], "status": "planned" },
+    "deepseek-v4-flash":  { "vendor": "opencode", "license": "MIT",          "in_usd_mtok": 0.14,  "out_usd_mtok": 0.28, "context": 1000000, "swe_bench_verified": 0.790, "frontend_elo": null, "effort_levels": ["none","high","max"], "status": "planned" }
+  },
+
+  "banned_models": [
+    {
+      "model": "claude-fable-5",
+      "reason": "Banned from code review on cost. $50/MTok output is 2x claude-opus-5 for a LOWER SWE-bench Verified score (95.0 vs 96.0). At the measured 48k output tokens per review that is $2.40 a call with no capability justification.",
+      "banned_on": "2026-08-07"
+    }
+  ],
+
+  "vendors": {
+    "claude": {
+      "cli": "claude", "honors_model_under_subscription": true, "min_cli_version": null,
+      "tiers": { "fast": "claude-haiku-4-5-20251001", "balanced": "claude-sonnet-5", "thorough": "claude-opus-5" }
+    },
+    "codex": {
+      "cli": "codex", "honors_model_under_subscription": true, "min_cli_version": "0.147.0",
+      "_min_cli_version_note": "gpt-5.6-* return HTTP 400 'requires a newer version of Codex' below this. The CLI accepts --model under subscription auth; the old auth!=api-key guard in resolveCodexModel was wrong and dropped the configured model.",
+      "tiers": { "fast": "gpt-5.6-luna", "balanced": "gpt-5.6-terra", "thorough": "gpt-5.6-sol" }
+    },
+    "opencode": {
+      "cli": "opencode", "honors_model_under_subscription": true, "min_cli_version": null,
+      "status": "planned",
+      "tiers": { "fast": "deepseek-v4-flash", "balanced": "glm-5.2", "thorough": "kimi-k3" }
+    }
+  },
+
+  "domains": {
+    "_comment": "Capability is domain-shaped, not scalar. claude-opus-5 leads backend defect resolution; kimi-k3 leads frontend. A single tier ladder cannot express that. Detected from changed-file extensions; `mixed` and `unknown` both fall back to `backend`, the conservative default.",
+    "frontend": {
+      "match_extensions": ["tsx", "jsx", "vue", "svelte", "css", "scss", "less", "html"],
+      "threshold": "more frontend files than backend files",
+      "preferred": { "thorough": ["kimi-k3", "gpt-5.6-sol", "claude-opus-5"], "balanced": ["glm-5.2", "claude-sonnet-5"], "fast": ["gpt-5.6-luna", "deepseek-v4-flash"] },
+      "basis": "Frontend Code Arena Elo: kimi-k3 1679 > gpt-5.6-sol 1618 > glm-5.2 1587. Falls back to installed vendors when opencode is unavailable.",
+      "confidence": "hypothesis - the benchmark measures generation, not review. Pending local A/B."
+    },
+    "backend": {
+      "match_extensions": ["py", "go", "rs", "java", "rb", "php", "sql", "ts"],
+      "preferred": { "thorough": ["claude-opus-5", "gpt-5.6-sol"], "balanced": ["claude-sonnet-5", "gpt-5.6-terra"], "fast": ["deepseek-v4-flash", "gpt-5.6-luna", "claude-haiku-4-5-20251001"] },
+      "basis": "SWE-bench Verified: claude-opus-5 0.960 > claude-sonnet-5 0.852 > deepseek-v4-pro 0.806 > claude-haiku-4-5 0.733.",
+      "confidence": "measured"
+    }
+  },
+
+  "_pr_classes_note": "ORDER IS THE ROUTING LOGIC - first match wins. `risky` sits second, immediately after `generated`, so consequence-based promotion dominates every cheapening rule below it: a deletion-only PR that removes auth code, or a 2-file change to a migration, must not fall through to `fast`.",
+  "pr_classes": [
+    {
+      "id": "generated", "label": "Generated / vendored only",
+      "match": { "all_files_match": ["(^|/)(dist|build|node_modules)/", "\\.(lock|sum)$", "(package-lock|pnpm-lock|yarn\\.lock)", "\\.(pb|_pb2)\\.[a-z]+$", "(^|/)generated/"] },
+      "tier": null, "effort": null, "steps": [],
+      "reason": "every changed file is generated or vendored - nothing here is human-authored"
+    },
+    {
+      "id": "risky", "label": "Security / data-critical",
+      "_any_path_matches_note": "Anchored on path segments and extensions. Unanchored, `auth` matched author/authors/oauth and `migration` matched MIGRATION_AND_GROWTH.md, promoting a pure-docs PR to thorough with a full fix/recheck loop.",
+      "match": {
+        "any_path_matches": ["(^|/)auth([/.]|$)", "(^|/)tokens?([/.]|$)", "(^|/)secrets?([/.]|$)", "(^|/)credentials?([/.]|$)", "(^|/)passwords?([/.]|$)", "(^|/)crypto([/.]|$)", "(^|/)payments?([/.]|$)", "(^|/)billing([/.]|$)", "(^|/)migrations?([/.]|$)", "\\.sql$", "(^|/)permissions?([/.]|$)", "(^|/)rbac([/.]|$)", "(^|/)sessions?([/.]|$)", "(^|/)cors([/.]|$)"],
+        "or_labels": ["risk:T3"],
+        "or_hotfix_to_default_branch": true
+      },
+      "tier": "thorough", "effort": "high", "steps": ["review", "fix", "recheck"],
+      "reason": "touches a security or data-critical path, where a missed defect is expensive - promoted on consequence, not on predicted difficulty"
+    },
+    {
+      "id": "deletion_only", "label": "Deletion-only",
+      "match": { "additions_max": 5, "deletions_min": 20 },
+      "tier": "fast", "effort": "medium", "steps": ["review"],
+      "focus": "dangling references only: imports, call sites, config keys, route registrations, docs pointing at removed symbols",
+      "reason": "removal-only, so the risk is reference breakage rather than defect density; a wrong deletion is reverted, not patched"
+    },
+    {
+      "id": "docs", "label": "Documentation / specification",
+      "match": { "doc_fraction_min": 0.5 },
+      "tier": "balanced", "effort": "high", "steps": ["review"],
+      "focus": "internal contradiction, claims contradicted by the code the doc describes, stale cross-references",
+      "reason": "specification review is open-ended design negotiation, which no automated fix loop terminates - review only"
+    },
+    {
+      "id": "test_only", "label": "Test-only",
+      "match": { "all_files_match": ["((^|/)(__tests__|tests?|e2e|fixtures?)(/|$)|\\.(test|spec)\\.)"] },
+      "tier": "fast", "effort": "medium", "steps": ["review", "fix"],
+      "focus": "assertions that cannot fail, over-mocking that voids the test, coverage claimed but not exercised",
+      "reason": "tests only - no production code path changes"
+    },
+    {
+      "id": "config_infra", "label": "Config / infrastructure",
+      "match": { "config_fraction_min": 0.5, "source_files_max": 0 },
+      "tier": "balanced", "effort": "high", "steps": ["review", "fix", "recheck"],
+      "focus": "secrets in plaintext, permission widening, resource limits, deploy-order breakage",
+      "reason": "low defect density but high blast radius - cheap to review, expensive to get wrong"
+    },
+    {
+      "id": "trivial", "label": "Trivial",
+      "match": { "files_max": 3, "src_churn_max": 150 },
+      "tier": "fast", "effort": "medium", "steps": ["review", "fix"],
+      "reason": "small and low-risk, and PRs this size merge in minutes - latency matters more than depth"
+    },
+    {
+      "id": "standard", "label": "Standard code",
+      "match": {},
+      "tier": "balanced", "effort": "medium", "steps": ["review", "fix", "recheck"],
+      "reason": "default class - no narrower rule matched"
+    }
+  ],
+
+  "ladder": {
+    "_comment": "Escalate on measured non-convergence, never on predicted complexity. Scope narrows each round; the model never weakens. Where a model exposes no effort levels, the effort step degrades to a model step (see effort_fallback).",
+    "max_blocking_findings": 5,
+    "max_rounds": 3,
+    "max_wall_clock_min": 60,
+    "effort_fallback": "promote_tier",
+    "rounds": [
+      { "round": 1, "step": "review",  "scope": "full_pr",         "tier": "class",          "effort": "class" },
+      { "round": 1, "step": "fix",     "scope": "blocking_only",   "tier": "same_as_review", "effort": "one_below_review" },
+      { "round": 2, "step": "recheck", "scope": "delta_plus_open", "tier": "same_as_review", "effort": "high" },
+      { "round": 3, "step": "recheck", "scope": "delta_plus_open", "tier": "same_as_review", "effort": "xhigh", "cross_vendor_switch": true },
+      { "round": 4, "step": "handoff", "scope": "digest",          "tier": null,             "effort": null }
+    ]
+  },
+
+  "modes": {
+    "cross_vendor": {
+      "strength": "An independent second perspective. A vendor switch broke a stalled loop twice in the census (PR #2057, #2060) after same-vendor escalation had failed for 3-6 rounds.",
+      "round_3_lever": "switch vendor AND raise effort",
+      "max_rounds": 3
+    },
+    "single_vendor": {
+      "strength": "One CLI to authenticate, version, and monitor. No routing logic.",
+      "round_3_lever": "raise effort, then promote one tier - no fresh-eyes option exists",
+      "max_rounds": 2
+    }
+  },
+
+  "conflict_resolve": {
+    "tier": "fast", "effort": "low",
+    "reason": "mechanical text surgery bounded by conflict markers - measured at 37s against ~643s for a review"
+  },
+
+  "citation": {
+    "_comment": "Every crosscheck comment states the strategy it ran under, so a past review can be explained by the policy in force at the time.",
+    "annotation_fields": ["strategy", "class", "tier"],
+    "annotation_example": "<!-- crosscheck: origin=claude reviewer=claude model=claude-opus-5 type=review round=1 verdict=BLOCK service=crosscheck sha=abc123 strategy=1.1.0 class=risky tier=thorough -->",
+    "body_template": "{tier} tier · {reason} · strategy v{version}",
+    "body_example": "_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](https://github.com/humanbased-ai/crosscheck) with Opus 5 (high) — thorough tier · touches a security or data-critical path, where a missed defect is expensive · strategy v1.1.0_"
+  }
+}

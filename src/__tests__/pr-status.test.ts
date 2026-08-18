@@ -3,6 +3,7 @@ import {
   buildProgressSummary,
   computeLastActive,
   computeTokenTotals,
+  applyRepoWorkflowOverrideToStatus,
   derivePRStatus,
   foldPRStatus,
   isStale,
@@ -110,10 +111,10 @@ describe('derivePRStatus', () => {
     expect(status.nextAction).toBe('review')
   })
 
-  it('moves to APPROVED stage when verdict is APPROVE', () => {
+  it('moves to APPROVED stage when the APPROVE covers HEAD', () => {
     const status = derivePRStatus(input({
       comments: [{
-        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
         createdAt: '2026-05-27T11:00:00.000Z',
         updatedAt: '2026-05-27T11:00:00.000Z',
       }],
@@ -123,6 +124,246 @@ describe('derivePRStatus', () => {
     expect(status.verdict).toBe('APPROVE')
     expect(status.nextAction).toBe('merge')
     expect(status.freshness).toBe('stale')
+  })
+
+  // An approval covers a commit, not a PR. Reporting `merge` for an approval that
+  // predates the current HEAD would put never-reviewed code in kickass's read-only
+  // "needs merge (manual)" list instead of dispatching the review it is owed.
+  it('needs review again when the APPROVE covers an older SHA', () => {
+    const status = derivePRStatus(input({
+      headSha: 'def456',
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_REVIEW')
+    expect(status.nextAction).toBe('review')
+    // The verdict field still reports the last verdict on record — it is the review
+    // state, not the history, that HEAD invalidates.
+    expect(status.verdict).toBe('APPROVE')
+  })
+
+  // A legacy annotation predates the `sha=` field, so it cannot prove which commit it
+  // describes. Fail open: one review re-establishes the SHA and the approval sticks.
+  it('needs review again when the APPROVE carries no SHA', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_REVIEW')
+    expect(status.nextAction).toBe('review')
+  })
+
+  it('matches the approved SHA in short and long form', () => {
+    const status = derivePRStatus(input({
+      headSha: 'abc123456789abcdef',
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc1234 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.nextAction).toBe('merge')
+  })
+
+  // Only APPROVE is SHA-scoped: a stale NEEDS_WORK still means the PR has unresolved
+  // findings, and kickass separately demotes a fix to a review when the annotation
+  // covers an older SHA.
+  it('still reports fix for a NEEDS_WORK that covers an older SHA', () => {
+    const status = derivePRStatus(input({
+      headSha: 'def456',
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.nextAction).toBe('fix')
+  })
+
+  // Logging is on by default, and runWorkflow writes workflow_complete AFTER posting the
+  // review comment — so the newest verdict on a freshly approved PR is a SHA-less log
+  // entry. Reading the approval SHA from it would fail every check and have scan/kickass
+  // re-dispatch approved PRs forever.
+  it('stays APPROVED when a newer workflow_complete log follows the approval comment', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [{
+        ts: '2026-05-27T11:00:05.000Z',
+        event: 'workflow_complete',
+        repo: 'acme/web',
+        pr: 7,
+        last_verdict: 'APPROVE',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('APPROVED')
+    expect(status.nextAction).toBe('merge')
+  })
+
+  // The SHA still has to cover HEAD — the log entry must not paper over a later push.
+  it('needs review when a workflow_complete log follows an approval of an older SHA', () => {
+    const status = derivePRStatus(input({
+      headSha: 'def456',
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [{
+        ts: '2026-05-27T11:00:05.000Z',
+        event: 'workflow_complete',
+        repo: 'acme/web',
+        pr: 7,
+        last_verdict: 'APPROVE',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_REVIEW')
+    expect(status.nextAction).toBe('review')
+  })
+
+  // A newer annotation disagreeing with an older APPROVE must win: the approval SHA is
+  // read only when the newest verdict-bearing annotation is itself the APPROVE.
+  it('does not resurrect an older approval when a newer annotation disagrees', () => {
+    const status = derivePRStatus(input({
+      comments: [
+        {
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+          createdAt: '2026-05-27T11:00:00.000Z',
+          updatedAt: '2026-05-27T11:00:00.000Z',
+        },
+        {
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc123 -->',
+          createdAt: '2026-05-27T12:00:00.000Z',
+          updatedAt: '2026-05-27T12:00:00.000Z',
+        },
+      ],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.nextAction).toBe('fix')
+  })
+
+  // Fix log events carry no SHA, so one that no longer describes HEAD — force-pushed
+  // away, or delivered as its own PR — must not pin an approved commit to NEEDS_RECHECK
+  // and have kickass dispatch no-op rechecks at it forever.
+  it('stays APPROVED when a post-approval fix left HEAD untouched', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [{
+        ts: '2026-05-27T12:00:00.000Z',
+        event: 'fix_complete',
+        repo: 'acme/web',
+        pr: 7,
+        applied_count: 2,
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('APPROVED')
+    expect(status.nextAction).toBe('merge')
+  })
+
+  // The self-correcting half: a fix that really did change HEAD moves HEAD off the
+  // approved SHA, so the approval stops covering it and the recheck is owed again.
+  it('needs a recheck when the post-approval fix moved HEAD', () => {
+    const status = derivePRStatus(input({
+      headSha: 'def456',
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [{
+        ts: '2026-05-27T12:00:00.000Z',
+        event: 'fix_complete',
+        repo: 'acme/web',
+        pr: 7,
+        applied_count: 2,
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_RECHECK')
+    expect(status.nextAction).toBe('recheck')
+  })
+
+  // A conflicted PR is actionable no matter where it sits in the review ladder — the base
+  // branch moved, and nothing else will notice, because that fires no webhook (#282).
+  describe('conflicted PRs', () => {
+    const conflicted = { mergeable: false, mergeStateStatus: 'dirty', protectedBase: false }
+
+    it('routes an unreviewed conflicted PR to resolve', () => {
+      const status = derivePRStatus(input({ merge: conflicted }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+      expect(status.nextAction).toBe('resolve')
+      expect(status.reviewState).toBe('NEEDS_REVIEW')
+    })
+
+    it('routes an approved conflicted PR to resolve rather than merge', () => {
+      const status = derivePRStatus(input({
+        merge: conflicted,
+        comments: [{
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc123 -->',
+          createdAt: '2026-05-27T11:00:00.000Z',
+          updatedAt: '2026-05-27T11:00:00.000Z',
+        }],
+      }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+      expect(status.nextAction).toBe('resolve')
+      // The review verdict is untouched — the conflict says nothing about code quality.
+      expect(status.reviewState).toBe('APPROVED')
+      expect(status.verdict).toBe('APPROVE')
+    })
+
+    it('leaves a mergeable PR alone', () => {
+      const status = derivePRStatus(input({
+        merge: { mergeable: true, mergeStateStatus: 'clean', protectedBase: false },
+      }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+      expect(status.nextAction).toBe('review')
+    })
+
+    // null = GitHub still computing. Claiming a conflict on unknown would dispatch resolve
+    // runs against clean PRs.
+    it('leaves unknown mergeability alone', () => {
+      const status = derivePRStatus(input({
+        merge: { mergeable: null, protectedBase: false },
+      }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+      expect(status.nextAction).toBe('review')
+    })
+
+    // `--steps conflict-resolve` synthesizes the step when the workflow lacks it, which is
+    // right for the explicit `crosscheck resolve` command and wrong for automatic
+    // dispatch: it would push a merge commit for a workflow that never asked for one.
+    it('drops the resolve action when the workflow defines no conflict-resolve step', () => {
+      const conflictedStatus = derivePRStatus(input({ merge: conflicted }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+      const withoutStep = applyRepoWorkflowOverrideToStatus(conflictedStatus, new Set(['review', 'fix', 'recheck']))
+      expect(withoutStep.nextAction).toBeNull()
+      expect(withoutStep.freshness).toBe('not_stale')
+
+      const withStep = applyRepoWorkflowOverrideToStatus(conflictedStatus, new Set(['conflict-resolve', 'review', 'fix']))
+      expect(withStep.nextAction).toBe('resolve')
+    })
   })
 
   it('keeps the latest verdict when a newer bare crosscheck marker exists', () => {

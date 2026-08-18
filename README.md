@@ -6,509 +6,313 @@
   <img src="./assets/logo.png" alt="crosscheck" width="160" />
 </p>
 
-<p align="center"><em>A Humanbased project, built with crosscheck.</em></p>
+<h1 align="center">crosscheck</h1>
 
-# crosscheck
+<p align="center"><strong>Your agents ship fast. Crosscheck makes sure they ship right.</strong></p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@humanbased/crosscheck"><img src="https://img.shields.io/npm/v/@humanbased/crosscheck?color=2f6feb&label=npm" alt="npm" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT" /></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-18%2B-brightgreen" alt="Node 18+" /></a>
+</p>
 
 <p align="center">
   <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
 </p>
 
-**Your agents ship fast. Crosscheck makes sure they ship right.**
+---
 
-AI coding agents create PRs faster than review habits can absorb. The failure mode isn't broken builds — it's *early victory*: patches that pass CI, look complete, and still hide regressions, brittle edge cases, or half-finished fixes.
+## The problem
 
-Crosscheck adds an independent Review → Fix → Recheck loop. One agent writes the patch. Another reviews it. Findings go back to the author to repair. The result gets rechecked before merge. The PR moves toward genuinely merge-ready — not just "looks green."
+AI coding agents open PRs faster than review habits can absorb them. The failure mode isn't a broken build — it's **early victory**: a patch that passes CI, reads as complete, and quietly carries a regression, a brittle edge case, or a half-finished fix.
 
-No new hosted service. No per-review API bill. Crosscheck runs through the `claude` and `codex` CLIs you already have — your existing subscriptions, your machine or server.
+Asking the agent that wrote the patch to review it doesn't help. That's exactly where early victory hides.
 
-Built by [Humanbased](https://github.com/humanbased-ai). Read the field report: [What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/) — 295 agentic PRs analyzed, real Crosscheck logs included.
+## What crosscheck does
 
-## Why crosscheck?
+One agent writes the patch. **A different one reviews it.** Findings go back to the author agent to repair, and the result is rechecked before merge.
 
-**Agent velocity without lowering the merge bar.**
-
-- **Independent eyes, not self-review** — route Claude-authored PRs to Codex and vice versa. Self-review is exactly where early-victory failures hide.
-- **Review → Fix → Recheck, not just comments** — findings return to the author agent for repair; a clean recheck follows before merge. PRs move forward, not sideways.
-- **No new vendor** — runs through the `claude` and `codex` CLIs you already pay for. No per-review bill, no extra trust surface.
-- **Configurable for any team size** — review-only, review + fix, or the full loop. Use one workflow locally, or one always-on team watcher with per-repo overrides via `crosscheck alter`.
-
-## Who uses crosscheck
-
-| Persona | Problem | How crosscheck helps |
-|---|---|---|
-| **Solo agentic builder** | Same agent that wrote the code may self-approve incomplete work | Independent reviewer from a different vendor, on your machine |
-| **Technical founder** | AI PRs look done before delivering stable value | Closes the loop: review finding → agent fix → clean recheck |
-| **Engineering lead** | Agent use is hard to supervise or standardize | A default full-loop workflow, per-repo overrides (`crosscheck alter`), and a visible PR audit trail |
-| **OSS maintainer** | Review bandwidth is scarce; comments must be actionable | One-shot `crosscheck review` posts concrete findings directly on the PR |
-
-### Usage scenarios
-
-**Local use**
-
-Use Crosscheck from your own machine when you want an independent review before merge, or a temporary watcher while you work.
-
-```bash
-# Catch regressions before merging a solo PR
-crosscheck run <pr-url>
-
-# One-shot review of a specific PR
-crosscheck review <pr-url>
-
-# Continuous review while your terminal is open
-crosscheck onboard --personal
-crosscheck watch
-
-# Loop until the agent produces an approved patch
-crosscheck run <pr-url> --crazy
+```
+PR  →  review  →  fix  →  recheck  →  merge-ready
+       (codex)   (claude) (codex)
 ```
 
-**Always-on team server**
+Three properties make that practical:
 
-Run one long-lived `watch` process for the whole team or org on a shared machine. Configure the default workflow once, then narrow individual repos only when needed.
+- **Independent eyes.** Claude-authored PRs route to Codex and vice versa. Origin is detected from the PR body, commit trailers, and branch prefix — no manual tagging.
+- **A loop, not a comment.** Findings return to the author agent for repair; a clean recheck follows. The PR moves forward instead of sideways.
+- **No new vendor.** Runs through the `claude` and `codex` CLIs you already pay for. No hosted service, no per-review API bill, no extra trust surface.
+
+## Same mission. Sharper skills.
+
+Crosscheck stays focused on one job: making agent-authored PRs trustworthy. It now ships supercharged with preloaded, coding-specialized skills that every invoked coding agent can use during review, diagnosis, repair, recheck, and conflict resolution.
+
+The recommended onboarding bundle combines a broad review baseline, architecture vocabulary, and rigorous bug diagnosis:
+
+- `code-review-skill (by @awesome-skills, MIT)` — comprehensive review guidance across languages, architecture, security, and performance.
+- `codebase-design (by @mattpocock, MIT)` — evaluates deep modules, small interfaces, clean seams, and testability.
+- `diagnosing-bugs (by @mattpocock, MIT)` — requires a reproducible signal, tested hypotheses, and regression evidence before declaring a fix complete.
+
+Matt Pocock's `code-review` is also preloaded as an alternative for evidence-rich repositories with documented standards and a clear issue or PRD. It remains off by default because it competes with the broad `code-review-skill`; onboarding warns instead of loading both. Enable only the practices your team wants, or install your own skill with `crosscheck skill install <source>`.
+
+Enabled skills are available, not blindly forced: the coding agent decides which are relevant to each operation. The terminal and PR comment then attribute only the skills actually activated for that step. Crosscheck also honors the target repository's base-branch `AGENTS.md` and `CLAUDE.md` guidance; those local practices take precedence over bundled skill advice.
+
+Setup and trust model: **[Agent skills](./get-started.md#crosscheck-skill-install-source)**.
+
+Built by [Humanbased](https://github.com/humanbased-ai). Field report: [What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/).
+
+---
+
+## Install
 
 ```bash
-# One-time setup on the server
-crosscheck onboard --team
+npm install -g @humanbased/crosscheck
+```
 
-# Example: one repo gets review-only, the rest keep the global workflow
-crosscheck alter humanbased-ai/xny-monorepo --review-only
+<details>
+<summary>Other channels</summary>
 
-# Start the team watcher
-crosscheck watch
+```bash
+npm install -g @humanbased/crosscheck@beta   # latest features, rougher edges
+npx @humanbased/crosscheck <command>         # no install
+
+git clone https://github.com/humanbased-ai/crosscheck
+cd crosscheck && npm install && npm run build && npm link
+```
+</details>
+
+You need GitHub CLI plus **at least one** reviewer CLI. Install both only if you want cross-vendor routing.
+
+```bash
+gh auth login
+npm install -g @anthropic-ai/claude-code && claude       # Claude Pro or Max
+npm install -g @openai/codex && codex login --device-auth # ChatGPT Plus or Pro
+```
+
+Both reviewers run on your existing subscription — no API key required.
+
+## First review in two minutes
+
+```bash
+crosscheck status                                         # confirm auth
+crosscheck review https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1 --reviewer codex
+```
+
+That clones the branch, reviews it against base, and posts a comment on the PR. Once the fixture produces a useful verdict, point it at one low-risk PR of your own — then set up continuous review:
+
+```bash
+crosscheck onboard   # guided: repos, routing, pipeline depth, connection
+crosscheck watch     # listen for PR events
 ```
 
 ---
 
-## Quick start
+## Where results land
 
-### First useful review in 10 minutes
+### On the pull request
 
-Start with one low-risk PR before turning on continuous watch mode. You only need GitHub CLI plus one authenticated reviewer CLI.
+Every review posts a comment carrying a machine-readable annotation:
 
-```bash
-# 1. Install crosscheck
-npm install -g @humanbased/crosscheck
-
-# 2. Authenticate GitHub
-brew install gh && gh auth login
-
-# 3. Authenticate one reviewer
-npm install -g @openai/codex && codex login --device-auth
-# or:
-npm install -g @anthropic-ai/claude-code && claude
-
-# 4. Check your setup
-crosscheck status
-
-# 5. Review the public fixture PR
-crosscheck review https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1 --reviewer codex
+```
+<!-- crosscheck: origin=claude reviewer=codex model=gpt-5.6-terra
+     type=review round=1 verdict=NEEDS_WORK service=crosscheck sha=a1b2c3d -->
 ```
 
-This fixture PR intentionally contains a realistic agentic-code regression, so you can see whether Crosscheck produces a useful review before pointing it at your own repo. Use `--reviewer claude` if Claude Code is the authenticated reviewer. After the fixture review works, swap in one low-risk PR from your repo, then run `crosscheck onboard` to configure repos, workflow mode, and continuous monitoring.
+That tag is the audit trail. It's how crosscheck knows which step ran, what verdict came back, and what to do next — and it's a stable contract you can parse.
 
-### Continuous local mode
+### On your Linear issue
 
-```bash
-# 1. Install crosscheck and the agent CLIs
-npm install -g @humanbased/crosscheck
-npm install -g @anthropic-ai/claude-code && claude        # Claude Pro/Max subscription
-npm install -g @openai/codex && codex login --device-auth # ChatGPT Plus/Pro subscription
-brew install gh && gh auth login                          # GitHub CLI
+Optional, off by default. When enabled, the verdict is mirrored onto the Linear issue the PR belongs to, so outcomes show up where work is planned:
 
-# 2. Guided setup — repos, review mode, workflow pipeline
-crosscheck onboard
+<p align="center">
+  <img src="./assets/linear-comment.svg" alt="A crosscheck review comment on a Linear issue" width="740" />
+</p>
 
-# 3. Start watching
-crosscheck watch                  # continuous review → fix → recheck as PRs arrive
-```
+Attribution is a ladder — **start at the bottom, climb only if you need to**:
 
-> Want reviews only (no auto-fix) for a repo? Make it review-only with
-> `crosscheck alter owner/repo --review-only` — see [per-repo overrides](#crosscheck-alter-repo).
+| Rung | Setup | Comments appear as |
+|---|---|---|
+| **api key** | one env var | Your Linear account, with a `🤖 crosscheck · <model>` signature line |
+| **workspace app** | one OAuth app, ~5 min, once per workspace | crosscheck itself, with its own icon |
 
-### Always-on team mode
+The API key rung is fully functional — it finds the issue and posts the comment. What it lacks is *attribution*, not capability. So the question isn't which is better, it's **how many things write to your workspace**. If you're the only one, the app is ceremony.
 
-```bash
-# 1. Run guided setup on the shared machine
-crosscheck onboard --team
+`crosscheck onboard` asks which rung you want and writes the config:
 
-# 2. Optional: tune individual repos without changing the global workflow
-crosscheck alter humanbased-ai/xny-monorepo --review-only
-crosscheck alter humanbased-ai/api --steps review,fix,recheck
+<p align="center">
+  <img src="./assets/linear-onboard.svg" alt="crosscheck onboard — choosing a Linear attribution rung" width="700" />
+</p>
 
-# 3. Start the long-lived watcher
-crosscheck watch
-```
+To check a setup without waiting for a PR, `linear-test` runs the whole path and posts nothing:
+
+<p align="center">
+  <img src="./assets/linear-test.svg" alt="crosscheck linear-test — verifying Linear write-back end to end" width="700" />
+</p>
+
+<details>
+<summary>Confirming which rung you're on at any time</summary>
+
+`crosscheck status` resolves the configured identity for real and reports what a write would render as:
+
+<p align="center">
+  <img src="./assets/linear-status.svg" alt="crosscheck status — the Linear identity section" width="620" />
+</p>
+</details>
+
+Full walkthrough: **[docs/linear-identity.md](./docs/linear-identity.md)**.
 
 ---
 
 ## Commands
 
-```bash
-crosscheck onboard                  # guided setup — pick repos, mode, and default pipeline
-crosscheck alter <repo>             # per-repo override: --steps review,fix | --review-only | --reset | --show
-crosscheck watch                    # continuous use — tunnel + webhook + listening
-crosscheck review <pr-urls...>      # review one or more PRs (comma lists, ranges, cross-repo)
-crosscheck run <pr-urls...>         # run the full workflow: review → (fix → recheck) × max_rounds (--review-only for review only)
-crosscheck recheck|fix|resolve <pr-urls...>   # force one workflow step on one or more PRs
-crosscheck scan                     # show open PR workflow state across monitored repos
-crosscheck detect-step <pr-url>     # explain the next workflow step for one PR
-crosscheck kickass                  # advance stale PRs from an interactive operator queue
-crosscheck init                     # check prerequisites, write starter config
-crosscheck status                   # auth state, config summary, CLI versions
-```
-
-**Operator queue (scan + kickass)**
-
-`crosscheck scan` tracks two independent dimensions per PR:
-
-| Workflow stage (`reviewState`) | Meaning | Next action |
-|---|---|---|
-| `NEEDS_REVIEW` | No crosscheck review for current HEAD | review |
-| `NEEDS_FIX` | Reviewed — fix requested | fix |
-| `NEEDS_RECHECK` | Fix committed, recheck pending | recheck |
-| `APPROVED` | Reviewed and approved | merge |
-
-| Verdict (`verdict`) | Meaning |
+| Command | What it does |
 |---|---|
-| `UNREVIEWED` | No review found |
-| `APPROVE` | AI approved |
-| `NEEDS_WORK` | AI requested changes |
-| `BLOCK` | AI hard-blocked merge |
+| `crosscheck onboard` | Guided setup — repos, routing, pipeline depth, connection |
+| `crosscheck status` | Auth, config, Linear identity, logs, impact summary |
+| `crosscheck skill install <source>` | Install an Agent Skill from Git or a local directory |
+| `crosscheck review <pr>` | One-shot review, posts a comment |
+| `crosscheck run <pr>` | Full pipeline for a PR — review, fix, recheck |
+| `crosscheck recheck` / `fix` / `resolve` | Run one step in isolation |
+| `crosscheck watch` | Listen for PR events and run the pipeline automatically |
+| `crosscheck scan` | Show open PRs with stale crosscheck state |
+| `crosscheck kickass` | Pick a stale PR and drive it to its next step |
+| `crosscheck alter <repo>` | Set a per-repo pipeline depth |
+| `crosscheck detect-step <pr>` | Show step history and the next step to run |
+| `crosscheck linear-test [issue]` | Dry-run Linear write-back |
+| `crosscheck diagnose` / `optimize` / `impact` / `adoption` / `issue` | Analyse logs, tune config, report value, report usage, file tickets |
 
-`BLOCK` and `NEEDS_WORK` both map to `NEEDS_FIX` stage — same next action, but the `verdict` field preserves severity so operators can prioritise.
-
-**How workflow steps are counted**
-
-Crosscheck reconstructs PR workflow state from visible artifacts:
-
-| Evidence | Counts as |
-|---|---|
-| Review or recheck comment with `<!-- crosscheck: ... verdict=... -->` | completed `review` / `recheck` step |
-| Fix or conflict-resolve comment, such as `<!-- crosscheck: fix_applied ... -->` | completed `fix` / `conflict-resolve` step |
-| PR commit trailer, such as `Crosscheck-Step: fix` | completed step declared by that trailer |
-
-Commit trailers are accepted as operator-declared workflow state. In practice, a PR author may command Claude, Codex, or another agent to apply a fix outside a standalone Crosscheck post; if the resulting PR commit carries `Crosscheck-Step: fix`, Crosscheck counts it as fix evidence.
-
-That evidence only advances the next step to `recheck` when the fix commit is the current PR HEAD. If another commit lands after the fix evidence, Crosscheck starts a fresh review round so the newer code is reviewed normally. This prevents an old fix trailer from marking later changes as ready for recheck.
+Multi-PR forms work where sensible — comma lists, bare numbers, and ranges:
 
 ```bash
-crosscheck scan [--tidy] [--stale-after <duration>] [--force] [--json]
-crosscheck kickass [--dry-run] [--stale-after <duration>] [--force]
+crosscheck review https://github.com/acme/app/pull/245,255
+crosscheck run    https://github.com/acme/app/pull/245-256 --concurrent 4
 ```
 
-`crosscheck review --reviewer`, `crosscheck run --reviewer`, `crosscheck run --fixer`, and `crosscheck run --vendor` accept vendor aliases:
-- Claude: `claude`, `claude-code`, `cc`, `anthropic`
-- Codex: `codex`, `openai`
-
-**Continuous improvement** *(experimental)*
-
-```bash
-crosscheck diagnose                 # surface failure patterns from review logs
-crosscheck optimize [--apply]       # rewrite reviewer instructions based on diagnose output
-crosscheck impact [--money]         # time saved, issues caught, code quality trends
-crosscheck issue                    # draft and file a bug report from recent error logs
-```
-
----
-
-### `crosscheck onboard`
-
-Interactive setup wizard. Picks repos/orgs to monitor, selects single-vendor or cross-vendor mode, configures the review pipeline, and writes `~/.crosscheck/config.yml` and `workflow.yml`.
-
-```bash
-crosscheck onboard              # guided setup
-crosscheck onboard --personal   # skip persona prompt, go straight to personal mode
-crosscheck onboard --team       # skip persona prompt, go straight to team mode
-crosscheck onboard -y           # accept all defaults non-interactively
-```
-
----
-
-### `crosscheck alter <repo>`
-
-Sets the workflow depth for one repo, leaving the global default in place for every other monitored repo. Writes a standalone file at `~/.crosscheck/workflows/<owner>__<repo>.yml` (`alter-workflow` is an alias). This is how you run one watcher for many repos while making one repo review-only. Changes apply on the next PR event — no need to restart `crosscheck watch`.
-
-```bash
-crosscheck alter humanbased-ai/xny-monorepo --review-only            # alias for --steps review
-crosscheck alter github.com/humanbased-ai/xny-monorepo --steps review,fix
-crosscheck alter https://github.com/humanbased-ai/xny-monorepo --steps review,fix,recheck
-crosscheck alter humanbased-ai/xny-monorepo --show                   # print effective steps
-crosscheck alter humanbased-ai/xny-monorepo --reset                  # revert to the global default
-```
-
-Accepted repo formats: `owner/repo`, `github.com/owner/repo`, and `https://github.com/owner/repo`. The override narrows the global `~/.crosscheck/workflow.yml` — it wins over the global default but a repo-committed `.crosscheck/workflow.yml` still wins over it.
-
----
-
-### `crosscheck watch`
-
-Starts an SSH tunnel (localhost.run), registers GitHub webhooks, and listens for PR events. Everything self-cleans on Ctrl+C.
-
-```bash
-crosscheck watch
-crosscheck watch --no-backtrace       # skip startup scan for unreviewed open PRs
-crosscheck watch --reconfigure        # re-run deployment setup before starting
-```
-
-> For reviews only, make the repo review-only with `crosscheck alter <repo> --review-only` rather than a global flag.
-
----
-
-### `crosscheck review <pr-urls...>`
-
-Reviews one or more PRs. Clones, checks out, reviews, and posts the comment. The PR argument accepts the [multi-PR spec syntax](#multi-pr-syntax) — multiple PRs are reviewed concurrently.
-
-```bash
-crosscheck review https://github.com/org/repo/pull/42
-crosscheck review <pr-url> --reviewer claude    # force Claude regardless of detection
-crosscheck review <pr-url> --reviewer codex     # force Codex regardless of detection
-crosscheck review <pr-url> --reviewer cc        # alias for Claude
-crosscheck review <pr-url> --reviewer openai    # alias for Codex
-crosscheck review .../pull/245,255              # review several PRs at once
-crosscheck review .../pull/245-256              # review an inclusive range
-```
-
----
-
-### `crosscheck run <pr-urls...>`
-
-Runs the configured workflow against one or more PRs: review → (fix → recheck) × `max_rounds`. Without `--steps`, this honors any repo workflow set by `crosscheck alter`. Loops autonomously through fix→recheck cycles up to the `max_rounds` value configured in `workflow.yml` (default: 1). Use `--crazy` or `--half-crazy` to loop until approved or unblocked, ignoring `max_rounds`. The PR argument accepts the [multi-PR spec syntax](#multi-pr-syntax); multiple PRs run concurrently (one agent per PR by default).
-
-```bash
-crosscheck run <pr-url>
-crosscheck run <pr-url> --steps review           # only the review step
-crosscheck run <pr-url> --steps fix,recheck      # skip initial review
-crosscheck run <pr-url> --reviewer claude        # force review/recheck agent
-crosscheck run <pr-url> --fixer claude           # force fix agent
-crosscheck run <pr-url> --vendor claude          # force review/recheck/fix agent
-crosscheck run <pr-url> --dry-run                # review without posting or fixing
-crosscheck run <pr-url> --crazy                  # 🔥🔥 loop until APPROVE
-crosscheck run <pr-url> --half-crazy             # 🔥  loop until not BLOCK
-crosscheck run <pr-url> --timeout 10m            # custom reviewer timeout
-crosscheck run .../pull/245,255                  # several PRs, concurrently
-crosscheck run .../pull/245-256 --concurrent 3   # range, max 3 agents in parallel
-```
-
----
-
-### `crosscheck recheck` / `fix` / `resolve <pr-urls...>`
-
-Force a single workflow step against one or more PRs, bypassing next-step auto-detection. Each is sugar for `crosscheck run <spec> --steps <type>` and accepts the same [multi-PR spec syntax](#multi-pr-syntax) and `--concurrent` / `--sequential` / `--stagger` flags as `run`.
-
-| Command | Forces the step |
-|---|---|
-| `crosscheck recheck <spec>` | `recheck` — re-evaluate against the latest review |
-| `crosscheck fix <spec>` | `fix` — apply fixes for the latest review |
-| `crosscheck resolve <spec>` | `conflict-resolve` — resolve merge conflicts (Claude only) |
-
-```bash
-crosscheck recheck https://github.com/org/repo/pull/42
-crosscheck fix .../pull/245,255 --fixer claude
-crosscheck resolve .../pull/245-256 --vendor claude
-```
-
-When the step is absent from the active `workflow.yml`, `recheck` and `conflict-resolve` are synthesized with built-in defaults so the command still runs.
-
----
-
-### Multi-PR syntax
-
-`run`, `review`, `recheck`, `fix`, and `resolve` accept a single PR URL or a **spec** that expands to many PRs — a comma-separated list of full URLs, bare numbers, and `N-M` ranges:
-
-```bash
-.../pull/245,255                                   # two PRs in the same repo
-.../pull/245-256                                   # an inclusive range
-.../repo/pull/245,https://github.com/o/other/pull/3  # across repos
-```
-
-The first token must be a full URL (a bare number inherits the most recent repo). Duplicates are de-duplicated and a spec expands to at most 100 PRs. Multiple PRs run concurrently by default — control parallelism with `--concurrent <n>`, `--sequential`, or `--stagger <ms>`.
-
----
-
-### `crosscheck scan`
-
-Scans every open PR in the configured monitor scope and reports where each one is in the crosscheck workflow. Results are cached for 60 seconds.
-
-States: `NEEDS_REVIEW` · `NEEDS_FIX` · `BLOCK` · `NEEDS_RECHECK` · `APPROVE`
-
-```bash
-crosscheck scan                          # all open PRs, grouped stale/not-stale
-crosscheck scan --tidy                   # stale actionable rows only
-crosscheck scan --stale-after 4h         # custom staleness threshold (default 24h)
-crosscheck scan --force                  # bypass cache
-crosscheck scan --json                   # machine-readable output
-```
-
----
-
-### `crosscheck detect-step`
-
-Explains the workflow history for one PR and prints the next step Crosscheck would run. Use this when a PR has mixed evidence from comments, Crosscheck commits, or ad hoc agent commits with `Crosscheck-Step` trailers.
-
-```bash
-crosscheck detect-step <pr-url>
-crosscheck detect-step <pr-url> --json
-```
-
----
-
-### `crosscheck kickass`
-
-Selects stale PRs from the operator queue and advances them — runs `scan` first, presents a multi-select picker, shows a preflight summary, then executes after confirmation.
-
-```bash
-crosscheck kickass                       # interactive operator queue
-crosscheck kickass --dry-run             # preflight only — no mutations
-crosscheck kickass --stale-after 2h      # tighter staleness threshold
-crosscheck kickass --force               # bypass scan cache before picking
-crosscheck kickass --crazy               # 🔥🔥 auto loop until APPROVE
-crosscheck kickass --half-crazy          # 🔥  auto loop until not BLOCK
-```
-
-Actions: `NEEDS_REVIEW → CR` · `NEEDS_FIX/BLOCK → Fix` · `NEEDS_RECHECK → Recheck` · `APPROVE → Merge`
-
-**`kickass` + `watch` combo**
-
-For the best recovery experience when a batch of PRs is stuck (timed out, stopped before `watch` was running), run both commands together. Each plays a distinct role:
-
-- `kickass` kicks each stuck PR **one step at a time** — it uses `detect-step` to read live PR history and dispatches only the next needed step (review, fix, or recheck).
-- `watch` owns **all continuation** — it listens for the webhooks each completed step produces and runs the full remaining pipeline from there.
-
-```
-crosscheck kickass
-  └─ ck run <url>  --trigger kickass  (one step; detect-step finds where to start)
-       └─ detect-step → "review"      run review only → posts comment
-       └─ detect-step → "fix"         run fix only → pushes commit
-       └─ detect-step → "recheck"     run recheck only → posts verdict
-
-crosscheck watch
-  ├─ issue_comment (type=review) → pick up fix step automatically
-  └─ synchronize   (fix commit)  → pick up recheck step automatically
-```
-
-> **Note:** `crosscheck run <pr-url>` invoked directly runs the **full remaining pipeline** from the detected starting step. The one-step behaviour above applies only when kickass dispatches it with `--trigger kickass`.
-
-Start `watch` first, then run `kickass` in a second terminal:
-
-```bash
-# terminal 1
-crosscheck watch
-
-# terminal 2
-crosscheck scan --force    # refresh PR state
-crosscheck kickass
-```
-
-> **How the review→fix bridge works:** after `kickass` posts a review comment, GitHub fires an `issue_comment` webhook (not a `pull_request` event). `watch` subscribes to `issue_comment` and, when it sees a crosscheck `type=review` annotation on an open PR, fetches the current PR head and runs the fix step automatically — no new commit required to wake it up. (Introduced in [#193](https://github.com/Motivation-Labs/crosscheck/pull/193).)
-
-**Autonomous loop modes**
-
-`--crazy` and `--half-crazy` turn `run` and `kickass` into autonomous fix→recheck loops that keep going until the verdict improves — no manual re-runs needed.
-
-| Flag | Stops when | Max rounds | Timeout |
-|---|---|---|---|
-| `--crazy` 🔥🔥 | verdict = `APPROVE` | ∞ | none |
-| `--half-crazy` 🔥 | verdict ≠ `BLOCK` | ∞ | none |
-
-Both flags disable all reviewer subprocess timeout constraints — long fixes on large PRs won't be cut short. Use `--timeout <duration>` (e.g. `--timeout 10m`) without these flags to set a custom cap.
-
-```bash
-# Run full workflow and keep looping until approved
-crosscheck run <pr-url> --crazy
-
-# Advance every stale PR until it's no longer blocked
-crosscheck kickass --half-crazy
-
-# Custom timeout without looping
-crosscheck run <pr-url> --timeout 10m
-```
+Full flag reference: **[get-started.md](./get-started.md)**.
 
 ---
 
 ## Configuration
 
-Crosscheck uses `~/.crosscheck/config.yml` by default. If that file exists, it wins over `./crosscheck.config.yml` unless you pass `--config ./crosscheck.config.yml`.
+Config lives at `~/.crosscheck/config.yml`. A `./crosscheck.config.yml` in the working directory is treated as a deliberate per-project override.
 
-### Review depth (`quality.tier`)
+### Review depth
 
 ```yaml
-# crosscheck.config.yml
 quality:
-  tier: balanced    # fast | balanced | thorough
+  mode: smart       # smart (default) | fixed
+  tier: balanced    # fast | balanced | thorough — the fallback under smart
+
+skills:
+  enabled:
+    - code-review-skill  # recommended · @awesome-skills, MIT
+    - codebase-design    # recommended · @mattpocock, MIT
+    - diagnosing-bugs    # recommended · @mattpocock, MIT
 ```
 
-| Tier | Claude model | Codex model | Latency |
-|---|---|---|---|
-| `fast` | Haiku 4.5 | GPT-5.6 Luna | ~10s |
-| `balanced` | Sonnet 5 | GPT-5.6 Terra | ~30s |
-| `thorough` | Opus 4.8 | GPT-5.6 Sol | ~60s |
+Agents decide whether an enabled skill applies to each review, fix, recheck, or conflict-resolution step. A skill is activated only after the agent successfully loads it through the broker; activation lasts for that step session, including retries, and does not carry into later steps or runs. PR comments preserve only that completed step's activated-skill attribution.
+Existing configs keep skills disabled on upgrade; use `crosscheck onboard` to opt in. Installed packages are integrity-checked before agents can load them.
 
-### Pipeline (`workflow.yml`)
+For review and recheck, Crosscheck also applies repository-defined review practices from `AGENTS.md` and `CLAUDE.md`. In monorepos it combines root guidance with the files scoped to changed paths, using the trusted base-branch versions so a PR cannot rewrite its own review rules.
+
+| Tier | Claude | Codex | Cost per review¹ |
+|---|---|---|---|
+| `fast` | Haiku 4.5 | GPT-5.6 Luna | $0.24 · $0.06 |
+| `balanced` | Sonnet 5 | GPT-5.6 Terra | $0.72 · $0.58 |
+| `thorough` | **Opus 5** | GPT-5.6 Sol | $1.20 · $1.44 |
+
+¹ Output-token cost at 48k output tokens, the measured median for one review. A review is an agentic session, not a single call — expect **10–16 minutes** of wall clock (median 643s, p90 984s across 43 logged runs). Tier changes depth and the subprocess timeout, not seconds-scale latency.
+
+`claude-fable-5` is **banned** from review: 2× Opus 5's price for a lower coding benchmark score.
+
+### Dynamic thoroughness (`mode: smart`)
+
+**On by default.** Instead of one tier for every call, Crosscheck classifies each PR from its changed-file list and adjusts model and effort to match. Classification runs on the already-cloned working copy, so it costs one `git diff` and no API call.
+
+| # | PR class | Detected by | Tier | Steps |
+|---|---|---|---|---|
+| 1 | Generated / vendored | every file is a lockfile or build output | — | **PR skipped** |
+| 2 | Security / data-critical | auth, crypto, payment, migration paths; `risk:T3`; hotfix→default | `thorough` | full loop |
+| 3 | Deletion-only | ≤ 5 additions with ≥ 20 deletions | `fast` | review |
+| 4 | Docs / spec | ≥ 50% Markdown | `balanced` | review |
+| 5 | Test-only | every file is a test | `fast` | review, fix |
+| 6 | Config / infra | ≥ 50% config, no source | `balanced` | full loop |
+| 7 | Trivial | ≤ 3 files, ≤ 150 lines | `fast` | review, fix |
+| 8 | Standard | everything else | `balanced` | full loop |
+
+**Order is the routing logic** — first match wins, and security sits second so it dominates every cheapening rule below it. A deletion that removes auth code, or a two-file migration, is never routed to `fast`.
+
+Classification may set a **floor**, or promote on **consequence** — a security path is reviewed thoroughly because a miss there is expensive. It may **not** predict that a PR will be hard: across a 400-PR census, diff size correlates only 0.51 with realized review cost (the largest one-call PR was 101k lines; the most expensive changed 2 files). So escalation responds to what the review actually found — round 2 raises effort, round 3 switches vendor, then it hands off to a human rather than looping.
+
+Class tier, effort, **and** step set are all applied. The class is resolved once per workflow, not per step — the fix step pushes commits, so re-classifying could make the review and recheck comments cite different tiers for the same PR.
+
+The step set **narrows** the configured pipeline and never widens it: a repo pinned to review-only with `crosscheck alter` stays review-only whatever the class says.
+
+Rounds beyond the first escalate on measured non-convergence rather than prediction — effort rises where the model supports it, the tier is promoted where it does not, and the model never weakens.
+
+Every comment says which policy produced it:
+
+```
+_thorough tier · touches a security or data-critical path, where a missed defect
+ is expensive · strategy v1.1.0_
+
+<!-- crosscheck: … model=claude-opus-5 verdict=BLOCK strategy=1.1.0 class=risky tier=thorough … -->
+```
+
+The rationale is the matched class's own `reason` field, not prose written per review, so the explanation and the routing decision cannot drift apart. A review from six weeks ago stays explicable after the policy changes.
+
+The policy is versioned in [`src/config/review-strategy.json`](./src/config/review-strategy.json), carries its own sources and a 60-day review interval, and is checked weekly by the [`Review Strategy`](./.github/workflows/review-strategy.yml) workflow — verify it any time with `npm run verify:strategy`. Full evidence: [docs/dynamic-thoroughness.md](./docs/dynamic-thoroughness.md).
+
+> **Leave `vendors.*.model` unset under smart mode.** An explicit model outranks the strategy, so pinning one makes per-PR selection a no-op. When that happens crosscheck **withholds** the tier from the comment rather than citing a routing decision that did not happen. `crosscheck onboard` clears the pin — and prints what it cleared — when you choose smart.
+
+### Pipeline depth
+
+The global pipeline lives in `~/.crosscheck/workflow.yml` and defaults to the full loop:
 
 ```yaml
 steps:
   - name: review
     type: review
-    reviewer: auto          # auto | claude | codex | origin
-
+    reviewer: auto            # auto | claude | codex | origin
   - name: fix
     type: fix
     reviewer: origin
     when: review.verdict != 'APPROVE'
-
   - name: recheck
     type: recheck
     reviewer: auto
     when: fix.applied_count > 0
 ```
 
-### Per-repo workflow overrides
-
-The global `workflow.yml` is the default for every repo (out of the box, the full `review → fix → recheck` loop). To run one repo at a narrower depth in the same watcher, use `crosscheck alter` — it writes a standalone override file at `~/.crosscheck/workflows/<owner>__<repo>.yml`:
+To narrow a single repo without touching the global default:
 
 ```bash
-crosscheck alter humanbased-ai/xny-monorepo --review-only      # review only
-crosscheck alter humanbased-ai/api --steps review,fix,recheck  # full loop, explicit
-crosscheck alter humanbased-ai/xny-monorepo --reset            # back to the global default
+crosscheck alter acme/app --review-only     # or --steps review,fix
 ```
 
-Each override file lists the review → fix → recheck depth only:
+That writes a standalone override at `~/.crosscheck/workflows/<owner>__<repo>.yml`, live-reloaded per PR — no watcher restart.
 
-```yaml
-# ~/.crosscheck/workflows/humanbased-ai__xny-monorepo.yml
-steps:
-  - review
+Every option, annotated: **[crosscheck.config.example.yml](./crosscheck.config.example.yml)**.
+
+---
+
+## Running it continuously
+
+**On your machine** — a watcher for as long as your terminal is open. Webhooks arrive through a tunnel (`localhost.run` by default, zero config; `smee` if you want events queued while you're offline).
+
+```bash
+crosscheck onboard && crosscheck watch
 ```
 
-The override *narrows* the global workflow — it keeps each step's configured instructions and reviewer. `conflict-resolve` is orthogonal to the depth ladder: it stays enabled for any override that permits code modification (`review,fix` or `review,fix,recheck`) and is dropped only for review-only (`review`). Repos without an override file keep the complete global workflow. Resolution order: `{repo}/.crosscheck/workflow.yml` → `~/.crosscheck/workflows/<owner>__<repo>.yml` → `~/.crosscheck/workflow.yml` → built-in default.
+**On a server** — one always-on watcher for a team, with per-repo depth where it matters.
 
-### Config snapshot
-
-```yaml
-# ~/.crosscheck/config.yml
-orgs:
-  - your-org
-
-routing:
-  allowed_authors:
-    - your-github-login
-
-mode: cross-vendor          # cross-vendor | single-vendor
-
-vendors:
-  claude:
-    enabled: true
-  codex:
-    enabled: true
-
-quality:
-  tier: balanced
-
-clone_protocol: ssh         # ssh (default) | https
+```bash
+crosscheck onboard --team
+crosscheck alter acme/legacy-service --review-only
+crosscheck watch
 ```
 
-Full reference: [get-started.md](./get-started.md)
+Deployment mode decides scope: `personal` monitors your own repos and reviews only PRs you author; `team` monitors org repos and reviews PRs from any author.
 
 ---
 
@@ -517,8 +321,8 @@ Full reference: [get-started.md](./get-started.md)
 | | Minimum |
 |---|---|
 | Node.js | 18+ |
-| Claude Code CLI | latest — `npm install -g @anthropic-ai/claude-code` |
-| Codex CLI | latest — `npm install -g @openai/codex` |
+| Claude Code CLI | `npm install -g @anthropic-ai/claude-code` |
+| Codex CLI | `npm install -g @openai/codex` |
 | GitHub CLI | 2.65+ — `brew install gh` |
 
 `GITHUB_TOKEN` is derived automatically from `gh auth login`. No manual export needed.
@@ -529,9 +333,13 @@ Full reference: [get-started.md](./get-started.md)
 
 | | |
 |---|---|
-| **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, all flags, complete config reference, FAQ |
-| **[What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/)** | Humanbased field report on agentic PR quality, review routing, and why Crosscheck exists |
-| **[docs/fixture-pr.md](./docs/fixture-pr.md)** | Safe public fixture PR for the first Crosscheck review |
+| **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, every flag, complete config reference, FAQ |
+| **[docs/trust.md](./docs/trust.md)** | What leaves your machine, which GitHub permissions are needed, what Crosscheck can and cannot change, and how to try it read-only first |
+| **[docs/dynamic-thoroughness.md](./docs/dynamic-thoroughness.md)** | How Crosscheck picks a model and effort per PR — and the 400-PR census behind it |
+| **[docs/linear-identity.md](./docs/linear-identity.md)** | Linear write-back and the attribution ladder |
+| **[docs/linear-identity-contract.md](./docs/linear-identity-contract.md)** | The identity contract, as a spec for other tools |
+| **[What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/)** | Field report on agentic PR quality and why crosscheck exists |
+| **[docs/fixture-pr.md](./docs/fixture-pr.md)** | The safe public fixture PR |
 | **[crosscheck.config.example.yml](./crosscheck.config.example.yml)** | Annotated config with every option |
 | **[CHANGELOG.md](./CHANGELOG.md)** | Release notes |
 
@@ -541,8 +349,8 @@ Full reference: [get-started.md](./get-started.md)
 
 Issues and PRs welcome at [github.com/humanbased-ai/crosscheck](https://github.com/humanbased-ai/crosscheck).
 
----
-
 ## License
 
-[MIT](./LICENSE) — Copyright (c) 2025–2026 Humanbased PTE LTD.
+[MIT](./LICENSE) — Copyright (c) 2025–2026 Humanbased AI PTE LTD.
+
+<p align="center"><em>A Humanbased project, built with crosscheck.</em></p>

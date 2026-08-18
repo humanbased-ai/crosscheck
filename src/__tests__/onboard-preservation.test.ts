@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs
 import { join } from 'path'
 import { tmpdir } from 'os'
 import yaml from 'js-yaml'
-import { applyOnboardConfig, detectCurrentPreset, detectConflictResolveEnabled, type OnboardDecisions } from '../commands/onboard.js'
+import { applyOnboardConfig, detectCurrentPreset, detectConflictResolveEnabled, thoroughnessDefaults, type OnboardDecisions } from '../commands/onboard.js'
 import { mkdirSync } from 'fs'
 
 const BASE_DECISIONS: OnboardDecisions = {
@@ -14,6 +14,8 @@ const BASE_DECISIONS: OnboardDecisions = {
   vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true },
   authorVendor: 'claude',
   qualityTier: 'balanced',
+  qualityMode: 'smart' as const,
+  enabledSkills: ['code-review-skill'],
   pipelinePreset: 'review-only',
   conflictResolve: false,
   tunnelBackend: 'localhost.run',
@@ -39,6 +41,29 @@ function readConfig(): Record<string, unknown> {
   return (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>
 }
 
+describe('thoroughnessDefaults — what a re-run of onboard proposes', () => {
+  it('proposes smart for a first run', () => {
+    expect(thoroughnessDefaults({})).toEqual({ tier: 'balanced', mode: 'smart' })
+  })
+
+  // The distinction only survives if `tier` is read from the RAW yaml: the
+  // parsed config supplies tier: 'balanced' for every file, so a config that
+  // never mentioned quality looked identical to a hand-set one and was opted
+  // out of the new default — silently, under --yes.
+  it('proposes smart for a config that never set a quality tier', () => {
+    expect(thoroughnessDefaults({ tier: undefined, mode: undefined })).toEqual({ tier: 'balanced', mode: 'smart' })
+  })
+
+  it('keeps a hand-set tier fixed on a config written before smart existed', () => {
+    expect(thoroughnessDefaults({ tier: 'thorough' })).toEqual({ tier: 'thorough', mode: 'fixed' })
+  })
+
+  it('honors an explicit mode over the inference', () => {
+    expect(thoroughnessDefaults({ tier: 'thorough', mode: 'smart' })).toEqual({ tier: 'thorough', mode: 'smart' })
+    expect(thoroughnessDefaults({ mode: 'fixed' })).toEqual({ tier: 'balanced', mode: 'fixed' })
+  })
+})
+
 describe('applyOnboardConfig — first run', () => {
   it('creates config with routing defaults when no file exists', () => {
     applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
@@ -50,16 +75,59 @@ describe('applyOnboardConfig — first run', () => {
     expect(routing.fallback_reviewer).toBe('auto')
   })
 
-  it('sets quality.tier but does not set vendors.claude.model', () => {
-    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityTier: 'thorough' }, workflowDir)
+  it('pins the codex model under fixed mode', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityTier: 'thorough', qualityMode: 'fixed' }, workflowDir)
 
     const cfg = readConfig()
     const quality = cfg.quality as Record<string, unknown>
     expect(quality.tier).toBe('thorough')
+    expect(quality.mode).toBe('fixed')
     const vendors = cfg.vendors as Record<string, Record<string, unknown>>
     expect(vendors.claude.model).toBeUndefined()
     expect(vendors.claude.effort).toBe('max')
+    // One model on every PR is exactly what `fixed` means.
     expect(vendors.codex.model).toBe('gpt-5.6-sol')
+  })
+
+  it('pins no vendor model under smart mode', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityTier: 'thorough', qualityMode: 'smart' }, workflowDir)
+
+    const cfg = readConfig()
+    const quality = cfg.quality as Record<string, unknown>
+    expect(quality.mode).toBe('smart')
+    // A pinned model outranks the strategy in resolveClaudeModel/resolveCodexModel,
+    // which would make per-PR tier selection a silent no-op.
+    const vendors = cfg.vendors as Record<string, Record<string, unknown>>
+    expect(vendors.codex.model).toBeUndefined()
+    expect(vendors.claude.model).toBeUndefined()
+    // Tier is still written — it is the fallback when a PR's files can't be read.
+    expect(quality.tier).toBe('thorough')
+  })
+
+  it('writes codex model_tiers under smart so tiers actually differ', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityMode: 'smart' }, workflowDir)
+
+    // Without this, resolveCodexModel returns the CLI's own default for every
+    // tier under subscription auth, so fast/balanced/thorough are the same run
+    // and smart mode is a no-op for codex.
+    const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
+    expect(vendors.codex.model_tiers).toEqual({
+      fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol',
+    })
+  })
+
+  it('clears a model pinned by an earlier fixed-mode run when switching to smart', () => {
+    writeFileSync(configPath, yaml.dump({ vendors: { codex: { model: 'gpt-5.6-terra' } } }))
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityMode: 'smart' }, workflowDir)
+
+    const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
+    expect(vendors.codex.model).toBeUndefined()
+  })
+
+  it('writes the enabled skill selection', () => {
+    applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
+
+    expect((readConfig().skills as Record<string, unknown>).enabled).toEqual(['code-review-skill'])
   })
 
   it('writes workflow.yml for all three presets', () => {
@@ -72,7 +140,6 @@ describe('applyOnboardConfig — first run', () => {
   })
 
   it('workflow.yml has correct step count per preset', () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const loadWf = (dir: string) => {
       const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: unknown[] }
       return raw.steps.length

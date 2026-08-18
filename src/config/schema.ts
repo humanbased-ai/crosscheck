@@ -1,10 +1,19 @@
 import { z } from 'zod'
 
+// The effort levels each vendor CLI accepts, in ascending order. Exported
+// because the review strategy reasons about what a MODEL supports, which is a
+// wider set — claude-opus-5 has an `xhigh` level the claude CLI has no flag
+// for. Anything the strategy picks is clamped to one of these before it is
+// written into a vendor config, so an escalation cannot land on a level that
+// silently degrades to the `medium` fallback in claudeEffort/codexReasoningEffort.
+export const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'max'] as const
+export const CODEX_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
+
 export const VendorConfigSchema = z.object({
   enabled: z.boolean().default(true),
   model: z.string().nullable().default(null),
   auth: z.enum(['subscription', 'api-key']).default('subscription'),
-  effort: z.enum(['low', 'medium', 'high', 'max']).default('medium'),
+  effort: z.enum(CLAUDE_EFFORT_LEVELS).default('medium'),
   // Max wall-clock seconds for a single CLI invocation before it is killed.
   // null = use the reviewer's built-in default, which is tier-based for both
   // claude and codex: 300s (fast) / 600s (balanced) / 1200s (thorough).
@@ -16,8 +25,13 @@ export const VendorConfigSchema = z.object({
 // backwards compat but is no longer passed as --quality (removed from codex CLI).
 export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   quality: z.enum(['low', 'medium', 'high']).default('medium'),
-  // Optional per-tier model overrides. When unset, the Codex CLI picks the model.
-  // Subscription auth: leave unset (CLI default). API-key auth: set explicit model IDs.
+  // Codex exposes two tiers above the shared vocabulary: xhigh (Extra High) and
+  // ultra. Ultra is only available on terra/sol; pre-5.6 models stop at xhigh —
+  // the CLI rejects unsupported combinations at call time.
+  effort: z.enum(CODEX_EFFORT_LEVELS).default('medium'),
+  // Optional per-tier model overrides, honored under both auth modes. When unset:
+  // api-key auth falls back to the built-in tier mapping, subscription auth lets
+  // the Codex CLI pick its default model.
   // Example: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol' }
   model_tiers: z.object({
     fast: z.string().optional(),
@@ -27,14 +41,40 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
 })
 
 export const QualityConfigSchema = z.object({
+  // The tier when `mode: fixed`, and the fallback under `mode: smart` whenever a
+  // PR's file list cannot be read (one-shot commands, API failures).
   tier: z.enum(['fast', 'balanced', 'thorough']).default('balanced'),
-  // fixed: every agent call uses the same tier (legacy behaviour; applied when unset).
-  // smart: the effective tier is chosen per-call based on diff size, prior
-  //        BLOCK verdicts, and step type — reducing cost on small/low-risk PRs
-  //        while still promoting hard calls to stronger models.
-  mode: z.enum(['fixed', 'smart']).optional(),
+  // smart (default): dynamically adjust model + effort based on task type. The
+  //   PR is classified from its changed-file list against the versioned policy
+  //   in config/review-strategy.json, and the class's tier, effort, and step set
+  //   are all applied — a lockfile-only PR is skipped outright, a docs PR is
+  //   narrowed to review, a PR touching auth or a migration is promoted to
+  //   `thorough`. The class set NARROWS the configured pipeline and never widens
+  //   it, so a repo pinned to review-only stays review-only.
+  //
+  //   Rounds beyond the first escalate on measured non-convergence rather than
+  //   prediction: effort rises where the model supports it, and the tier is
+  //   promoted where it does not. The model never weakens across rounds.
+  //
+  //   An explicit vendors.*.model outranks all of this. Pin one and per-PR
+  //   selection becomes a no-op — crosscheck then withholds the tier from the
+  //   review comment rather than citing one that never reached the vendor.
+  // fixed: every agent call uses `tier` above, regardless of what changed.
+  mode: z.enum(['fixed', 'smart']).default('smart'),
   focus: z.array(z.string()).default([]),
   custom_prompt: z.string().optional(),
+})
+
+export const SkillsConfigSchema = z.object({
+  enabled: z.array(z.string()).default([]),
+  // Codex reaches the skill broker only with sandbox_mode="danger-full-access":
+  // an MCP server is a local process outside the sandbox, so codex cancels every
+  // tools/call under -s read-only, -s workspace-write, -a never and --full-auto
+  // alike (measured against codex-cli 0.147). That means codex skills cost the
+  // codex sandbox, and a review reads untrusted PR content — so it is opt-in and
+  // off by default rather than something `crosscheck onboard` turns on for you.
+  // Claude is unaffected: its broker works sandboxed and needs no override.
+  codex_full_access: z.boolean().default(false),
 })
 
 export const BudgetConfigSchema = z.object({
@@ -80,6 +120,13 @@ export const RepoConfigSchema = z.object({
 })
 
 export const RoutingConfigSchema = z.object({
+  // Patterns that identify who WROTE the code, not who looked at it.
+  // Crosscheck's own attribution (fix-PR footers, Crosscheck-Reviewer commit
+  // trailers) is NOT listed here: these defaults apply only when the field is
+  // absent, so an install that pins its own list would stop recognising
+  // crosscheck's output. Self-recognition is always on, in
+  // github/detector.ts → SELF_AUTHORED_PATTERNS, and these patterns are checked
+  // first so an explicit list still outranks it.
   codex_reviews_patterns: z.array(z.string()).default([
     'Generated with \\[Claude Code\\]',  // PR body attribution footer
     'Co-Authored-By: Claude',            // commit trailer added by Claude Code
@@ -192,8 +239,10 @@ export const WatchConfigSchema = z.object({
 })
 
 export const PostReviewDeliverySchema = z.object({
-  // pull_request → opens a fix PR targeting the original branch (human approves before merge)
-  // commit       → pushes fixes directly onto the original PR branch
+  // pull_request → pushes fixes onto the original PR branch (so the fix, recheck, and
+  //                approval stay on that one PR); falls back to opening a separate fix PR
+  //                only when that push can't land (branch merged/deleted or protected)
+  // commit       → pushes fixes directly onto the original PR branch (no fallback)
   // comment      → posts suggested changes as review comments only (no code push)
   mode: z.enum(['pull_request', 'commit', 'comment']).default('pull_request'),
   pr_title: z.string().default('fix: address CR issues in #{original_pr_title}'),
@@ -235,6 +284,61 @@ export const BrandConfigSchema = z.object({
   reviewer_attribution: z.string().default(''),
 })
 
+// Tiered Linear identity — see src/linear/identity.ts for the tier semantics.
+// Disabled by default, so existing configs are unaffected.
+export const LinearAuthConfigSchema = z.object({
+  // api_key            — T0: personal/workspace key + signature line.
+  // client_credentials — T1: OAuth app token minted per run + createAsUser (botActor).
+  mode: z.enum(['api_key', 'client_credentials']).default('api_key'),
+  // Env var NAMES, never the secrets themselves. Values are read in config/loader.ts.
+  api_key_env: z.string().default('LINEAR_API_KEY'),
+  client_id_env: z.string().default('LINEAR_CLIENT_ID'),
+  client_secret_env: z.string().default('LINEAR_CLIENT_SECRET'),
+  // Linear documents the token request as taking a COMMA-separated list. Space
+  // separated input is normalised on the wire, so both forms work.
+  // NOTE: `read,write` does NOT cover initiatives — initiative:read /
+  // initiative:write are separate scopes that must be requested explicitly.
+  scopes: z.string().default('read,write'),
+})
+
+export const LinearIdentityConfigSchema = z.object({
+  // createAsUser base name in T1; the {actor} placeholder in the signature template.
+  actor: z.string().default('crosscheck'),
+  // Placeholders: {actor} {product} {model} {reviewer} {icon}. Ones with no value
+  // resolve to empty and the leftover separators are tidied away.
+  //
+  // {product} is available but not in the default: actor defaults to the product
+  // name, so `{actor} · {product}` renders as `crosscheck · crosscheck`. The model
+  // carries more information in the same space.
+  signature: z.string().default('🤖 {actor} · {model}'),
+  // Optional logo shown inline in the signature via {icon}. Note the better route
+  // is the OAuth app avatar (T1), which Linear renders natively beside the comment —
+  // see docs/linear-identity.md. Inline images may render block-level.
+  icon_url: z.string().default(''),
+  // Suffix the actor with the workflow step that produced the write, so a review,
+  // a recheck and a fix are distinguishable rather than all reading as one bot:
+  //   crosscheck/review, crosscheck/fix, crosscheck/recheck
+  // Set false for a single flat actor name.
+  per_step_actor: z.boolean().default(true),
+})
+
+export const LinearVerdictFilterSchema = z.enum(['APPROVE', 'NEEDS_WORK', 'BLOCK', 'UNKNOWN'])
+export type LinearVerdictFilter = z.infer<typeof LinearVerdictFilterSchema>
+
+export const LinearConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  auth: LinearAuthConfigSchema.default({}),
+  identity: LinearIdentityConfigSchema.default({}),
+  // Which verdicts get mirrored to the linked Linear issue. Defaults to the ones
+  // that need someone to act: a clean PR posting an APPROVE onto its issue is noise
+  // on every green review. Add 'APPROVE' (and 'UNKNOWN') to hear about those too.
+  comment_on: z.array(LinearVerdictFilterSchema).default(['NEEDS_WORK', 'BLOCK']),
+  // Team key prefixes (e.g. ['IN']) that may be matched as bare identifiers in a
+  // branch/title/body. Leave empty to only follow explicit linear.app issue URLs —
+  // see src/linear/ref.ts for why bare matching is opt-in.
+  team_keys: z.array(z.string()).default([]),
+})
+
 export const ConfigSchema = z.object({
   // Absent = not yet configured; watch/serve will prompt on first run.
   deployment: z.enum(['personal', 'team']).optional(),
@@ -250,6 +354,7 @@ export const ConfigSchema = z.object({
     claude: VendorConfigSchema.default({}),
   }).default({}),
   quality: QualityConfigSchema.default({}),
+  skills: SkillsConfigSchema.default({}),
   budget: BudgetConfigSchema.default({}),
   orgs: z.array(z.string()).default([]),
   users: z.array(z.string()).default([]),
@@ -265,6 +370,7 @@ export const ConfigSchema = z.object({
   post_review: PostReviewConfigSchema.default({}),
   display: DisplayConfigSchema.default({}),
   brand: BrandConfigSchema.default({}),
+  linear: LinearConfigSchema.default({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
@@ -272,6 +378,7 @@ export type BrandConfig = z.infer<typeof BrandConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
 export type CodexVendorConfig = z.infer<typeof CodexVendorConfigSchema>
 export type QualityConfig = z.infer<typeof QualityConfigSchema>
+export type SkillsConfig = z.infer<typeof SkillsConfigSchema>
 export type LogsConfig = z.infer<typeof LogsConfigSchema>
 export type TunnelConfig = z.infer<typeof TunnelConfigSchema>
 export type ImpactConfig = z.infer<typeof ImpactConfigSchema>
@@ -282,3 +389,5 @@ export type DisplayTheme = z.infer<typeof DisplayThemeSchema>
 export type BacktraceConfig = z.infer<typeof BacktraceConfigSchema>
 export type IssueEnrichmentConfig = z.infer<typeof IssueEnrichmentConfigSchema>
 export type WatchConfig = z.infer<typeof WatchConfigSchema>
+export type LinearConfig = z.infer<typeof LinearConfigSchema>
+export type LinearAuthConfig = z.infer<typeof LinearAuthConfigSchema>

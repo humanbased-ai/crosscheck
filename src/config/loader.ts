@@ -5,8 +5,9 @@ import { resolve, join, dirname } from 'path'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
 import yaml from 'js-yaml'
-import { ConfigSchema, type Config } from './schema.js'
+import { ConfigSchema, type Config, type LinearAuthConfig } from './schema.js'
 import { listUserOrgs } from '../github/client.js'
+import type { LinearCredentials } from '../linear/identity.js'
 
 const CONFIG_FILENAME = 'crosscheck.config.yml'
 
@@ -65,6 +66,20 @@ export function getGithubToken(): string {
   )
 }
 
+// Linear credentials. Env var NAMES come from config; the values are read here and
+// nowhere else, so no other module touches process.env for secrets.
+export function getLinearCredentials(auth: LinearAuthConfig): LinearCredentials {
+  const read = (name: string): string | undefined => {
+    const value = process.env[name]
+    return value && value.trim() ? value.trim() : undefined
+  }
+  return {
+    apiKey: read(auth.api_key_env),
+    clientId: read(auth.client_id_env),
+    clientSecret: read(auth.client_secret_env),
+  }
+}
+
 const SECRET_FILE = join(homedir(), '.crosscheck', 'webhook-secret')
 
 export function getWebhookSecret(): string {
@@ -108,15 +123,15 @@ export function detectGitHubLogin(): string | null {
 }
 
 export function patchAllowedAuthors(configPath: string, login: string): boolean {
-  let content = readFileSync(configPath, 'utf8')
+  const content = readFileSync(configPath, 'utf8')
 
   // Guard: if allowed_authors already has real (non-comment) entries, nothing to do.
   // Entries appear as `    - value` lines after the key, optionally preceded by comment lines.
-  if (/  allowed_authors:\s*\n(?:  #[^\n]*\n)*    - /.test(content)) return false
+  if (/ {2}allowed_authors:\s*\n(?: {2}#[^\n]*\n)* {4}- /.test(content)) return false
 
   // Case 1: commented-out placeholder block from the example config
   const uncommented = content.replace(
-    /  # allowed_authors:\n(  #[^\n]*\n)+/,
+    / {2}# allowed_authors:\n( {2}#[^\n]*\n)+/,
     `  allowed_authors:\n    - ${login}  # auto-detected from gh auth\n`,
   )
   if (uncommented !== content) {
@@ -126,7 +141,7 @@ export function patchAllowedAuthors(configPath: string, login: string): boolean 
 
   // Case 2: key exists but list is empty (no entries under it, only optional comment lines)
   const filledEmpty = content.replace(
-    /(  allowed_authors:\s*\n)((?:  #[^\n]*\n)*)/,
+    /( {2}allowed_authors:\s*\n)((?: {2}#[^\n]*\n)*)/,
     `  allowed_authors:\n    - ${login}  # auto-detected from gh auth\n`,
   )
   if (filledEmpty !== content) {
@@ -184,7 +199,7 @@ export function patchAuthorRoutes(configPath: string, login: string): boolean {
 
   // Case 1: commented-out placeholder block from the example config
   const uncommented = content.replace(
-    /  # author_routes:\n(  #[^\n]*\n)*/,
+    / {2}# author_routes:\n( {2}#[^\n]*\n)*/,
     entry,
   )
   if (uncommented !== content) { writeFileSync(configPath, uncommented); return true }
@@ -194,7 +209,7 @@ export function patchAuthorRoutes(configPath: string, login: string): boolean {
   if (filledInline !== content) { writeFileSync(configPath, filledInline); return true }
 
   // Case 3: key exists but map is empty (no entries, only optional comment lines)
-  const filledEmpty = content.replace(/(  author_routes:\s*\n)((?:  #[^\n]*\n)*)/, entry)
+  const filledEmpty = content.replace(/( {2}author_routes:\s*\n)((?: {2}#[^\n]*\n)*)/, entry)
   if (filledEmpty !== content) { writeFileSync(configPath, filledEmpty); return true }
 
   // Case 4: routing: section exists but author_routes is absent — insert after routing:

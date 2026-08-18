@@ -78,7 +78,7 @@ export async function runDetectStep(
   historySpinner.stop()
 
   const currentSha = prData.head.sha
-  const nextResult = identifyNextWorkflowStep(history, steps, currentSha)
+  const nextResult = identifyNextWorkflowStep(history, steps, currentSha, { mergeable: prData.mergeable })
 
   if (opts.json) {
     console.log(JSON.stringify({
@@ -104,6 +104,7 @@ export async function runDetectStep(
             reviewCommentId: nextResult.reviewComment?.id,
           }
         : null,
+      stopReason: nextResult.stopReason ?? null,
     }, null, 2))
     return
   }
@@ -122,6 +123,9 @@ export async function runDetectStep(
   if (nextResult.step === null) {
     const lastVerdict = [...history].reverse().find(r => r.verdict)?.verdict
     console.log(`  ${chalk.green('✓')} Workflow complete${lastVerdict ? ` — last verdict: ${verdictColor(lastVerdict)}` : ''}`)
+    if (nextResult.stopReason === 'approved') {
+      console.log(chalk.dim('    this commit is approved — crosscheck resumes only if new commits land'))
+    }
   } else {
     const nextLabel = chalk.bold(nextResult.step.type)
     const roundLabel = nextResult.round > 1 ? chalk.dim(` (round ${nextResult.round})`) : ''

@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { filterIndices, adjustWindowStart, resolveViewport, truncate, advancePageStart } from '../lib/repo-picker.js'
+import {
+  adjustWindowStart,
+  advancePageStart,
+  filterIndices,
+  formatPickerHint,
+  resolveViewport,
+  truncate,
+} from '../lib/repo-picker.js'
 
 describe('filterIndices', () => {
   it('returns every index when query is empty', () => {
@@ -110,6 +117,13 @@ describe('truncate', () => {
   it('handles empty input safely', () => {
     expect(truncate('', 10)).toBe('')
     expect(truncate('', 0)).toBe('')
+  })
+})
+
+describe('formatPickerHint', () => {
+  it('fits the prefix and message within the terminal width', () => {
+    expect(formatPickerHint('tip', 'A long recommendation', 20)).toBe('  Tip: A long recom…')
+    expect(formatPickerHint('warning', 'Competing skill', 20)).toBe('  Warning: Competin…')
   })
 })
 

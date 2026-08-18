@@ -4,12 +4,22 @@ import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { primaryModelFromUsage, resolveClaudeModel } from '../lib/review-models.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
+import { claudeSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
+import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
 
 const EFFORT_MAP: Record<string, string> = {
   low: 'low',
   medium: 'medium',
   high: 'high',
   max: 'max',
+}
+
+// Whitelist rather than translation — anything outside the schema's vocabulary
+// falls back to medium instead of reaching the CLI as an arbitrary string.
+// Shared with the fix and conflict-resolve steps so every Claude call in a run
+// uses the same effort, and the comment can report it.
+export function claudeEffort(effort?: string): string {
+  return (effort && EFFORT_MAP[effort]) ?? 'medium'
 }
 
 // Detect transient Claude API errors that should be retried:
@@ -31,6 +41,9 @@ export interface ReviewResult {
   inputTokens?: number
   outputTokens?: number
   model: string
+  // Reasoning effort actually handed to the CLI (post-whitelist), so the posted
+  // comment reports what ran rather than what the config asked for.
+  effort?: string
   // Set only when the first attempt timed out and the delayed retry succeeded —
   // signals a transient blip that resolved on its own. The runner surfaces this
   // as a soft banner on the posted review comment.
@@ -64,15 +77,17 @@ export async function runClaudeReview(
   // Linked tracker issue rendered as a prompt block (issues/enrich.ts) — anchors
   // the review to the stated goal. Omitted when enrichment is off / unresolved.
   issueContext?: string,
+  skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
   const model = resolveClaudeModel(quality, vendor)
-  const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
+  const effort = claudeEffort(vendor.effort)
   const focusLine = quality.focus.length > 0
     ? `Focus areas: ${quality.focus.join(', ')}.`
     : ''
   const customLine = quality.custom_prompt ?? ''
 
   const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
+  const repositoryGuidance = loadRepositoryReviewGuidance(repoDir, baseBranch)
 
   const prompt = [
     `You are reviewing a pull request titled: "${prTitle}".`,
@@ -80,8 +95,18 @@ export async function runClaudeReview(
     issueContext ?? '',
     focusLine,
     customLine,
+    // Ahead of behaviorInstructions: that block ends with "the very last line of
+    // your response MUST be VERDICT: …", and activation has to happen before the
+    // review starts, so arriving after that terminal instruction buries it.
+    // repositoryGuidance stays where it is — reference material to consult while
+    // reviewing, not an action to take first.
+    skillSession ? renderSkillBrokerInstructions(skillSession) : '',
     behaviorInstructions,
-  ].filter(Boolean).join('\n')
+    repositoryGuidance,
+    // Blank line between blocks (codex.ts already does this): the skill block
+    // ends in a bullet list, which would otherwise run straight into
+    // behaviorInstructions' first heading with no separator.
+  ].filter(Boolean).join('\n\n')
 
   // Omit --max-budget-usd when:
   // 1. No ANTHROPIC_API_KEY → subscription mode (claude.ai plan, budget limits don't apply)
@@ -94,7 +119,14 @@ export async function runClaudeReview(
     '--model', model,
     '--effort', effort,
     ...(applyBudgetCap ? ['--max-budget-usd', String(perReviewBudget)] : []),
-    '--allowedTools', 'Bash(git diff),Bash(git log)',
+    '--allowedTools', [
+      'Bash(git diff)', 'Bash(git log)',
+      ...(skillSession ? [
+        'mcp__crosscheck__list_enabled_skills',
+        'mcp__crosscheck__activate_skill',
+        'mcp__crosscheck__read_skill_file',
+      ] : []),
+    ].join(','),
   ]
 
   onLog?.(`  running: claude --print --model ${model} --effort ${effort}`)
@@ -108,7 +140,12 @@ export async function runClaudeReview(
     try {
       const { result: { stdout }, retried } = await withTimeoutRetry(
         resolvedTimeout,
-        (t) => execa('claude', args, { cwd: repoDir, timeout: t, input: prompt, env: { ...process.env } }),
+        (t) => execa('claude', [...args, ...claudeSkillBrokerArgs(skillSession)], {
+          cwd: repoDir,
+          timeout: t,
+          input: prompt,
+          env: { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
+        }),
         {
           onRetry: (effectiveMs, delayMs) =>
             (onRetry ?? onLog)?.(`  ⏱ claude timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),
@@ -125,9 +162,9 @@ export async function runClaudeReview(
         // string: `model` may be an alias ("opus") and the CLI resolves or
         // substitutes it. Fall back to the requested value when absent.
         const actualModel = primaryModelFromUsage(parsed.modelUsage)
-        return { review, tokensUsed, inputTokens, outputTokens, model: actualModel ?? model, retried }
+        return { review, tokensUsed, inputTokens, outputTokens, model: actualModel ?? model, effort, retried }
       } catch {
-        return { review: raw, model, retried }
+        return { review: raw, model, effort, retried }
       }
     } catch (err: unknown) {
       const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }

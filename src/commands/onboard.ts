@@ -17,6 +17,14 @@ import { execSync } from 'child_process'
 import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/repo-picker.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
+import { initLogger, log as fileLog } from '../lib/logger.js'
+import { LogsConfigSchema } from '../config/schema.js'
+import {
+  BUNDLED_SKILL_RECOMMENDATIONS,
+  findCompetingSkill,
+  loadSkillCatalog,
+  RECOMMENDED_SKILL_NAMES,
+} from '../skills/catalog.js'
 
 export interface OnboardOpts {
   config?: string
@@ -40,21 +48,25 @@ type VendorModeConfig = {
   codexEnabled: boolean
 }
 
-// Model and effort settings for each quality tier.
-// These are written directly to vendors.claude / vendors.codex in the config.
+// Effort settings and display hints per quality tier.
+//
+// Cost is output-token cost at 48k output tokens, the measured median for one
+// review. A review is an agentic session, so it takes 10-16 minutes of wall
+// clock (median 643s over 43 logged runs) — the tier changes depth and the
+// subprocess timeout, not seconds-scale latency.
 const QUALITY_TIERS = {
   fast: {
-    description: 'quick scan, top issues only  (~10s, lowest cost)',
+    description: 'quick scan, top issues only  (~$0.24 per review)',
     claude: { model: 'haiku', effort: 'low' as const },
     codex:  { model: 'gpt-5.6-luna', effort: 'low' as const },
   },
   balanced: {
-    description: 'full review, all issues with explanations  (~30s)',
+    description: 'full review, all issues with explanations  (~$0.72 per review)',
     claude: { model: 'sonnet', effort: 'medium' as const },
     codex:  { model: 'gpt-5.6-terra', effort: 'medium' as const },
   },
   thorough: {
-    description: 'deep multi-pass, security + architecture  (~60s+, higher cost)',
+    description: 'deep multi-pass, security + architecture  (~$1.20 per review)',
     claude: { model: 'opus', effort: 'max' as const },
     codex:  { model: 'gpt-5.6-sol', effort: 'high' as const },
   },
@@ -216,16 +228,49 @@ async function promptAuthorVendor(
   return idx === 1 ? 'codex' : idx === 2 ? 'both' : 'claude'
 }
 
+export interface ThoroughnessChoice {
+  /** Fixed tier, and the fallback used under smart mode when a PR's files can't be read. */
+  tier: QualityTier
+  mode: 'smart' | 'fixed'
+}
+
+/**
+ * What a re-run of onboard proposes, from the `quality` block as it is WRITTEN.
+ *
+ * Both fields must come from the raw yaml, never the parsed config: the schema
+ * defaults `mode` to smart and `tier` to balanced, so a parsed value can never
+ * distinguish "the user chose this" from "this config predates the field".
+ * Reading the parsed tier made every existing config look hand-set, so any
+ * re-onboard — silently, under `--yes` — opted the user out of the new default.
+ *
+ * A config that named a tier before smart existed keeps it, on the reasoning
+ * that it was a deliberate choice; one that never mentioned quality does not.
+ */
+export function thoroughnessDefaults(rawQuality: { tier?: string; mode?: string }): ThoroughnessChoice {
+  return {
+    tier: (rawQuality.tier ?? 'balanced') as QualityTier,
+    mode: rawQuality.mode === 'fixed' ? 'fixed'
+      : rawQuality.mode === 'smart' ? 'smart'
+      : rawQuality.tier ? 'fixed' : 'smart',
+  }
+}
+
+/**
+ * One question covering both knobs. `smart` leads because it is the default and
+ * the better answer for most repos; the three fixed tiers stay available for
+ * anyone who wants one model on everything.
+ */
 async function promptQualityTier(
   claudeEnabled: boolean,
   codexEnabled: boolean,
-  currentTier: string | undefined,
+  rawQuality: { tier?: string; mode?: string },
   opts: OnboardOpts,
-): Promise<QualityTier> {
+): Promise<ThoroughnessChoice> {
+  const { tier: fallbackTier, mode: fallbackMode } = thoroughnessDefaults(rawQuality)
+
   if (opts.yes) {
-    const tier = (currentTier ?? 'balanced') as QualityTier
-    console.log(`  Quality: ${chalk.cyan(tier)}`)
-    return tier
+    console.log(`  Thoroughness: ${chalk.cyan(fallbackMode === 'smart' ? 'smart' : fallbackTier)}`)
+    return { tier: fallbackTier, mode: fallbackMode }
   }
 
   function modelHint(tier: QualityTier): string {
@@ -237,20 +282,32 @@ async function promptQualityTier(
   }
 
   const tiers: QualityTier[] = ['fast', 'balanced', 'thorough']
-  const items: PickerItem[] = tiers.map(tier => ({
-    label: tier,
-    description: QUALITY_TIERS[tier].description,
-    hint: modelHint(tier),
-  }))
+  const items: PickerItem[] = [
+    {
+      label: 'smart',
+      description: 'adjust model + effort per PR  (recommended)',
+      hint: 'skips lockfiles · docs get review only · auth and migrations get the strongest model · escalates when a round does not resolve',
+    },
+    ...tiers.map(tier => ({
+      label: tier,
+      description: `${QUALITY_TIERS[tier].description}  — same model on every PR`,
+      hint: modelHint(tier),
+    })),
+  ]
 
-  const defaultIdx = tiers.indexOf((currentTier ?? 'balanced') as QualityTier)
+  // smart is index 0; the three fixed tiers follow, so this is always >= 0.
+  const defaultIdx = fallbackMode === 'smart' ? 0 : tiers.indexOf(fallbackTier) + 1
   const idx = await promptSinglePicker(items, {
-    title: 'Review quality — how deep should the analysis go?',
-    defaultIndex: defaultIdx >= 0 ? defaultIdx : 1,
+    title: 'Review thoroughness — how should crosscheck spend its budget?',
+    defaultIndex: defaultIdx,
   })
   console.log()
 
-  return tiers[idx]
+  // Under smart the tier still matters: it is the fallback whenever a PR's file
+  // list can't be read (one-shot commands, API failures).
+  return idx === 0
+    ? { tier: fallbackTier, mode: 'smart' }
+    : { tier: tiers[idx - 1], mode: 'fixed' }
 }
 
 // Exported for tests; `workflowDir` defaults to the user's ~/.crosscheck for runtime callsites.
@@ -355,6 +412,40 @@ async function promptWorkflowPipeline(opts: OnboardOpts): Promise<WorkflowPreset
   return 'review-fix'
 }
 
+export interface LinearDecision {
+  mode: 'off' | 'api_key' | 'client_credentials'
+  teamKeys: string[]
+}
+
+// Linear write-back is in beta and not selectable from onboarding yet. The whole
+// attribution ladder is still printed — each rung buys stronger attribution for
+// more setup — because this is where people look for what crosscheck can do, and
+// a single greyed-out "[1] off" advertises nothing. Nothing here is a prompt:
+// whatever the config already has is carried through untouched, so a re-run can
+// never disable an integration this step can no longer configure.
+export async function promptLinear(
+  current: { enabled?: boolean; mode?: string; teamKeys?: string[] } | undefined,
+  opts: OnboardOpts,
+): Promise<LinearDecision> {
+  const currentMode: LinearDecision['mode'] = !current?.enabled
+    ? 'off'
+    : current.mode === 'client_credentials' ? 'client_credentials' : 'api_key'
+  const decision: LinearDecision = { mode: currentMode, teamKeys: current?.teamKeys ?? [] }
+
+  if (opts.yes) return decision
+
+  console.log(chalk.dim('  Post the review verdict onto the Linear issue a PR belongs to.'))
+  console.log(`  ${chalk.yellow('(beta)')} ${chalk.dim('— preview of what is coming; not selectable here yet.')}\n`)
+  console.log(chalk.dim('  [1] off           — leave Linear alone'))
+  console.log(chalk.dim('  [2] api key       — works immediately. Comments post under your own Linear account'))
+  console.log(chalk.dim('  [3] workspace app — comments post as crosscheck itself, with its own icon'))
+  console.log(chalk.dim('                      one app per workspace, ~5 min, needs Linear settings access'))
+  console.log(chalk.dim(`\n  Current: ${currentMode} (unchanged — edit \`linear:\` in crosscheck.config.yml to set it by hand)`))
+  console.log()
+
+  return decision
+}
+
 async function promptConnectionType(
   currentTunnel: 'localhost.run' | 'smee' | undefined,
   opts: OnboardOpts,
@@ -427,12 +518,15 @@ export interface OnboardDecisions {
   vendorConfig: VendorModeConfig
   authorVendor: 'claude' | 'codex' | 'both'
   qualityTier: QualityTier
+  qualityMode: 'smart' | 'fixed'
+  enabledSkills: string[]
   pipelinePreset: WorkflowPreset
   maxRounds?: number  // only relevant for review-fix-recheck; defaults to 1
   conflictResolve: boolean  // opt-in; prepends a conflict-resolve step before review
   tunnelBackend: 'localhost.run' | 'smee'
   smeeChannel: string
   cloneProtocol: 'ssh' | 'https'
+  linear?: LinearDecision
 }
 
 // Build the workflow YAML for the given preset, with inline per-step instructions.
@@ -494,7 +588,7 @@ export function applyOnboardConfig(
   decisions: OnboardDecisions,
   workflowDir = join(homedir(), '.crosscheck'),
 ): void {
-  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, pipelinePreset, maxRounds, conflictResolve, tunnelBackend, smeeChannel, cloneProtocol } = decisions
+  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, qualityMode, enabledSkills, pipelinePreset, maxRounds, conflictResolve, tunnelBackend, smeeChannel, cloneProtocol, linear } = decisions
 
   mkdirSync(dirname(configPath), { recursive: true })
 
@@ -508,6 +602,8 @@ export function applyOnboardConfig(
   raw.orgs = selectedOrgs
   raw.mode = vendorConfig.mode
   raw.clone_protocol = cloneProtocol
+  if (!raw.skills || typeof raw.skills !== 'object') raw.skills = {}
+  ;(raw.skills as Record<string, unknown>).enabled = enabledSkills
 
   // Repos. Per-repo workflow depth is NOT stored here — it lives in standalone
   // files under ~/.crosscheck/workflows/ (written by `crosscheck alter`).
@@ -569,15 +665,63 @@ export function applyOnboardConfig(
   tunnelObj.backend = tunnelBackend
   if (tunnelBackend === 'smee' && smeeChannel) tunnelObj.smee_channel = smeeChannel
 
+  // ── Linear write-back ───────────────────────────────────────────────────────
+  // Only touched when onboard actually asked. Auth env-var names and the signature
+  // template are left alone so hand-edits survive a re-run.
+  if (linear) {
+    if (!raw.linear || typeof raw.linear !== 'object') raw.linear = {}
+    const linearObj = raw.linear as Record<string, unknown>
+    linearObj.enabled = linear.mode !== 'off'
+    if (linear.mode !== 'off') {
+      if (!linearObj.auth || typeof linearObj.auth !== 'object') linearObj.auth = {}
+      ;(linearObj.auth as Record<string, unknown>).mode = linear.mode
+      // Write the selection even when empty — otherwise the `-` clear silently
+      // leaves the previous keys in the file and nothing appears to happen.
+      linearObj.team_keys = linear.teamKeys
+    }
+  }
+
   // ── Quality tier + per-vendor effort ────────────────────────────────────────
-  // claude.ts derives the model from quality.tier at runtime (vendor.model is ignored).
-  // vendor.model is written for codex only — api-key auth uses it as an override.
+  // An explicit vendors.*.model outranks everything in resolveClaudeModel /
+  // resolveCodexModel. Under `fixed` that is exactly right — one model on every
+  // PR is what the user asked for. Under `smart` it is fatal: a pinned model
+  // makes per-PR tier selection a silent no-op, so the pin is cleared and the
+  // model resolves from the strategy instead.
+  //
+  // `tier` is written in both modes. Under smart it is the fallback for PRs
+  // whose file list can't be read (one-shot commands, API failures).
   if (!raw.quality || typeof raw.quality !== 'object') raw.quality = {}
-  ;(raw.quality as Record<string, unknown>).tier = qualityTier
+  const qualityRaw = raw.quality as Record<string, unknown>
+  qualityRaw.tier = qualityTier
+  qualityRaw.mode = qualityMode
   const tierCfg = QUALITY_TIERS[qualityTier]
   vendors.claude.effort = tierCfg.claude.effort
-  vendors.codex.model = tierCfg.codex.model
   vendors.codex.effort = tierCfg.codex.effort
+  if (qualityMode === 'smart') {
+    // A pinned model outranks the strategy, so smart mode cannot work while one
+    // is set. Report every removal — silently discarding user-authored config
+    // (especially under `--yes`) is worse than leaving smart mode inert.
+    for (const vendor of ['codex', 'claude'] as const) {
+      const pinned = (vendors[vendor] as Record<string, unknown>).model
+      if (pinned) {
+        console.log(chalk.yellow(`  cleared vendors.${vendor}.model (${String(pinned)}) — a pinned model overrides smart mode`))
+        delete (vendors[vendor] as Record<string, unknown>).model
+      }
+    }
+    // Codex needs an explicit per-tier map to vary by tier at all: with no
+    // `model` and no `model_tiers`, resolveCodexModel returns the CLI's own
+    // 'default' under subscription auth, so fast/balanced/thorough would be the
+    // same run. `model_tiers` is honored ahead of the auth check, so writing it
+    // is what makes smart mode mean anything for codex. Claude needs no
+    // equivalent — its tier map applies under either auth.
+    ;(vendors.codex as Record<string, unknown>).model_tiers = {
+      fast: QUALITY_TIERS.fast.codex.model,
+      balanced: QUALITY_TIERS.balanced.codex.model,
+      thorough: QUALITY_TIERS.thorough.codex.model,
+    }
+  } else {
+    vendors.codex.model = tierCfg.codex.model
+  }
 
   // ── Fix delivery mechanism (operational config, not pipeline logic) ──────────
   // Pipeline steps and trigger conditions live in workflow.yml.
@@ -671,18 +815,53 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     process.exit(1)
   }
 
+  // Onboard runs before a config exists on a fresh install, so it initialises
+  // logging from the schema defaults (enabled, local files only) unless an
+  // existing config already opted out or set a custom retention — otherwise
+  // re-running onboard on an existing `logs.enabled: false` install would start
+  // writing logs again, and could delete logs older than the default retention.
+  const preOnboardConfigPath = opts.config ?? resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
+  const preOnboardConfig = existsSync(preOnboardConfigPath) ? loadConfig(preOnboardConfigPath) : null
+  initLogger(preOnboardConfig?.logs ?? LogsConfigSchema.parse({}))
+  fileLog({ level: 'info', event: 'onboard_started', command: 'onboard' })
+  // Every path out of onboard reports an outcome, so `started` minus `completed`
+  // is the abandonment count rather than a number that also absorbs crashes.
+  const onboardAbandoned = (stage: string) => {
+    fileLog({ level: 'info', event: 'onboard_completed', command: 'onboard', outcome: 'abandoned', stage })
+  }
+
   console.log(chalk.bold('\ncrosscheck onboard\n'))
 
   // ── Step 1: Auth check ─────────────────────────────────────────────────────
   console.log(chalk.bold('Step 1 — environment check'))
+  console.log(chalk.dim('  Confirms the CLIs and auth crosscheck needs before it writes anything.'))
+
   const env = await checkEnv()
-  if (!env.ok) process.exit(1)
+  if (!env.ok) {
+    onboardAbandoned('environment_check')
+    process.exit(1)
+  }
   console.log()
 
   // ── Step 2: Deployment mode ────────────────────────────────────────────────
-  console.log(chalk.bold('Step 2 — deployment mode'))
-  const configPath = opts.config ?? resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
-  const existingConfig = existsSync(configPath) ? loadConfig(configPath) : null
+  console.log(chalk.bold('Step 2 — who you review for'))
+  console.log(chalk.dim('  Personal reviews only PRs you author. Team reviews every author in the org.'))
+
+  const configPath = preOnboardConfigPath
+  const existingConfig = preOnboardConfig
+  // Parsed config always carries a `tier` and a `mode` (schema defaults), so
+  // read the raw file to tell an explicit choice from a pre-`mode` config.
+  const rawQuality = ((): { tier?: string; mode?: string } => {
+    if (!existsSync(configPath)) return {}
+    try {
+      const raw = yaml.load(readFileSync(configPath, 'utf8')) as { quality?: { tier?: unknown; mode?: unknown } } | null
+      const quality = raw?.quality
+      return {
+        ...(typeof quality?.tier === 'string' && { tier: quality.tier }),
+        ...(typeof quality?.mode === 'string' && { mode: quality.mode }),
+      }
+    } catch { return {} }
+  })()
   const currentDeployment = existingConfig?.deployment
 
   let deployment: 'personal' | 'team'
@@ -710,13 +889,16 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log()
 
   // ── Step 3: Repo selection (hierarchical: namespace → repos) ───────────────
-  console.log(chalk.bold('Step 3 — select repos to monitor'))
+  console.log(chalk.bold('Step 3 — repos to watch'))
+  console.log(chalk.dim('  Only these get a webhook, and only these get reviewed.'))
+
 
   let token: string
   try {
     token = getGithubToken()
   } catch (err: unknown) {
     console.error(chalk.red(err instanceof Error ? err.message : String(err)))
+    onboardAbandoned('github_token')
     process.exit(1)
   }
 
@@ -855,7 +1037,9 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log()
 
   // ── Step 4: Review mode (cross-vendor vs single-vendor) ───────────────────
-  console.log(chalk.bold('Step 4 — review mode'))
+  console.log(chalk.bold('Step 4 — who reviews'))
+  console.log(chalk.dim('  Cross-vendor keeps the reviewer independent of the author — self-review is where early victory hides.'))
+
   const vendorConfig = await promptVendorMode(
     env.claudeOk,
     env.codexOk,
@@ -867,36 +1051,76 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log()
 
   // ── Step 5: Primary author (cross-vendor + personal only) ───────────────────
-  console.log(chalk.bold('Step 5 — primary author'))
+  // Header and description live inside the branch: printing them unconditionally
+  // and then skipping the prompt left a heading describing a question never asked.
   let authorVendor: 'claude' | 'codex' | 'both' = 'both'
   if (vendorConfig.mode === 'cross-vendor' && deployment === 'personal') {
+    console.log(chalk.bold('Step 5 — your coding agent'))
+    console.log(chalk.dim('  Routes your PRs to the other vendor even when the attribution footer is missing.'))
     const existingRoutes = (existingConfig?.routing?.author_routes as Record<string, string> | undefined) ?? null
     authorVendor = await promptAuthorVendor(login, existingRoutes, opts)
   } else {
     const reason = vendorConfig.mode === 'single-vendor' ? 'single-vendor mode' : 'team mode'
-    console.log(chalk.dim(`  Skipped — not applicable in ${reason}.`))
+    console.log(chalk.bold('Step 5 — your coding agent') + chalk.dim(` — skipped, not applicable in ${reason}.`))
     console.log()
   }
 
-  // ── Step 6: Review quality ────────────────────────────────────────────────
-  console.log(chalk.bold('Step 6 — review quality'))
-  const qualityTier = await promptQualityTier(
+  // ── Step 6: Review thoroughness ───────────────────────────────────────────
+  console.log(chalk.bold('Step 6 — review thoroughness'))
+  console.log(chalk.dim('  Decides how much model budget each PR earns.'))
+
+  const thoroughness = await promptQualityTier(
     vendorConfig.claudeEnabled,
     vendorConfig.codexEnabled,
-    existingConfig?.quality?.tier,
+    rawQuality,
     opts,
   )
+  const qualityTier = thoroughness.tier
+  const qualityMode = thoroughness.mode
+  console.log()
+
+  // ── Step 6.5: Agent skills ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 7 — agent skills'))
+  console.log(chalk.dim('  Extra review practices the agent can draw on. It picks what fits each step.'))
+
+  const bundledSkills = loadSkillCatalog()
+  const initialSkills = existingConfig
+    ? existingConfig.skills.enabled
+    : [...RECOMMENDED_SKILL_NAMES]
+  console.log(chalk.dim('  Base-branch AGENTS.md and CLAUDE.md practices take precedence over Crosscheck skill advice.'))
+  const enabledSkills = opts.yes
+    ? initialSkills
+    : await promptRepoPicker(bundledSkills.map(skill => skill.name), {
+        title: 'Enable skills for coding agents:',
+        initialSelected: initialSkills,
+        getDescription: name => {
+          const skill = bundledSkills.find(candidate => candidate.name === name)
+          return skill ? `(by @${skill.author}, ${skill.license})` : ''
+        },
+        getHint: (name, selected) => {
+          const skill = bundledSkills.find(candidate => candidate.name === name)
+          const recommendation = BUNDLED_SKILL_RECOMMENDATIONS[name] ?? skill?.description ?? ''
+          const competitor = findCompetingSkill(name, selected)
+          return competitor ? `${recommendation} Competes with selected ${competitor}.` : recommendation
+        },
+        getSelectionWarning: (name, selected) => {
+          const competitor = findCompetingSkill(name, selected)
+          return competitor ? `${name} competes with selected ${competitor}; deselect it first.` : undefined
+        },
+      })
+  console.log(`  Enabled: ${enabledSkills.length > 0 ? enabledSkills.map(name => chalk.cyan(name)).join(', ') : chalk.dim('none')}`)
   console.log()
 
   // ── Step 7: Workflow pipeline ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 7 — workflow pipeline'))
+  console.log(chalk.bold('Step 8 — what happens after a review'))
+  console.log(chalk.dim('  Review alone posts findings. Adding fix and re-check closes the loop before merge.'))
+
   const pipelinePreset = await promptWorkflowPipeline(opts)
   console.log()
 
-  // ── Step 7.5: Max rounds (review-fix-recheck only) ────────────────────────
+  // Sub-prompt of step 8 — only meaningful when a recheck step exists.
   let maxRounds: number | undefined
   if (pipelinePreset === 'review-fix-recheck') {
-    console.log(chalk.bold('Step 7.5 — fix → re-check rounds'))
     const globalWorkflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
     let currentMaxRounds: number | undefined
     if (existsSync(globalWorkflowPath)) {
@@ -910,14 +1134,16 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     console.log()
   }
 
-  // ── Step 7.7: Auto-conflict-resolve (opt-in) ──────────────────────────────
-  console.log(chalk.bold('Step 7.7 — auto conflict-resolve'))
+  // Sub-prompt of step 8 — orthogonal to depth, so it is asked for any preset
+  // that permits code modification.
   const currentConflictResolve = detectConflictResolveEnabled()
   const conflictResolve = await promptConflictResolve(currentConflictResolve, opts)
   console.log()
 
-  // ── Step 8: Connection type ────────────────────────────────────────────────
-  console.log(chalk.bold('Step 8 — connection type'))
+  // ── Step 9: Connection + clone protocol ───────────────────────────────────
+  console.log(chalk.bold('Step 9 — connection'))
+  console.log(chalk.dim('  How GitHub reaches this machine with PR events.'))
+
   const currentTunnel = existingConfig?.tunnel?.backend
   let tunnelBackend = await promptConnectionType(currentTunnel, opts)
 
@@ -942,9 +1168,21 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
   console.log()
 
-  // ── Step 9: Clone protocol ─────────────────────────────────────────────────
-  console.log(chalk.bold('Step 9 — clone protocol'))
+  // Sub-prompt of step 9 — same plumbing concern as the tunnel.
   const cloneProtocol = await promptCloneProtocol(existingConfig?.clone_protocol, opts)
+  console.log()
+
+  // ── Step 10: Linear write-back (beta, opt-in) ─────────────────────────────
+  console.log(chalk.bold(`Step 10 — Linear write-back ${chalk.yellow('(beta)')}`))
+
+  const linear = await promptLinear(
+    {
+      enabled: existingConfig?.linear?.enabled,
+      mode: existingConfig?.linear?.auth?.mode,
+      teamKeys: existingConfig?.linear?.team_keys,
+    },
+    opts,
+  )
 
   // ── Step 10: Confirm and write ─────────────────────────────────────────────
   const selectedRepoWorkflowOverrides = selectedRepos.flatMap(repoKey => {
@@ -953,11 +1191,12 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     return steps ? [`${repoKey}: ${formatRepoWorkflowSteps(steps)}`] : []
   })
 
-  console.log(chalk.bold('Step 10 — review and write config'))
+  console.log(chalk.bold('Step 11 — review and write config'))
   console.log()
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
   console.log(`  connection   ${chalk.cyan(tunnelBackend)}${tunnelBackend === 'smee' && smeeChannel ? chalk.dim(` (${smeeChannel})`) : ''}`)
   console.log(`  clone        ${chalk.cyan(cloneProtocol)}`)
+  console.log(`  linear       ${chalk.cyan(linear.mode === 'off' ? 'off' : linear.mode)}${linear.mode !== 'off' && linear.teamKeys.length > 0 ? chalk.dim(` (${linear.teamKeys.join(', ')})`) : ''} ${chalk.yellow('(beta)')}`)
   console.log(`  mode         ${chalk.cyan(vendorConfig.mode)}`)
   if (vendorConfig.mode === 'single-vendor') {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
@@ -969,7 +1208,10 @@ export async function runOnboard(opts: OnboardOpts = {}) {
       : `${authorVendor} → reviewed by ${authorVendor === 'claude' ? 'codex' : 'claude'}`
     console.log(`  routing      ${chalk.cyan(routingLabel)}`)
   }
-  console.log(`  quality      ${chalk.cyan(qualityTier)}${chalk.dim(`  — ${QUALITY_TIERS[qualityTier].description.split('  ')[0]}`)}`)
+  console.log(qualityMode === 'smart'
+    ? `  quality      ${chalk.cyan('smart')}${chalk.dim(`  — model + effort adjusted per PR (${qualityTier} fallback)`)}`
+    : `  quality      ${chalk.cyan(qualityTier)}${chalk.dim(`  — ${QUALITY_TIERS[qualityTier].description.split('  ')[0]}`)}`)
+  console.log(`  skills       ${enabledSkills.length > 0 ? enabledSkills.map(name => chalk.cyan(name)).join(', ') : chalk.dim('none')}`)
   console.log(`  pipeline     ${chalk.cyan(pipelinePreset)}`)
   if (pipelinePreset === 'review-fix-recheck') {
     console.log(`  max rounds   ${chalk.cyan(String(maxRounds ?? 1))}`)
@@ -995,6 +1237,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     const confirm = await ask(`  Write to config? [Y/n]: `)
     if (confirm.toLowerCase() === 'n') {
       console.log(chalk.dim('  Aborted — no changes written.'))
+      onboardAbandoned('config_write_declined')
       return
     }
   }
@@ -1010,12 +1253,15 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     vendorConfig,
     authorVendor,
     qualityTier,
+    qualityMode,
+    enabledSkills,
     pipelinePreset,
     maxRounds,
     conflictResolve,
     tunnelBackend,
     smeeChannel,
     cloneProtocol,
+    linear,
   })
 
   console.log(chalk.green(`  ✓ config written to ${configPath}`))
@@ -1026,6 +1272,14 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
 
   console.log()
+
+  fileLog({
+    level: 'info', event: 'onboard_completed', command: 'onboard', outcome: 'completed',
+    // Shape of the setup, never its contents: counts, not repo or org names.
+    deployment, repos: selectedRepos.length, orgs: selectedOrgs.length,
+    quality_tier: qualityTier, quality_mode: qualityMode, pipeline: pipelinePreset,
+    tunnel: tunnelBackend, linear: linear !== null,
+  })
 
   // ── Next step hint ─────────────────────────────────────────────────────────
   console.log(chalk.dim('  Run crosscheck watch to start monitoring.'))

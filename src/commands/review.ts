@@ -8,15 +8,21 @@ import { createGithubClient, postReviewComment } from '../github/client.js'
 import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
-import { loadConfig, getGithubToken } from '../config/loader.js'
+import { loadConfig, getGithubToken, getLinearCredentials } from '../config/loader.js'
+import { resolveLinearAuth, withWorker, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
+import { notifyLinear } from '../linear/notify.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
+import { linearWritePossible } from '../lib/workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
+import { loadSkillCatalog } from '../skills/catalog.js'
+import { createSkillActivationSession } from '../skills/broker.js'
+import { formatSkillAttribution } from '../skills/attribution.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -90,8 +96,27 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     console.log(chalk.dim(`  PR origin: ${origin} (via ${method}) → assigned reviewer: ${reviewer}`))
   }
 
+  // Deferred to here on purpose: after the closed-PR check and reviewer routing,
+  // before the clone. Resolving earlier meant a closed PR — or one routing assigns
+  // no reviewer to — exited nonzero over a Linear credential it was never going to
+  // use, replacing a clean skip with a failure.
+  let linearAuth: ResolvedLinearAuth | null = null
+  if (linearWritePossible(config.linear, [{ type: 'review' }])) {
+    try {
+      linearAuth = await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
+      fileLog({ level: 'info', event: 'linear_auth_resolved', mode: linearAuth.mode, actor: linearAuth.actor })
+    } catch (err) {
+      logError({ command: 'review', phase: 'linear-auth' }, err)
+      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+      process.exit(isLinearConfigError(err) ? 1 : 2)
+    }
+  }
+
   // Clone the repo into a temp dir
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+  const skillSession = config.skills.enabled.length > 0
+    ? createSkillActivationSession('review', config.skills.enabled, loadSkillCatalog())
+    : undefined
   const spinner2 = ora('Cloning repo for review...').start()
   let reviewSpinner: ReturnType<typeof ora> | undefined
 
@@ -99,6 +124,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     await clonePRForReview({
       owner, repo, prNumber: number, baseRef: pr.base.ref,
       tmpDir, token, protocol: config.clone_protocol,
+      onProgress: line => { spinner2.text = `Cloning repo for review... ${line}` },
       onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref }),
     })
     spinner2.succeed('Repo ready')
@@ -106,6 +132,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     let reviewText: string
     let tokensUsed: number | undefined
     let model = 'default'
+    let effort: string | undefined
     const reviewStart = Date.now()
     fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     let elapsed = 0
@@ -118,7 +145,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     try {
       if (reviewer === 'codex') {
-        ;({ review: reviewText, tokensUsed, model } = await runCodexReview(
+        ;({ review: reviewText, tokensUsed, model, effort } = await runCodexReview(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -127,9 +154,13 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           undefined,
           msg => { reviewSpinner!.text = msg },
           codexTimeoutMs,
+          undefined,
+          undefined,
+          skillSession,
+          config.skills.codex_full_access,
         ))
       } else {
-        ;({ review: reviewText, tokensUsed, model } = await runClaudeReview(
+        ;({ review: reviewText, tokensUsed, model, effort } = await runClaudeReview(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -139,6 +170,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           undefined,
           msg => { reviewSpinner!.text = msg },
           claudeTimeoutMs,
+          undefined,
+          undefined,
+          undefined,
+          skillSession,
         ))
       }
     } finally {
@@ -146,6 +181,8 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
 
     reviewSpinner.succeed(`Review complete (${elapsed}s)`)
+    const activatedSkills = skillSession?.activations() ?? []
+    if (activatedSkills.length > 0) console.log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
     const parsed = parseVerdict(reviewText)
     const { clean } = parsed
     if (parsed.verdict === null) {
@@ -158,14 +195,42 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     if (gate.downgraded) {
       fileLog({ level: 'info', event: 'verdict_severity_gated', repo: `${owner}/${repo}`, pr: number, reviewer, raw_verdict: parsed.verdict, gated_verdict: verdict })
     }
-    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, model, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed })
+    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, model, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed, skills_activated: activatedSkills.map(skill => skill.name) })
     console.log(`  ${formatVerdict(verdict)}`)
-    const commentBody = verdict === null
+    const reviewBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
       : prependVerdictToComment(gate.downgraded ? `${SEVERITY_GATE_NOTE}\n\n${clean}` : clean, verdict)
-    await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha)
+    await postReviewComment(octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
+
+    if (linearAuth) {
+      const linear = await notifyLinear({
+        // Attribute to crosscheck/review rather than a flat crosscheck, so this
+        // write is distinguishable from a fix or a recheck.
+        auth: config.linear.identity.per_step_actor ? withWorker(linearAuth, 'review') : linearAuth,
+        config: config.linear,
+        pr: { branch: pr.head.ref, title: pr.title, body: pr.body ?? '', url: prUrl, sha: pr.head.sha },
+        verdict,
+        reviewer,
+        origin,
+        model,
+        service: config.brand.service_name,
+      })
+      fileLog({
+        level: linear.status === 'failed' ? 'warn' : 'info',
+        event: 'linear_comment',
+        repo: `${owner}/${repo}`, pr: number,
+        status: linear.status, reason: linear.reason, issue: linear.identifier,
+      })
+      if (linear.status === 'posted') {
+        console.log(chalk.dim(`  linear: commented on ${linear.identifier} (${linear.url})`))
+      } else if (linear.status === 'failed') {
+        // The review itself succeeded and is already on the PR — surface the Linear
+        // failure without failing the run.
+        console.error(chalk.yellow(`  linear: write failed — ${linear.reason}`))
+      }
+    }
 
   } catch (err: unknown) {
     spinner2.fail()
@@ -175,6 +240,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     console.error(chalk.red(`\n✗ ${message}`))
     process.exit(2)
   } finally {
+    skillSession?.close()
     rmSync(tmpDir, { force: true, recursive: true })
   }
 }

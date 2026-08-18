@@ -29,7 +29,10 @@ describe('review model resolution', () => {
   it('resolves Claude models by tier', () => {
     expect(resolveClaudeModel(quality('fast'))).toBe('claude-haiku-4-5-20251001')
     expect(resolveClaudeModel(quality('balanced'))).toBe('claude-sonnet-5')
-    expect(resolveClaudeModel(quality('thorough'))).toBe('claude-opus-4-8')
+    // thorough moved from the legacy claude-opus-4-8 to claude-opus-5 — identical
+    // $5/$25 pricing, higher coding benchmark score. The stale pin was a silent
+    // capability loss.
+    expect(resolveClaudeModel(quality('thorough'))).toBe('claude-opus-5')
   })
 
   it('honors an explicit vendors.claude.model over the tier mapping', () => {
@@ -41,7 +44,7 @@ describe('review model resolution', () => {
   })
 
   it('falls back to the tier mapping when vendors.claude.model is unset', () => {
-    expect(resolveClaudeModel(quality('thorough'), claudeVendor(null))).toBe('claude-opus-4-8')
+    expect(resolveClaudeModel(quality('thorough'), claudeVendor(null))).toBe('claude-opus-5')
   })
 
   it('resolves Codex API-key models by tier and configured override', () => {
@@ -60,9 +63,24 @@ describe('review model resolution', () => {
     expect(resolveCodexModel(quality('balanced'), vendor)).toBe('gpt-5.6-terra')
   })
 
-  it('uses default for Codex subscription auth', () => {
+  it('uses the CLI default for Codex subscription auth with no model configured', () => {
     expect(resolveCodexModel(quality('thorough'), codexVendor('subscription'))).toBe('default')
     expect(modelDisplayName('default')).toBeNull()
+  })
+
+  it('honors an explicit model under Codex subscription auth', () => {
+    expect(resolveCodexModel(quality('balanced'), codexVendor('subscription', 'gpt-5.6-sol'))).toBe('gpt-5.6-sol')
+  })
+
+  it('honors model_tiers under Codex subscription auth without the built-in fallback', () => {
+    const vendor = {
+      ...codexVendor('subscription'),
+      model_tiers: { thorough: 'custom-thorough-model' },
+    }
+    expect(resolveCodexModel(quality('thorough'), vendor)).toBe('custom-thorough-model')
+    // Tiers without an explicit entry stay on the CLI default — the built-in
+    // tier mapping applies to api-key auth only.
+    expect(resolveCodexModel(quality('balanced'), vendor)).toBe('default')
   })
 
   it('derives display names for current claude and codex models', () => {

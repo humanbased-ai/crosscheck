@@ -1,0 +1,234 @@
+import { afterEach, describe, expect, it } from 'vitest'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
+import {
+  callSkillBrokerTool,
+  claudeSkillBrokerArgs,
+  codexSkillBrokerArgs,
+  codexSkillsReachable,
+  createSkillActivationSession,
+  handleSkillBrokerRequest,
+  renderSkillBrokerInstructions,
+  skillBrokerCommand,
+  type SkillActivationSession,
+} from '../skills/broker.js'
+import { loadBundledSkills } from '../skills/catalog.js'
+import { execa } from 'execa'
+
+let session: SkillActivationSession | undefined
+
+afterEach(() => {
+  session?.close()
+  session = undefined
+})
+
+describe('skill activation broker', () => {
+  it('exposes enabled metadata without loading skill instructions', () => {
+    session = createSkillActivationSession('fix', ['code-review-skill'], loadBundledSkills())
+
+    expect(session.enabledSkills).toEqual([
+      expect.objectContaining({
+        name: 'code-review-skill',
+        author: 'awesome-skills',
+        license: 'MIT',
+      }),
+    ])
+    expect(session.enabledSkills[0]).not.toHaveProperty('path')
+    expect(session.activations()).toEqual([])
+  })
+
+  it('asks for the listing as an obligatory first step, naming the step type', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+
+    const instructions = renderSkillBrokerInstructions(session)
+
+    expect(instructions).toContain('do this first')
+    expect(instructions).toContain('Call `list_enabled_skills`')
+    expect(instructions).toContain('this review step')
+    // The catalog's descriptions are phrased for interactive use; without this
+    // the agent measures them against a user request that never arrives.
+    expect(instructions).toContain('when the user wants X')
+    // SKILL.md links to sibling files that no granted tool can open.
+    expect(instructions).toContain('`read_skill_file`')
+    expect(instructions).toContain('- code-review-skill:')
+  })
+
+  it('renders nothing when no skill is enabled for the step', () => {
+    session = createSkillActivationSession('review', [], loadBundledSkills())
+
+    expect(renderSkillBrokerInstructions(session)).toBe('')
+  })
+
+  it('loads and records a skill only when the agent activates it', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+
+    const result = callSkillBrokerTool(session.path, 'activate_skill', { name: 'code-review-skill' })
+
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0].text).toContain('# Code Review Skill')
+    expect(session.activations()).toEqual([
+      expect.objectContaining({ name: 'code-review-skill', author: 'awesome-skills', license: 'MIT' }),
+    ])
+  })
+
+  it('keeps activation idempotent and rejects disabled skills', () => {
+    session = createSkillActivationSession('recheck', ['code-review-skill'], loadBundledSkills())
+    callSkillBrokerTool(session.path, 'activate_skill', { name: 'code-review-skill' })
+    callSkillBrokerTool(session.path, 'activate_skill', { name: 'code-review-skill' })
+
+    expect(session.activations()).toHaveLength(1)
+    expect(callSkillBrokerTool(session.path, 'activate_skill', { name: 'missing' }).isError).toBe(true)
+  })
+
+  it('ignores attacker-created state files', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    const attackerDir = mkdtempSync(join(tmpdir(), 'crosscheck-forged-session-'))
+    const attackerPath = join(attackerDir, 'session.json')
+    writeFileSync(attackerPath, JSON.stringify({ enabled: loadBundledSkills(), activated: ['code-review-skill'] }))
+
+    expect(() => callSkillBrokerTool(attackerPath, 'list_enabled_skills', {})).toThrow('not found')
+    expect(session.activations()).toEqual([])
+    rmSync(attackerDir, { recursive: true, force: true })
+  })
+
+  it('rejects activation of a competing review baseline', () => {
+    session = createSkillActivationSession(
+      'review',
+      ['code-review', 'code-review-skill'],
+      loadBundledSkills(),
+    )
+    callSkillBrokerTool(session.path, 'activate_skill', { name: 'code-review-skill' })
+
+    const result = callSkillBrokerTool(session.path, 'activate_skill', { name: 'code-review' })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('competes with activated code-review-skill')
+    expect(session.activations().map(skill => skill.name)).toEqual(['code-review-skill'])
+  })
+
+  it('allows activated references but blocks path traversal', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    callSkillBrokerTool(session.path, 'activate_skill', { name: 'code-review-skill' })
+
+    const reference = callSkillBrokerTool(session.path, 'read_skill_file', {
+      name: 'code-review-skill',
+      path: 'reference/typescript.md',
+    })
+    expect(reference.content[0].text).toContain('TypeScript')
+    expect(callSkillBrokerTool(session.path, 'read_skill_file', {
+      name: 'code-review-skill',
+      path: '../LICENSE',
+    }).isError).toBe(true)
+  })
+
+  it('speaks the MCP initialize and tools/list protocol', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+
+    expect(handleSkillBrokerRequest(session.path, {
+      jsonrpc: '2.0', id: 1, method: 'initialize', params: {},
+    })).toMatchObject({ jsonrpc: '2.0', id: 1, result: { capabilities: { tools: {} } } })
+    expect(handleSkillBrokerRequest(session.path, {
+      jsonrpc: '2.0', id: 2, method: 'tools/list', params: {},
+    })).toMatchObject({
+      jsonrpc: '2.0',
+      id: 2,
+      result: {
+        tools: expect.arrayContaining([
+          expect.objectContaining({
+            name: 'activate_skill',
+            annotations: {
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+              openWorldHint: false,
+            },
+          }),
+        ]),
+      },
+    })
+  })
+
+  it('serves newline-delimited MCP over stdio', async () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    const broker = skillBrokerCommand(session)
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+    ].map(request => JSON.stringify(request)).join('\n') + '\n'
+
+    const { stdout } = await execa(broker.command, broker.args, { input: requests })
+    const responses = stdout.split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+
+    expect(responses).toHaveLength(2)
+    expect(responses[1]).toMatchObject({ id: 2, result: { tools: expect.any(Array) } })
+  })
+
+  it('builds session-scoped Claude and Codex MCP arguments', () => {
+    session = createSkillActivationSession('fix', ['code-review-skill'], loadBundledSkills())
+
+    expect(claudeSkillBrokerArgs(session)).toEqual([
+      '--mcp-config', expect.stringContaining('crosscheck'),
+    ])
+    expect(codexSkillBrokerArgs(session, true)).toEqual([
+      '-c', expect.stringContaining('mcp_servers.crosscheck.command='),
+      '-c', expect.stringContaining('mcp_servers.crosscheck.args='),
+      '-c', 'sandbox_mode="danger-full-access"',
+    ])
+  })
+
+  // Codex registers the MCP server and lists its tools under any sandbox, then
+  // cancels every tools/call ("user cancelled MCP tool call") unless the sandbox
+  // is danger-full-access. Measured against codex-cli 0.147: -a never,
+  // --full-auto, -s read-only, -s workspace-write, approval_policy="never" and
+  // per-tool approval_mode all leave the call cancelled. Without this arg the
+  // broker is reachable but unusable — which is why codex logged 0 skill
+  // activations across 244 production runs while claude logged 131.
+  it('widens the codex sandbox so broker tool calls are not cancelled', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    expect(codexSkillBrokerArgs(session, true)).toContain('sandbox_mode="danger-full-access"')
+  })
+
+  // The override is the price of reaching the broker, so it is scoped to exactly
+  // that: no skills, no widened sandbox.
+  it('does not widen the sandbox when there is no session', () => {
+    expect(codexSkillBrokerArgs(undefined, true)).toEqual([])
+  })
+
+  // Reviews read untrusted PR content, and reaching the broker costs the codex
+  // sandbox, so the operator has to say yes to that trade — onboarding does not
+  // say it for them. Six BLOCK reviews on #298 landed on this point.
+  it('registers nothing when the operator has not opted into full access', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    expect(codexSkillBrokerArgs(session, false)).toEqual([])
+  })
+
+  // The broker registration and the sandbox override travel together: half of
+  // this pair is the 0-activations bug (broker present, every call cancelled) and
+  // the other half is an unsandboxed run with nothing to show for it.
+  it('never registers the broker without the sandbox override, or vice versa', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    for (const allowed of [true, false]) {
+      const args = codexSkillBrokerArgs(session, allowed)
+      const hasBroker = args.some(a => a.includes('mcp_servers.crosscheck.command='))
+      const hasSandbox = args.includes('sandbox_mode="danger-full-access"')
+      expect(hasBroker).toBe(hasSandbox)
+    }
+  })
+
+  it('codexSkillsReachable gates on both a session and the opt-in', () => {
+    session = createSkillActivationSession('review', ['code-review-skill'], loadBundledSkills())
+    expect(codexSkillsReachable(session, true)).toBe(true)
+    expect(codexSkillsReachable(session, false)).toBe(false)
+    expect(codexSkillsReachable(undefined, true)).toBe(false)
+  })
+
+  it('removes the session endpoint on close', () => {
+    session = createSkillActivationSession('review', [], loadBundledSkills())
+    const path = session.path
+    session.close()
+    session = undefined
+
+    expect(existsSync(path)).toBe(false)
+  })
+})

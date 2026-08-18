@@ -4,6 +4,11 @@ import { dirname, join } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
+import { claudeEffort } from './claude.js'
+import { codexReasoningEffort } from './codex.js'
+import { claudeSkillBrokerArgs, codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
+import { buildCodexEnv } from './codex-env.js'
+import { withCredentialFreeOrigin } from '../lib/clone.js'
 
 interface ClaudeJsonOutput {
   result?: unknown
@@ -81,7 +86,9 @@ export async function runFixStep(
   config: Config,
   model = 'default',
   timeoutMs?: number,
-): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number }> {
+  skillSession?: SkillActivationSession,
+): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort: string }> {
+  const effort = claudeEffort(config.vendors?.claude?.effort)
   let diff = ''
   try {
     diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
@@ -95,15 +102,22 @@ export async function runFixStep(
     .replace('{PR_TITLE}', prTitle)
     .replace('{REVIEW_COMMENT}', reviewComment.slice(0, 8000))
     .replace('{DIFF}', diff.slice(0, 16000))
-    .replace('{EXTRA_INSTRUCTIONS}', instructions ? `Additional instructions: ${instructions}` : '')
+    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
 
   let output = ''
   let tokensUsed: number | undefined
   try {
     const modelArgs = model !== 'default' ? ['--model', model] : []
-    const effort = config.vendors?.claude?.effort ?? 'medium'
     const resolvedTimeout = timeoutMs === undefined ? tierTimeoutMs(config.quality.tier) : timeoutMs === 0 ? undefined : timeoutMs
-    const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs, '--effort', effort], {
+    const { stdout } = await execa('claude', [
+      '--print', '--output-format', 'json', ...modelArgs, '--effort', effort,
+      ...claudeSkillBrokerArgs(skillSession),
+      ...(skillSession ? ['--allowedTools', [
+        'mcp__crosscheck__list_enabled_skills',
+        'mcp__crosscheck__activate_skill',
+        'mcp__crosscheck__read_skill_file',
+      ].join(',')] : []),
+    ], {
       input: prompt,
       timeout: resolvedTimeout,
       env: { ...process.env },
@@ -126,7 +140,7 @@ export async function runFixStep(
     throw err
   }
 
-  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, changedFiles: [], tokensUsed }
+  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, changedFiles: [], tokensUsed, effort }
 
   let appliedCount = 0
 
@@ -215,7 +229,7 @@ export async function runFixStep(
     }
   }
 
-  return { appliedCount, changedFiles: writtenFiles, tokensUsed }
+  return { appliedCount, changedFiles: writtenFiles, tokensUsed, effort }
 }
 
 // Codex fix: codex is an agentic tool that edits files directly on disk.
@@ -251,7 +265,16 @@ export async function runCodexFixStep(
   instructions: string,
   model = 'default',
   timeoutMs?: number,
-): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number }> {
+  skillSession?: SkillActivationSession,
+  // Reasoning effort from vendors.codex.effort. Was never passed here, so a
+  // configured effort applied to the review and then silently dropped for the
+  // fix; the posted card now reports this value, so it has to be the real one.
+  configuredEffort?: string,
+  // skills.codex_full_access — see runCodexReview. The fix step reads the same
+  // untrusted review comment and diff, so it is gated identically.
+  codexFullAccess = false,
+): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort: string }> {
+  const effort = codexReasoningEffort(configuredEffort ?? 'medium')
   let diff = ''
   try {
     diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
@@ -265,21 +288,25 @@ export async function runCodexFixStep(
     .replace('{PR_TITLE}', prTitle)
     .replace('{REVIEW_COMMENT}', reviewComment.slice(0, 8000))
     .replace('{DIFF}', diff.slice(0, 16000))
-    .replace('{EXTRA_INSTRUCTIONS}', instructions ? `Additional instructions: ${instructions}` : '')
+    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', codexSkillsReachable(skillSession, codexFullAccess) ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
 
   const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
   const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
 
   try {
-    await execa(
+    await withCredentialFreeOrigin(tmpDir, () => execa(
       'codex',
-      ['exec', ...modelArgs, prompt],
+      // --ignore-user-config and the env allowlist for the same reason as the
+      // review path: this step reads an untrusted diff, and with
+      // skills.codex_full_access it runs unsandboxed.
+      ['exec', '--ignore-user-config', ...modelArgs, '-c', `model_reasoning_effort="${effort}"`, ...codexSkillBrokerArgs(skillSession, codexFullAccess), prompt],
       {
         cwd: tmpDir,
         timeout: resolvedTimeout,
-        env: { ...process.env, CODEX_QUIET_MODE: '1', HOME: process.env.HOME ?? '' },
+        extendEnv: false,
+        env: buildCodexEnv({ CODEX_QUIET_MODE: '1' }),
       },
-    )
+    ))
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (/not logged in|auth|credential/i.test(msg)) {
@@ -295,5 +322,5 @@ export async function runCodexFixStep(
     ...(changedOutput ? changedOutput.split('\n').filter(Boolean) : []),
     ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
   ]
-  return { appliedCount: changedFiles.length, changedFiles }
+  return { appliedCount: changedFiles.length, changedFiles, effort }
 }

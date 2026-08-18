@@ -20,6 +20,8 @@ import { isAuthorAllowed } from './filter.js'
 import { getLogDir, logError } from './logger.js'
 import { parseAnnotationFieldsFenced } from './annotation.js'
 import { readRepoWorkflowStepTypes } from './repo-workflow.js'
+import { shaCovers } from './pr-workflow-state.js'
+import { loadWorkflow } from './workflow.js'
 import { dedupScopes, type Scope } from './scopes.js'
 
 export type Freshness = 'stale' | 'not_stale'
@@ -27,7 +29,7 @@ export type Freshness = 'stale' | 'not_stale'
 // Workflow stage — what action is pending on this PR.
 export type ReviewState = 'NEEDS_REVIEW' | 'NEEDS_FIX' | 'NEEDS_RECHECK' | 'APPROVED'
 
-export type NextAction = 'review' | 'fix' | 'recheck' | 'merge' | null
+export type NextAction = 'resolve' | 'review' | 'fix' | 'recheck' | 'merge' | null
 
 // AI verdict — what the reviewer decided. UNREVIEWED means no review found for current HEAD.
 export type ReviewVerdict = 'UNREVIEWED' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
@@ -206,8 +208,28 @@ export function derivePRStatus(input: PRStatusInput, options: DeriveStatusOption
   ]) ?? Date.parse(input.prUpdatedAt)
 
   const ageMs = Math.max(0, options.nowMs - lastActiveMs)
-  const reviewState = computeReviewState(latestVerdict, latestFix)
-  const nextAction = nextActionForState(reviewState)
+  // Only annotations carry the reviewed SHA. The merged verdict list also contains log
+  // events (`review_complete`, `workflow_complete`), which have no SHA and are written
+  // AFTER the comment is posted — so the newest verdict on an approved PR is normally a
+  // SHA-less log entry. Reading the SHA off that entry would fail every approval check
+  // and have scan/kickass re-dispatch approved PRs forever, so resolve it from the
+  // newest verdict-bearing annotation instead. Requiring that annotation to itself be
+  // the APPROVE keeps a later disagreeing verdict authoritative.
+  const latestVerdictAnnotation = annotations.find(entry => entry.annotation.verdict !== undefined)
+  const approvedSha = latestVerdictAnnotation?.annotation.verdict === 'APPROVE'
+    ? latestVerdictAnnotation.annotation.sha
+    : undefined
+  const reviewState = computeReviewState(latestVerdict, latestFix, input.headSha, approvedSha)
+  // A conflicted PR takes precedence over wherever it sits in the review ladder — even
+  // over an approval, which is why this wraps the call rather than living inside
+  // computeReviewState: the PR cannot merge, and the base branch moving fires no webhook,
+  // so a scan is the only thing that will ever notice (#282). `reviewState` is
+  // deliberately left alone — a conflict says nothing about the code that was reviewed.
+  // Only an explicit `false` counts; `null` means GitHub is still computing and would
+  // dispatch resolve runs against clean PRs.
+  const nextAction: NextAction = input.merge?.mergeable === false
+    ? 'resolve'
+    : nextActionForState(reviewState)
   const freshness: Freshness = ageMs >= options.staleAfterMs && nextAction !== null ? 'stale' : 'not_stale'
 
   return {
@@ -242,10 +264,29 @@ export function summarizeStatuses(prs: ScanPRStatus[]): ScanSummary {
   }
 }
 
-function applyRepoWorkflowOverrideToStatus(status: ScanPRStatus): ScanPRStatus {
+export function applyRepoWorkflowOverrideToStatus(
+  status: ScanPRStatus,
+  workflowStepTypes: ReadonlySet<string>,
+): ScanPRStatus {
   if (status.nextAction === null || status.nextAction === 'merge') return status
+  // Never dispatch a step the operator's workflow does not define. This matters most for
+  // `resolve`: `--steps conflict-resolve` synthesizes the step when the workflow lacks it
+  // (so `crosscheck resolve` always works), which is right for an explicit command and
+  // wrong for automatic dispatch — it would push a merge commit on behalf of a workflow
+  // that never asked for one.
+  if (status.nextAction === 'resolve' && !workflowStepTypes.has('conflict-resolve')) {
+    return { ...status, nextAction: null, freshness: 'not_stale' }
+  }
   const repoSteps = readRepoWorkflowStepTypes(status.owner, status.repo)
-  if (!repoSteps || repoSteps.includes(status.nextAction)) return status
+  if (!repoSteps) return status
+  // conflict-resolve is orthogonal to the review→fix→recheck ladder, so a per-repo
+  // override never lists it. It passes through whenever the override permits code
+  // modification — the same rule filterStepsByTypes applies — and a review-only repo
+  // drops it along with fix, preserving the "never touch the code" guarantee.
+  const permitted = status.nextAction === 'resolve'
+    ? repoSteps.includes('fix')
+    : repoSteps.includes(status.nextAction)
+  if (permitted) return status
   return {
     ...status,
     nextAction: null,
@@ -265,6 +306,9 @@ export async function scanOpenPRStatuses(
   ])
   const octokit = createGithubClient(token)
   const limitGithub = createConcurrencyLimiter(GITHUB_SCAN_CONCURRENCY)
+  // Read once for the whole scan — the operator's workflow bounds which actions this
+  // scan is allowed to report as pending.
+  const workflowStepTypes = new Set(loadWorkflow(process.cwd()).map(step => step.type))
 
   const perRepoPRs = await Promise.all(
     repoScopes.map(({ owner, repo }) =>
@@ -324,7 +368,7 @@ export async function scanOpenPRStatuses(
           logEvents: filterLogEventsForPR(logEvents, owner, repo, pr.number),
           merge,
         }, { nowMs: now.getTime(), staleAfterMs: options.staleAfterMs })
-        return applyRepoWorkflowOverrideToStatus(status)
+        return applyRepoWorkflowOverrideToStatus(status, workflowStepTypes)
       } catch (err: unknown) {
         logError({ event: 'scan_pr_skipped', owner, repo, pr: pr.number }, err)
         return null
@@ -433,9 +477,37 @@ function verdictToReviewState(verdict: CrosscheckVerdict): ReviewState {
   return 'NEEDS_FIX' // NEEDS_WORK and BLOCK both require a fix; severity is on the verdict field
 }
 
-function computeReviewState(latestVerdict: TimedVerdict | null, latestFix: PRWorkflowLogEvent | null): ReviewState {
+function computeReviewState(
+  latestVerdict: TimedVerdict | null,
+  latestFix: PRWorkflowLogEvent | null,
+  headSha: string,
+  approvedSha: string | undefined,
+): ReviewState {
   if (!latestVerdict) return 'NEEDS_REVIEW'
+
+  // An APPROVE ends the PR only for the commit it covers — the same rule
+  // identifyNextWorkflowStep applies. Without it the scan reports `nextAction: 'merge'`
+  // for a PR approved at an older SHA, so kickass presents never-reviewed code as
+  // merge-ready instead of dispatching the fresh review it is owed. `approvedSha` comes
+  // from the newest verdict-bearing annotation (see derivePRStatus); a legacy annotation
+  // written before `sha=` existed cannot say which commit it describes and so cannot
+  // claim HEAD, and falls through to a review that re-establishes it (fail open).
+  //
+  // Checked BEFORE the fix branch below, which is deliberate. Fix log events carry no
+  // SHA, so a fix that was force-pushed away — or delivered as its own PR, leaving this
+  // HEAD untouched — would otherwise pin the PR to NEEDS_RECHECK forever and have
+  // kickass dispatch no-op rechecks against an approved commit. Ordering it first makes
+  // that self-correcting: a fix that really did change HEAD moves HEAD off the approved
+  // SHA, so the approval stops covering it and the fix branch takes over as it should.
+  const approvalCoversHead = latestVerdict.verdict === 'APPROVE' && shaCovers(approvedSha, headSha)
+  if (approvalCoversHead) return 'APPROVED'
+
   if (latestFix) return 'NEEDS_RECHECK'
+
+  // Only APPROVE is SHA-scoped here. A stale NEEDS_WORK/BLOCK still means "this PR has
+  // unresolved findings", and kickass separately demotes a fix to a review when the
+  // annotation covers an older SHA (`hasUsableCurrentHeadReview`).
+  if (latestVerdict.verdict === 'APPROVE') return 'NEEDS_REVIEW'
   return verdictToReviewState(latestVerdict.verdict)
 }
 

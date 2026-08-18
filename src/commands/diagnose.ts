@@ -2,7 +2,6 @@ import { readdirSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import chalk from 'chalk'
-import { INDICATORS } from '../lib/languages.js'
 import { saveToIssueQueue } from '../lib/issue-queue.js'
 import type { StepRecord, NextStepResult } from '../lib/pr-workflow-state.js'
 
@@ -134,7 +133,7 @@ function detectLanguagesFromCommands(errors: ErrorEntry[]): string[] {
   return [...detected]
 }
 
-function buildSuggestions(errors: ErrorEntry[], languages: string[]): Suggestion[] {
+function buildSuggestions(errors: ErrorEntry[], _languages: string[]): Suggestion[] {
   const suggestions: Suggestion[] = []
   const seen = new Set<string>()
 
@@ -603,7 +602,7 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: s
     currentSha = prData.head.sha
     const steps = loadWorkflow(process.cwd())
     history = await fetchStepHistory(owner, repo, number, token)
-    nextResult = identifyNextWorkflowStep(history, steps, currentSha)
+    nextResult = identifyNextWorkflowStep(history, steps, currentSha, { mergeable: prData.mergeable })
   } catch (err) {
     fetchError = err instanceof Error ? err.message : String(err)
   }

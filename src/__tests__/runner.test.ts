@@ -9,9 +9,16 @@ import {
   exceedsMaxRounds,
   anyFixApplied,
   countCrosscheckCommitsForPR,
+  countCrosscheckCommitsForPRDetailed,
   buildWorkflowCompleteEvent,
   resolveFixVendor,
+  resolveConflictResolveVendor,
+  summariseStepOutcomes,
+  mergeStepOutcomes,
+  resolveFixLanding,
 } from '../lib/runner.js'
+import type { StepResult } from '../lib/workflow.js'
+import type { Config } from '../config/schema.js'
 
 describe('isRetryableFixError', () => {
   it('returns false for auth failure errors', () => {
@@ -43,6 +50,23 @@ describe('isRetryableFixError', () => {
     expect(isRetryableFixError('timeout string')).toBe(true)
     expect(isRetryableFixError('auth failure: bad token')).toBe(false)
     expect(isRetryableFixError(null)).toBe(true)
+  })
+})
+
+describe('resolveFixLanding', () => {
+  it('commit mode lands on the PR branch with no fallback', () => {
+    expect(resolveFixLanding('commit')).toBe('branch')
+  })
+
+  it('pull_request mode lands on the PR branch but may fall back to a separate PR', () => {
+    // The key behavior fix: pull_request no longer means "always a separate PR".
+    // It lands on the original branch first, keeping fix+recheck+approval on one PR,
+    // and only opens a follow-up PR when the branch push can't land.
+    expect(resolveFixLanding('pull_request')).toBe('branch-then-separate-pr')
+  })
+
+  it('comment mode never pushes', () => {
+    expect(resolveFixLanding('comment')).toBe('comment')
   })
 })
 
@@ -151,6 +175,39 @@ describe('countCrosscheckCommitsForPR', () => {
 
   afterEach(() => {
     rmSync(tmpDir, { force: true, recursive: true })
+  })
+
+  // The scoped/unscoped distinction matters because an unscoped count is an
+  // over-count of whole-repo history, not a real cap hit. Reporting the two
+  // identically made a transient base-fetch failure look like "you have already
+  // had 5 fixes", which silently disabled auto-fix on every repo with prior
+  // [crosscheck] commits.
+  describe('scoped vs unscoped reporting', () => {
+    it('reports scoped: true when origin/<base> resolves', () => {
+      commit('a.txt', 'a\n', '[crosscheck] fix round 1')
+      expect(countCrosscheckCommitsForPRDetailed(tmpDir, 'base')).toEqual({ count: 1, scoped: true })
+    })
+
+    it('reports scoped: false and over-counts when origin/<base> is missing', () => {
+      commit('a.txt', 'a\n', '[crosscheck] fix round 1')
+      git('update-ref', '-d', 'refs/remotes/origin/base')
+
+      const result = countCrosscheckCommitsForPRDetailed(tmpDir, 'base')
+      expect(result.scoped).toBe(false)
+      // 6 inherited from base history + 1 on this branch — none of the 6 are ours.
+      expect(result.count).toBe(7)
+    })
+
+    it('still fails closed: the over-count trips the cap rather than bypassing it', () => {
+      git('update-ref', '-d', 'refs/remotes/origin/base')
+      expect(countCrosscheckCommitsForPRDetailed(tmpDir, 'base').count).toBeGreaterThanOrEqual(5)
+    })
+
+    it('keeps the scalar helper behaviour identical for existing callers', () => {
+      commit('a.txt', 'a\n', '[crosscheck] fix round 1')
+      expect(countCrosscheckCommitsForPR(tmpDir, 'base'))
+        .toBe(countCrosscheckCommitsForPRDetailed(tmpDir, 'base').count)
+    })
   })
 
   it('counts only [crosscheck] commits ahead of base (ignores base history)', () => {
@@ -345,14 +402,16 @@ describe('buildWorkflowCompleteEvent', () => {
 })
 
 describe('resolveFixVendor', () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
     },
     routing: { fallback_reviewer: fallbackReviewer },
-  }) as any
+    // Partial fixture: these resolvers read only vendors.* and routing.*, and
+    // building a whole Config here would bury what the case is actually about.
+  }) as unknown as Config
 
   describe('human-origin fallback — respects routing.fallback_reviewer', () => {
     it('auto (default): prefers codex when both enabled', () => {
@@ -412,5 +471,206 @@ describe('resolveFixVendor', () => {
       // 'codex' directly, so usedHumanFallback is false even though origin is human
       expect(resolveFixVendor('origin', 'human', cfg(false, true), 'codex')).toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
+  })
+})
+
+describe('resolveConflictResolveVendor', () => {
+   
+  const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
+    vendors: {
+      claude: { enabled: claudeEnabled },
+      codex: { enabled: codexEnabled },
+    },
+    routing: { fallback_reviewer: fallbackReviewer },
+    // Partial fixture: these resolvers read only vendors.* and routing.*, and
+    // building a whole Config here would bury what the case is actually about.
+  }) as unknown as Config
+
+  describe('human-origin fallback — the no_vendor regression', () => {
+    // The default workflow gives conflict-resolve `reviewer: origin`. A PR whose
+    // origin cannot be attributed resolved to null and skipped with 'no_vendor',
+    // even with routing.fallback_reviewer set — the fix step honoured it, this
+    // step did not.
+    it('explicit claude: resolves instead of skipping with no_vendor', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true, 'claude')))
+        .toEqual({ vendor: 'claude', usedHumanFallback: true })
+    })
+
+    it('auto: picks claude even with codex enabled — codex cannot resolve conflicts', () => {
+      // Diverges from resolveFixVendor's codex-first auto path on purpose: routing
+      // to codex here only trades a 'no_vendor' skip for a
+      // 'codex_conflict_resolve_unsupported' one.
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true)))
+        .toEqual({ vendor: 'claude', usedHumanFallback: true })
+    })
+
+    it('auto with claude disabled: no vendor supports the step', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(false, true)))
+        .toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('explicit codex: honoured, so the caller reports the precise unsupported skip', () => {
+      // An explicit fallback_reviewer is an operator decision. Silently swapping it
+      // for claude would hide a misconfiguration behind a step that works anyway.
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true, 'codex')))
+        .toEqual({ vendor: 'codex', usedHumanFallback: true })
+    })
+
+    it('null fallback_reviewer: still skips — opting out stays opt-out', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true, null)))
+        .toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('explicit claude but claude disabled: no fallback invented', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(false, true, 'claude')))
+        .toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('returns null when both vendors disabled regardless of fallback_reviewer', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(false, false)))
+        .toEqual({ vendor: null, usedHumanFallback: false })
+    })
+  })
+
+  describe('scoped to reviewer:origin only', () => {
+    it('reviewer:claude with human origin resolves directly, no fallback', () => {
+      expect(resolveConflictResolveVendor('claude', 'human', cfg(true, true)))
+        .toEqual({ vendor: 'claude', usedHumanFallback: false })
+    })
+
+    it('reviewer:auto with human origin uses the resolveReviewer auto path unchanged', () => {
+      // 'auto' encodes explicit intent, so it keeps resolveReviewer's codex-first
+      // path and the caller skips with codex_conflict_resolve_unsupported.
+      expect(resolveConflictResolveVendor('auto', 'human', cfg(true, true)))
+        .toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+  })
+
+  describe('attributed origins', () => {
+    it('claude origin resolves to claude', () => {
+      expect(resolveConflictResolveVendor('origin', 'claude', cfg(true, true)))
+        .toEqual({ vendor: 'claude', usedHumanFallback: false })
+    })
+
+    // Regression (#284): `Crosscheck-Reviewer: codex` detection makes a
+    // crosscheck-authored Codex fix PR resolve to origin 'codex'. Conflict
+    // resolution is Claude-only, so returning codex would skip the step and leave
+    // the PR's conflicts unresolved (before #284 these PRs were 'human' and the
+    // auto fallback picked Claude). Because the assignment came from origin
+    // detection, substitute the capable vendor rather than skip.
+    it('codex origin substitutes claude — codex cannot resolve conflicts', () => {
+      expect(resolveConflictResolveVendor('origin', 'codex', cfg(true, true)))
+        .toEqual({ vendor: 'claude', usedHumanFallback: false, substitutedOriginVendor: 'codex' })
+    })
+
+    it('codex origin with claude disabled: no capable vendor, stays codex so the caller reports the precise skip', () => {
+      expect(resolveConflictResolveVendor('origin', 'codex', cfg(false, true)))
+        .toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+  })
+
+  describe('smartSwitchFallback takes precedence', () => {
+    it('resolves via resolveReviewer before the human-origin branch fires', () => {
+      expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true, 'claude'), 'codex'))
+        .toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+  })
+})
+
+describe('summariseStepOutcomes', () => {
+  const results = (entries: Record<string, StepResult>): Record<string, StepResult> => entries
+
+  it('separates steps that ran from steps that skipped', () => {
+    const out = summariseStepOutcomes(['review', 'fix', 'recheck'], results({
+      review: { verdict: 'BLOCK' },
+      fix: { applied_count: 2 },
+      recheck: { skipped: true, skipReason: 'when_condition' },
+    }))
+    expect(out.ran).toEqual(['review', 'fix'])
+    expect(out.skipped).toEqual([{ step: 'recheck', reason: 'when_condition' }])
+  })
+
+  // The reported defect: `crosscheck resolve` dispatches conflict-resolve alone,
+  // it skips for want of a vendor, and verdict is null either way — so only the
+  // empty `ran` list distinguishes this from a review that found nothing.
+  it('reports an empty ran list when every dispatched step skipped', () => {
+    const out = summariseStepOutcomes(['conflict-resolve'], results({
+      'conflict-resolve': { skipped: true, skipReason: 'no_vendor' },
+    }))
+    expect(out.ran).toEqual([])
+    expect(out.skipped).toEqual([{ step: 'conflict-resolve', reason: 'no_vendor' }])
+  })
+
+  it('counts a dispatched step with no recorded result as ran', () => {
+    // Absence of a result is not evidence of a skip; only an explicit skip is.
+    // Guessing the other way would report a working run as a no-op.
+    const out = summariseStepOutcomes(['review'], results({}))
+    expect(out.ran).toEqual(['review'])
+    expect(out.skipped).toEqual([])
+  })
+
+  it('falls back to "unknown" when a skip recorded no reason', () => {
+    const out = summariseStepOutcomes(['fix'], results({ fix: { skipped: true } }))
+    expect(out.skipped).toEqual([{ step: 'fix', reason: 'unknown' }])
+  })
+
+  it('deduplicates a step dispatched more than once', () => {
+    const out = summariseStepOutcomes(['fix', 'fix'], results({ fix: { applied_count: 1 } }))
+    expect(out.ran).toEqual(['fix'])
+  })
+
+  it('returns empty lists when no step was dispatched', () => {
+    expect(summariseStepOutcomes([], results({}))).toEqual({ ran: [], skipped: [] })
+  })
+})
+
+describe('mergeStepOutcomes', () => {
+  // The crazy/halfcrazy loops re-enter runWorkflow, so the completion line has to
+  // reflect the whole invocation. Reporting only the first round called a run
+  // that later applied a fix "no step ran".
+  it('counts a step that ran in a later round as ran', () => {
+    const merged = mergeStepOutcomes(
+      { ran: [], skipped: [{ step: 'fix', reason: 'no_review_comment' }] },
+      { ran: ['fix'], skipped: [] },
+    )
+    expect(merged).toEqual({ ran: ['fix'], skipped: [] })
+  })
+
+  it('keeps a step skipped when it skipped in every round', () => {
+    const merged = mergeStepOutcomes(
+      { ran: [], skipped: [{ step: 'conflict-resolve', reason: 'no_vendor' }] },
+      { ran: [], skipped: [{ step: 'conflict-resolve', reason: 'no_vendor' }] },
+    )
+    expect(merged?.skipped).toEqual([{ step: 'conflict-resolve', reason: 'no_vendor' }])
+  })
+
+  // Listing one step twice reads as two distinct problems.
+  it('reports a repeatedly skipped step once, with its latest reason', () => {
+    const merged = mergeStepOutcomes(
+      { ran: [], skipped: [{ step: 'fix', reason: 'when_condition' }] },
+      { ran: [], skipped: [{ step: 'fix', reason: 'no_vendor' }] },
+    )
+    expect(merged?.skipped).toEqual([{ step: 'fix', reason: 'no_vendor' }])
+  })
+
+  it('does not duplicate a step that ran in both rounds', () => {
+    const merged = mergeStepOutcomes({ ran: ['review'], skipped: [] }, { ran: ['review'], skipped: [] })
+    expect(merged?.ran).toEqual(['review'])
+  })
+
+  it('keeps first-seen ordering across both sides', () => {
+    const merged = mergeStepOutcomes(
+      { ran: ['review'], skipped: [{ step: 'fix', reason: 'when_condition' }] },
+      { ran: ['recheck'], skipped: [{ step: 'conflict-resolve', reason: 'no_conflicts' }] },
+    )
+    expect(merged?.ran).toEqual(['review', 'recheck'])
+    expect(merged?.skipped.map(s => s.step)).toEqual(['fix', 'conflict-resolve'])
+  })
+
+  it('passes through when either side is absent', () => {
+    const only = { ran: ['review'], skipped: [] }
+    expect(mergeStepOutcomes(undefined, only)).toBe(only)
+    expect(mergeStepOutcomes(only, undefined)).toBe(only)
+    expect(mergeStepOutcomes(undefined, undefined)).toBeUndefined()
   })
 })

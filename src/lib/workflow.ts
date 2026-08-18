@@ -110,7 +110,10 @@ export function loadHarnessSection(ref: string, baseDir?: string): string | null
     const harnesPath = join(dir, filePart)
     if (!existsSync(harnesPath)) continue
     const raw = readFileSync(harnesPath, 'utf8')
-    const sectionRegex = new RegExp(`^## ${section}\s*$`, 'm')
+    // `\\s`, not `\s`: this is a template literal, so `\s` is just `s` and the
+    // pattern became `^## <section>s*$` — it failed on a heading with trailing
+    // whitespace and matched `## Overviewsss`. Caught by no-useless-escape.
+    const sectionRegex = new RegExp(`^## ${section}\\s*$`, 'm')
     const nextSectionRegex = /^## /m
     const start = raw.search(sectionRegex)
     if (start === -1) return null
@@ -155,6 +158,10 @@ export interface StepResult {
   commentId?: number
   applied_count?: number
   skipped?: boolean
+  /** Why the step was skipped, matching the reason on its step_skipped log entry
+   *  (e.g. 'no_vendor', 'when_condition', 'no_conflicts'). Set whenever
+   *  `skipped` is — it is what lets the CLI say a run did nothing and why. */
+  skipReason?: string
   tokens_used?: number
   input_tokens?: number
   output_tokens?: number
@@ -184,4 +191,28 @@ export function evaluateWhen(expr: string, results: Record<string, StepResult>):
     case '<=': return Number(actual) <= Number(expected)
     default:   return true
   }
+}
+
+
+// Only review and recheck steps post a verdict, and only a verdict reaches Linear.
+// `crosscheck fix` and `crosscheck resolve` run workflows that can never write, so
+// they must not be aborted by a missing credential or a Linear outage.
+export function canWriteVerdict(steps: ReadonlyArray<{ type: string }> | undefined): boolean {
+  if (!steps) return true
+  return steps.some(s => s.type === 'review' || s.type === 'recheck')
+}
+
+
+// The single question every Linear auth gate should ask. Three separate checks
+// drifted apart across run/watch/review/runner: enablement, whether the selected
+// workflow can produce a verdict, and whether any verdict is even configured to
+// post. `comment_on: []` is valid and means nothing ever posts, so a run with it
+// must not mint a token or abort on a missing credential.
+export function linearWritePossible(
+  linear: { enabled: boolean; comment_on: readonly string[] },
+  steps: ReadonlyArray<{ type: string }> | undefined,
+): boolean {
+  if (!linear.enabled) return false
+  if (linear.comment_on.length === 0) return false
+  return canWriteVerdict(steps)
 }

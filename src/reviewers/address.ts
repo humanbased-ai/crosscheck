@@ -39,7 +39,7 @@ export async function runAddressStep(
   prTitle: string,
   reviewComment: string,
   instructions: string,
-  config: Config,
+  _config: Config,
 ): Promise<{ appliedCount: number }> {
   let diff = ''
   try {

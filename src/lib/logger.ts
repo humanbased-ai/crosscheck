@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync, existsSync } from 'fs'
+import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import type { LogsConfig } from '../config/schema.js'
@@ -78,8 +78,18 @@ export function isExtendedLoggingEnabled(): boolean {
   return _extendedEnabled
 }
 
+// Strips the userinfo out of any https URL in the message before classification.
+// A clone URL carries `x-access-token` as its literal username, which the auth
+// pattern's bare `token` matched — so a clone that failed for any reason (SSL,
+// timeout, 403) was filed as an auth failure, and the same SSL error read
+// `network` on a push and `auth` on a clone. Only the copy used for matching is
+// rewritten; log redaction is redactCloneSecrets' job and happens elsewhere.
+function withoutUrlCredentials(message: string): string {
+  return message.replace(/https:\/\/[^\s/@]+(?::[^\s/@]*)?@/g, 'https://')
+}
+
 export function classifyError(message: string): ErrorCategory {
-  const m = message.toLowerCase()
+  const m = withoutUrlCredentials(message.toLowerCase())
   // Specific, transient model-API conditions are matched BEFORE the broad auth
   // check below. Their error bodies routinely contain generic words like "token"
   // (token usage, max_tokens) that the auth match would otherwise swallow, which
@@ -92,6 +102,12 @@ export function classifyError(message: string): ErrorCategory {
   // Git-specific errors (non-fast-forward, clone failures) — checked before auth
   // since git errors may contain "token" in the URL but aren't auth issues.
   if (/rejected.*fetch first|updates were rejected.*remote contains work|non-fast-forward|curl 16|curl 18|http2 framing|early eof|rpc failed|fetch-pack: invalid/.test(m)) return 'git'
+  // Git's own credential rejections. Without these, removing the URL-embedded
+  // `token` above would leave a genuinely unauthenticated clone falling through to
+  // `subprocess` — the accidental match was masking the fact that these were never
+  // detected on their own. `permission denied (publickey)` is an SSH key failure,
+  // i.e. auth, and does not collide with the scope-based `permission` check below.
+  if (/authentication failed|could not read (?:username|password)|invalid username or password|permission denied \(publickey\)/.test(m)) return 'auth'
   if (/bad credentials|401|not logged in|not authenticated|github_token|authentication required|token|auth failure/.test(m)) return 'auth'
   if (/admin:org|admin:repo|forbidden|403|insufficient scope|requires.*scope|write:org/.test(m)) return 'permission'
   // Network check must precede timeout: subprocess stderr containing 'fetch failed'

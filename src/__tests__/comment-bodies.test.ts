@@ -1,10 +1,40 @@
 import { describe, it, expect } from 'vitest'
 import {
+  buildAttributionFooter,
   buildFixAppliedCommentBody,
+  buildFixFailedCommentBody,
   buildConflictResolvedCommentBody,
   buildRetriedReviewBanner,
   buildReviewFailedCommentBody,
 } from '../lib/comment-bodies.js'
+import type { SkillMetadata } from '../skills/broker.js'
+
+const SKILL: SkillMetadata = {
+  name: 'code-review-skill',
+  description: 'Review guidance',
+  author: 'awesome-skills',
+  license: 'MIT',
+  source: 'https://github.com/awesome-skills/code-review-skill',
+  revision: 'a'.repeat(40),
+  integrity: `sha256:${'b'.repeat(64)}`,
+}
+
+describe('buildAttributionFooter', () => {
+  it('renders the rule, the vendor sentence, the run details and the skill receipt', () => {
+    expect(buildAttributionFooter({
+      action: 'Fixed', vendor: 'claude', model: 'claude-opus-4-8', effort: 'high', skills: [SKILL],
+    })).toBe(
+      '---\n_Fixed with [Claude Code](https://claude.ai/code) via [Crosscheck](https://github.com/humanbased-ai/crosscheck)_ _(Opus 4.8 · high effort)_'
+      + '\n\n_Skills: code-review-skill (by @awesome-skills, MIT)_',
+    )
+  })
+
+  it('omits the run details and the receipt when neither is known', () => {
+    expect(buildAttributionFooter({ action: 'Reviewed', vendor: 'codex' })).toBe(
+      '---\n_Reviewed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck](https://github.com/humanbased-ai/crosscheck)_',
+    )
+  })
+})
 
 describe('buildFixAppliedCommentBody', () => {
   it('includes a 7-char sha link, applied count, and the fix_applied annotation tag', () => {
@@ -119,6 +149,15 @@ describe('buildFixAppliedCommentBody', () => {
     expect(body).toContain('Fixed with [Claude Code]')
   })
 
+  it('reports the fix model, effort and skills in the attribution', () => {
+    const body = buildFixAppliedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), appliedCount: 1, vendor: 'codex',
+      model: 'gpt-5.6-terra', effort: 'xhigh', skills: [SKILL],
+    })
+    expect(body).toContain('_Fixed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck](https://github.com/humanbased-ai/crosscheck)_ _(gpt-5.6-terra · xhigh effort)_')
+    expect(body).toContain('_Skills: code-review-skill (by @awesome-skills, MIT)_')
+  })
+
   it('does not extract list items that appear inside fenced code blocks', () => {
     const reviewCommentBody = [
       '- Real issue: missing null check',
@@ -153,6 +192,15 @@ describe('buildConflictResolvedCommentBody', () => {
     expect(body).toContain('- `src/b.ts`')
     expect(body).toContain('[`0123456`]')
     expect(body).toContain('<!-- crosscheck: conflict_resolved -->')
+  })
+
+  it('matches the review attribution wording and reports model, effort and skills', () => {
+    const body = buildConflictResolvedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), conflictCount: 1, files: ['x.ts'],
+      model: 'claude-opus-4-8', effort: 'high', skills: [SKILL],
+    })
+    expect(body).toContain('_Resolved with [Claude Code](https://claude.ai/code) via [Crosscheck](https://github.com/humanbased-ai/crosscheck)_ _(Opus 4.8 · high effort)_')
+    expect(body).toContain('_Skills: code-review-skill (by @awesome-skills, MIT)_')
   })
 
   it('pluralizes conflict/conflicts correctly', () => {
@@ -265,3 +313,17 @@ describe('buildReviewFailedCommentBody', () => {
   })
 })
 
+
+
+describe('buildFixFailedCommentBody', () => {
+  it('reports rather than claims credit, and names the model and effort that timed out', () => {
+    const body = buildFixFailedCommentBody({
+      prUrl: 'https://github.com/o/r/pull/7', vendor: 'claude', model: 'claude-opus-4-8', effort: 'max', skills: [SKILL],
+    })
+    expect(body).toContain('⚠️ **Auto-fix failed**')
+    expect(body).toContain('crosscheck run https://github.com/o/r/pull/7')
+    expect(body).toContain('_Reported by [Crosscheck](https://github.com/humanbased-ai/crosscheck)_ _(Opus 4.8 · max effort)_')
+    expect(body).not.toContain('Fixed with')
+    expect(body).toContain('<!-- crosscheck: fix_failed -->')
+  })
+})
