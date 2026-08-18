@@ -858,7 +858,7 @@ export async function pushWithNonFastForwardHandling(params: {
       log(chalk.yellow(`⚠  push rejected (non-fast-forward) — fetching latest and rebasing...`))
       
       // Capture the original HEAD (the fix commit) before attempting to rebase
-      const fixCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: tmpDir, env, stdio: 'pipe' }).trim()
+      const fixCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: tmpDir, env, encoding: 'utf8', stdio: 'pipe' }).trim()
       
       try {
         // Fetch the latest state of the branch
