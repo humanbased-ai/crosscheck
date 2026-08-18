@@ -822,7 +822,9 @@ function isNonFastForwardError(message: string): boolean {
 
 // Push with handling for non-fast-forward rejection. When the remote has new
 // commits, we fetch + rebase onto the PR branch and retry the push once.
-async function pushWithNonFastForwardHandling(params: {
+// Exported for the regression test that reproduces the shallow-clone case where
+// `origin/<branch>` does not exist as a tracking ref.
+export async function pushWithNonFastForwardHandling(params: {
   tmpDir: string
   branch: string
   token: string
@@ -855,11 +857,31 @@ async function pushWithNonFastForwardHandling(params: {
       })
       log(chalk.yellow(`⚠  push rejected (non-fast-forward) — fetching latest and rebasing...`))
       
+      // Capture the original HEAD (the fix commit) before attempting to rebase
+      const fixCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: tmpDir, env, stdio: 'pipe' }).trim()
+      
       try {
         // Fetch the latest state of the branch
         execFileSync('git', ['fetch', 'origin', branch], { cwd: tmpDir, env, stdio: 'pipe' })
-        // Rebase our changes onto the latest branch state
-        execFileSync('git', ['rebase', `origin/${branch}`], { cwd: tmpDir, env, stdio: 'pipe' })
+        
+        try {
+          // Rebase our changes onto the latest branch state. Rebase onto FETCH_HEAD,
+          // NOT `origin/${branch}`: crosscheck's clone fetches the PR head without a
+          // fetch refspec, so no `refs/remotes/origin/<branch>` tracking ref exists —
+          // `git rebase origin/<branch>` fails with `invalid upstream` and the whole
+          // land-on-branch push falls back to opening a separate fix PR. The fetch on
+          // the line above sets FETCH_HEAD to exactly the tip we just pulled, so that
+          // is the correct (and always-present) rebase target.
+          execFileSync('git', ['rebase', 'FETCH_HEAD'], { cwd: tmpDir, env, stdio: 'pipe' })
+        } catch (rebaseConflictErr: unknown) {
+          // If rebase fails (e.g., due to conflicts), abort it and restore the fix commit.
+          // Otherwise the outer catch's fallback logic sees a repo in in-progress-rebase
+          // state and incorrectly treats HEAD~1 as the fix commit.
+          execFileSync('git', ['rebase', '--abort'], { cwd: tmpDir, env, stdio: 'pipe' })
+          execFileSync('git', ['reset', '--hard', fixCommitSha], { cwd: tmpDir, env, stdio: 'pipe' })
+          throw rebaseConflictErr
+        }
+        
         // Retry the push
         execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { cwd: tmpDir, env })
         fileLog({
