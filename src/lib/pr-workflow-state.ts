@@ -72,7 +72,10 @@ export function shaCovers(recordSha: string | undefined, currentSha: string): bo
   return recordSha.startsWith(currentSha) || currentSha.startsWith(recordSha)
 }
 
-function commentToRecord(comment: { id: number; body: string; created_at: string }): StepRecord | null {
+// Exported for human-feedback.ts: the single classifier for "is this comment one
+// of crosscheck's own step records" — reused there so a PR reply never gets
+// misread as automation, or a crosscheck comment misread as a human opinion.
+export function commentToRecord(comment: { id: number; body: string; created_at: string }): StepRecord | null {
   const fields = parseAnnotationFields(comment.body)
 
   if (!fields) {

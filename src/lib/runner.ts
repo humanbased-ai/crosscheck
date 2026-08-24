@@ -14,6 +14,7 @@ import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
+import { fetchCommentsAfter, selectHumanFeedback, formatHumanFeedback } from '../lib/human-feedback.js'
 import { autoFixBranchName, autoFixPRIntro, sourcePRHasMerged } from '../github/superseded-fix-pr.js'
 import { verifyReviewedSha, isVerifiedReviewedSha, reviewedShaRejection } from '../github/reviewed-sha.js'
 import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
@@ -1170,15 +1171,38 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let effort: string | undefined
       let retried: { timeoutMs: number; delayMs: number } | undefined
       const skillSession = skillSessionFor(step.name, effectiveType)
+
+      // Hoisted up from the post-review linking code below (which still reuses
+      // this value): a recheck needs to know which review it is rechecking
+      // before it runs, not just when linking the posted comment afterward, so
+      // it can pull in anything the PR author (or their agent) said in reply.
+      let priorReviewId: number | undefined
+      if (isRecheck) {
+        priorReviewId = Object.values(results).reverse().find(r => r.commentId !== undefined)?.commentId
+        if (priorReviewId === undefined) {
+          priorReviewId = await getLastCrossCheckCommentId(owner, repoName, prNumber, token)
+        }
+      }
+      let humanFeedbackBlock = ''
+      if (priorReviewId !== undefined) {
+        try {
+          const commentsAfter = await fetchCommentsAfter(owner, repoName, prNumber, token, priorReviewId)
+          humanFeedbackBlock = formatHumanFeedback(selectHumanFeedback(commentsAfter))
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'human_feedback_fetch_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
+        }
+      }
+      const reviewContext = [ctx.issueContext, humanFeedbackBlock].filter(Boolean).join('\n\n') || undefined
+
       // Under `quality.mode: smart` the PR's class picks the tier; under fixed
       // this is config.quality untouched.
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, codexVendor, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext, skillSession, config.skills.codex_full_access))
+          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, codexVendor, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, reviewContext, skillSession, config.skills.codex_full_access))
           inputTokens = undefined
           outputTokens = undefined
         } else {
-          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, effort, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, quality, claudeVendor, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, ctx.issueContext, skillSession))
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, effort, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, quality, claudeVendor, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, reviewContext, skillSession))
         }
       }
 
@@ -1287,16 +1311,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       } else {
         onPhaseChange(isRecheck ? 'posting recheck...' : 'posting comment...', phaseUpdate)
         const octokit = createGithubClient(token)
-        // For rechecks: look up the original review comment ID so the recheck
-        // can link back to it. Check in-run results first (single-run pipelines),
-        // then fall back to GitHub (cross-run: recheck triggered by a new push).
-        let priorReviewId: number | undefined
-        if (isRecheck) {
-          priorReviewId = Object.values(results).reverse().find(r => r.commentId !== undefined)?.commentId
-          if (priorReviewId === undefined) {
-            priorReviewId = await getLastCrossCheckCommentId(owner, repoName, prNumber, token)
-          }
-        }
+        // priorReviewId (for rechecks: the original review comment to link back
+        // to) is already resolved above, before the review ran — reused here
+        // rather than looked up a second time.
         // Pre-compute next_step for the annotation so readers can skip full
         // comment scans: find the first remaining step whose when-condition holds.
         const currentStepIdx = steps.indexOf(step)
@@ -1442,6 +1459,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
       if (!reviewCommentBody) { skipFix('no_review_comment'); continue }
 
+      // Replies the PR author (or their agent) posted since that review — e.g.
+      // "already fixed in the last commit" or "not applicable here" — so the
+      // fixer doesn't blindly redo work the thread already settled.
+      let fixHumanFeedback = ''
+      if (reviewCommentId !== undefined) {
+        try {
+          const commentsAfter = await fetchCommentsAfter(owner, repoName, prNumber, token, reviewCommentId)
+          fixHumanFeedback = formatHumanFeedback(selectHumanFeedback(commentsAfter))
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'human_feedback_fetch_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
+        }
+      }
+
       // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.
       // Use 'origin' to fix with the same vendor that authored the PR (recommended default).
       // resolveFixVendor extends resolveReviewer with a human-origin fallback so human-authored
@@ -1497,7 +1527,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           return runCodexFixStep(
             tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
             codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs, skillSession,
-            codexVendor.effort, config.skills.codex_full_access,
+            codexVendor.effort, config.skills.codex_full_access, fixHumanFeedback,
           )
         }
         // roundConfig, not config: runFixStep reads vendors.claude.effort and
@@ -1505,6 +1535,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         return runFixStep(
           tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
           roundConfig, claudeFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs, skillSession,
+          fixHumanFeedback,
         )
       }
 
