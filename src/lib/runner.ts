@@ -1187,7 +1187,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (priorReviewId !== undefined) {
         try {
           const commentsAfter = await fetchCommentsAfter(owner, repoName, prNumber, token, priorReviewId)
-          humanFeedbackBlock = formatHumanFeedback(selectHumanFeedback(commentsAfter))
+          humanFeedbackBlock = formatHumanFeedback(selectHumanFeedback(commentsAfter, pr.user.login))
         } catch (err) {
           fileLog({ level: 'warn', event: 'human_feedback_fetch_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
         }
@@ -1466,7 +1466,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (reviewCommentId !== undefined) {
         try {
           const commentsAfter = await fetchCommentsAfter(owner, repoName, prNumber, token, reviewCommentId)
-          fixHumanFeedback = formatHumanFeedback(selectHumanFeedback(commentsAfter))
+          fixHumanFeedback = formatHumanFeedback(selectHumanFeedback(commentsAfter, pr.user.login))
         } catch (err) {
           fileLog({ level: 'warn', event: 'human_feedback_fetch_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
         }
