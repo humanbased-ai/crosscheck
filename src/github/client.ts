@@ -851,7 +851,7 @@ export async function getLastCrossCheckReviewComment(
   return lastComment
 }
 
-export type RawPRComment = { id: number; body: string; created_at: string }
+export type RawPRComment = { id: number; body: string; created_at: string; user: { login: string }; author_association: string }
 export type RawPRCommit = {
   sha: string
   commit: {
@@ -888,6 +888,25 @@ export async function fetchPRCommentPage(
   const link = res.headers.get('link') ?? ''
   const m = link.match(/page=(\d+)>;\s*rel="last"/)
   return { comments, lastPage: m ? parseInt(m[1], 10) : null }
+}
+
+/**
+ * Fetch a single PR/issue comment by id. Used to resolve an anchor comment's
+ * `created_at` so callers can page comments after it via `since` instead of
+ * scanning from page 1 — see human-feedback.ts's fetchCommentsAfter.
+ */
+export async function fetchIssueComment(
+  owner: string,
+  repo: string,
+  commentId: number,
+  token: string,
+): Promise<RawPRComment | null> {
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/issues/comments/${commentId}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+  )
+  if (!res.ok) return null
+  return await res.json() as RawPRComment
 }
 
 export async function fetchPRCommitPage(
