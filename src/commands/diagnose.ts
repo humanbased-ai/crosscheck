@@ -2,7 +2,6 @@ import { readdirSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import chalk from 'chalk'
-import { INDICATORS } from '../lib/languages.js'
 import { saveToIssueQueue } from '../lib/issue-queue.js'
 import type { StepRecord, NextStepResult } from '../lib/pr-workflow-state.js'
 
@@ -134,7 +133,7 @@ function detectLanguagesFromCommands(errors: ErrorEntry[]): string[] {
   return [...detected]
 }
 
-function buildSuggestions(errors: ErrorEntry[], languages: string[]): Suggestion[] {
+function buildSuggestions(errors: ErrorEntry[], _languages: string[]): Suggestion[] {
   const suggestions: Suggestion[] = []
   const seen = new Set<string>()
 

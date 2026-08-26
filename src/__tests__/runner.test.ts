@@ -16,8 +16,10 @@ import {
   summariseStepOutcomes,
   mergeStepOutcomes,
   resolveFixLanding,
+  pushWithNonFastForwardHandling,
 } from '../lib/runner.js'
 import type { StepResult } from '../lib/workflow.js'
+import type { Config } from '../config/schema.js'
 
 describe('isRetryableFixError', () => {
   it('returns false for auth failure errors', () => {
@@ -401,14 +403,16 @@ describe('buildWorkflowCompleteEvent', () => {
 })
 
 describe('resolveFixVendor', () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
     },
     routing: { fallback_reviewer: fallbackReviewer },
-  }) as any
+    // Partial fixture: these resolvers read only vendors.* and routing.*, and
+    // building a whole Config here would bury what the case is actually about.
+  }) as unknown as Config
 
   describe('human-origin fallback — respects routing.fallback_reviewer', () => {
     it('auto (default): prefers codex when both enabled', () => {
@@ -472,14 +476,16 @@ describe('resolveFixVendor', () => {
 })
 
 describe('resolveConflictResolveVendor', () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
     },
     routing: { fallback_reviewer: fallbackReviewer },
-  }) as any
+    // Partial fixture: these resolvers read only vendors.* and routing.*, and
+    // building a whole Config here would bury what the case is actually about.
+  }) as unknown as Config
 
   describe('human-origin fallback — the no_vendor regression', () => {
     // The default workflow gives conflict-resolve `reviewer: origin`. A PR whose
@@ -726,5 +732,90 @@ describe('mergeStepOutcomes', () => {
       expect(mergeStepOutcomes({ ran: ['fix'], skipped: [] }, { ran: ['fix'], skipped: [] }))
         .toEqual({ ran: ['fix'], skipped: [] })
     })
+  })
+})
+
+describe('pushWithNonFastForwardHandling', () => {
+  // Reproduces the production scenario behind the recurring "crosscheck opened a
+  // separate fix PR": crosscheck's shallow PR clone fetches the head WITHOUT a
+  // fetch refspec, so `refs/remotes/origin/<branch>` never exists. When the author
+  // pushes while a fix is being generated, the fix push is rejected non-fast-forward
+  // and the recovery must fetch + rebase + retry. Rebasing onto `origin/<branch>`
+  // died with `invalid upstream` here (no tracking ref) and fell back to a PR;
+  // rebasing onto FETCH_HEAD recovers and lands the fix on the branch.
+  let originDir: string
+  let workDir: string
+  const noop = (): void => undefined
+
+  const git = (dir: string, ...args: string[]): string =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+
+  const commitIn = (dir: string, file: string, content: string, message: string): string => {
+    writeFileSync(join(dir, file), content)
+    git(dir, 'add', file)
+    git(dir, '-c', 'user.email=t@e.co', '-c', 'user.name=T', '-c', 'commit.gpgsign=false', 'commit', '-m', message)
+    return git(dir, 'rev-parse', 'HEAD').trim()
+  }
+
+  beforeEach(() => {
+    // Bare "origin" with branch `main` at C1.
+    originDir = mkdtempSync(join(tmpdir(), 'crosscheck-nonff-origin-'))
+    git(originDir, 'init', '-q', '--bare', '-b', 'main')
+
+    const seedDir = mkdtempSync(join(tmpdir(), 'crosscheck-nonff-seed-'))
+    git(seedDir, 'init', '-q', '-b', 'main')
+    commitIn(seedDir, 'base.txt', 'c1\n', 'C1')
+    git(seedDir, 'remote', 'add', 'origin', originDir)
+    git(seedDir, 'push', '-q', 'origin', 'main')
+
+    // crosscheck-like work repo: fetch the branch (sets FETCH_HEAD, NO
+    // refs/remotes/origin/main), branch from it, and add a fix commit on top of C1.
+    workDir = mkdtempSync(join(tmpdir(), 'crosscheck-nonff-work-'))
+    git(workDir, 'init', '-q', '-b', 'work')
+    git(workDir, 'remote', 'add', 'origin', originDir)
+    // Drop the default fetch refspec so `git fetch origin main` updates only
+    // FETCH_HEAD and never creates refs/remotes/origin/main — the exact shallow-
+    // clone state in production where `git rebase origin/main` failed.
+    git(workDir, 'config', '--unset-all', 'remote.origin.fetch')
+    git(workDir, 'fetch', '-q', 'origin', 'main')
+    git(workDir, 'checkout', '-q', '-B', 'work', 'FETCH_HEAD')
+    commitIn(workDir, 'fix.txt', 'the fix\n', '[crosscheck] fix')
+
+    // Author advances origin/main to C2 while the fix was being made.
+    commitIn(seedDir, 'base.txt', 'c2\n', 'C2')
+    git(seedDir, 'push', '-q', 'origin', 'main')
+    rmSync(seedDir, { force: true, recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(originDir, { force: true, recursive: true })
+    rmSync(workDir, { force: true, recursive: true })
+  })
+
+  it('recovers from a non-fast-forward by rebasing onto FETCH_HEAD and lands the fix', async () => {
+    // Precondition: the tracking ref the old code rebased onto genuinely does not exist.
+    expect(() => git(workDir, 'rev-parse', 'origin/main')).toThrow()
+
+    const events: string[] = []
+    await pushWithNonFastForwardHandling({
+      tmpDir: workDir,
+      branch: 'main',
+      token: 'unused-for-local-remote',
+      log: noop,
+      fileLog: (entry) => events.push(entry.event),
+      owner: 'o',
+      repoName: 'r',
+      prNumber: 1,
+    })
+
+    // It hit the non-ff path and recovered (did NOT throw / fall back).
+    expect(events).toContain('push_non_fast_forward')
+    expect(events).toContain('push_rebase_succeeded')
+    expect(events).not.toContain('push_rebase_failed')
+
+    // The fix and the author's C2 both landed on origin/main.
+    const originLog = git(originDir, 'log', '--format=%s', 'main')
+    expect(originLog).toContain('[crosscheck] fix')
+    expect(originLog).toContain('C2')
   })
 })

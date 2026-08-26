@@ -279,6 +279,7 @@ function printNoActionablePRsWarning(fromCache: boolean): void {
 
 function parseVerdictFromOutput(output: string | void): string | null {
   if (!output) return null
+  // eslint-disable-next-line no-control-regex -- matching the ESC byte is the point
   const plain = output.replace(/\x1B\[[0-9;]*m/g, '')
   const m = plain.match(/\bverdict\s+\S*\s*(APPROVE|NEEDS[\s_]+WORK|BLOCK)\b/i)
   if (!m) return null
@@ -712,18 +713,6 @@ function reviewerLabel(pr: PRStatus): string {
 
 function fixerLabel(pr: PRStatus): string {
   return pr.latestAnnotation?.origin ?? 'origin'
-}
-
-function checksLabel(pr: PRStatus): string {
-  if (!pr.merge) return 'unknown'
-  if (pr.merge.mergeStateStatus === 'clean' || pr.merge.mergeStateStatus === 'has_hooks') return 'green'
-  return pr.merge.mergeStateStatus ?? 'unknown'
-}
-
-function stepsForItem(item: PreflightItem): string {
-  if (item.action === 'review') return 'review'
-  if (item.action === 'fix') return 'fix'
-  return 'recheck'
 }
 
 function formatPRSignature(pr: PRStatus): string {

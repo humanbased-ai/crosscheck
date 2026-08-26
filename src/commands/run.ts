@@ -747,7 +747,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
               try {
                 execFileSync('git', ['reset', '--hard', 'HEAD'], { cwd: tmpDir, stdio: 'pipe' })
                 execFileSync('git', ['clean', '-fd'], { cwd: tmpDir, stdio: 'pipe' })
-              } catch (resetErr) {
+              } catch {
                 fileLog({ level: 'warn', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'worktree_reset_failed', mode, round: loopRound })
                 console.log(chalk.red(`✗  could not reset worktree after fix_error — stopping`))
                 break

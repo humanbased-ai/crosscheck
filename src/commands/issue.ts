@@ -562,7 +562,7 @@ export async function runIssue(opts: {
   }
 
   // 6. Ask follow-up questions (skipped when --yes)
-  let answers: QuestionAnswers = {
+  const answers: QuestionAnswers = {
     reproducibility: 'Unknown',
     trigger: 'Unknown',
     impact: 'Degraded',

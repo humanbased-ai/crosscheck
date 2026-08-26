@@ -1,7 +1,6 @@
 // Body construction for the comment crosscheck posts back to a PR's Linear issue.
 
 import { buildAnnotation } from '../lib/annotation.js'
-import type { LinearVerdictFilter } from '../config/schema.js'
 
 export interface LinearCommentInput {
   /** `🤖 {actor} · {product}` — must lead the comment (IN-2260 step 3). */
