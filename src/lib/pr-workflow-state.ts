@@ -282,6 +282,15 @@ export async function fetchStepHistory(
  * and recheck carry verdicts, and neither is ever reconstructed from a commit
  * trailer, so the commit pagination `fetchStepHistory` pays for is dead weight
  * here.
+ *
+ * A page the API refuses throws rather than reading as an empty page. An empty
+ * read and a failed read mean opposite things to the caller — "no verdict
+ * stands" is a claim about the PR, and this function is the only thing standing
+ * behind it — so the report falls back to what step detection already read
+ * rather than printing a claim built from an error. `fetchStepHistory` keeps
+ * treating a failed page as empty: there a failed read degrades to routing a
+ * step, not to asserting something untrue, and changing it is a separate
+ * decision with its own blast radius.
  */
 export async function fetchStandingVerdictRecords(
   owner: string,
@@ -289,11 +298,15 @@ export async function fetchStandingVerdictRecords(
   prNumber: number,
   token: string,
 ): Promise<StepRecord[]> {
-  const { comments: firstPage, lastPage } = await fetchPRCommentPage(owner, repo, prNumber, token)
-  for (let page = lastPage ?? 1; page >= 1; page--) {
-    const comments = page === 1
-      ? firstPage
-      : (await fetchPRCommentPage(owner, repo, prNumber, token, { page })).comments
+  const first = await fetchPRCommentPage(owner, repo, prNumber, token)
+  if (!first.ok) throw new Error(`could not read PR comments for ${owner}/${repo}#${prNumber}`)
+  for (let page = first.lastPage ?? 1; page >= 1; page--) {
+    let comments = first.comments
+    if (page !== 1) {
+      const nextPage = await fetchPRCommentPage(owner, repo, prNumber, token, { page })
+      if (!nextPage.ok) throw new Error(`could not read PR comments page ${page} for ${owner}/${repo}#${prNumber}`)
+      comments = nextPage.comments
+    }
     // Comments come back oldest-first within a page, so the last match on the
     // newest page carrying one is the newest verdict on the PR.
     const judged = comments

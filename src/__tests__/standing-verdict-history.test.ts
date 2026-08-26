@@ -42,8 +42,12 @@ function pages(byPage: Record<number, RawPRComment[]>, lastPage: number | null) 
   fetchPRCommentPage.mockImplementation(async (_o: string, _r: string, _n: number, _t: string, opts: { page?: number } = {}) => ({
     comments: byPage[opts.page ?? 1] ?? [],
     lastPage,
+    ok: true,
   }))
 }
+
+/** What the client returns for a request GitHub refused. */
+const REFUSED = { comments: [], lastPage: null, ok: false }
 
 const OLD_SHA = 'df95a6b1111111111111111111111111111111aa'
 const HEAD_SHA = '57ef3ef2d46d35af5b0361b362c8069394d7133c'
@@ -100,6 +104,23 @@ describe('fetchStandingVerdictRecords', () => {
     pages({}, null)
 
     expect(await fetchStandingVerdictRecords('o', 'r', 7, 't')).toEqual([])
+  })
+
+  // An empty read and a failed read mean opposite things: the caller falls back
+  // to the pre-run selection on a throw, and would print "no verdict standing"
+  // on an empty array.
+  it('throws rather than reporting no verdict when the thread cannot be read', async () => {
+    fetchPRCommentPage.mockResolvedValue(REFUSED)
+
+    await expect(fetchStandingVerdictRecords('o', 'r', 7, 't')).rejects.toThrow(/could not read PR comments/)
+  })
+
+  it('throws when an earlier page fails mid-scan', async () => {
+    pages({ 1: [review(1, { verdict: 'BLOCK', sha: OLD_SHA })], 2: [unjudgedReview(2, HEAD_SHA)] }, 2)
+    fetchPRCommentPage.mockImplementationOnce(async () => ({ comments: [], lastPage: 2, ok: true }))
+      .mockImplementationOnce(async () => REFUSED)
+
+    await expect(fetchStandingVerdictRecords('o', 'r', 7, 't')).rejects.toThrow(/page 2/)
   })
 
   // Only review and recheck carry verdicts, so the commit pagination
