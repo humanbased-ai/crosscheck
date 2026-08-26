@@ -7,7 +7,7 @@ import { execa } from 'execa'
 import { parseDuration } from '../lib/durations.js'
 import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
-import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
+import { fetchStandingVerdictRecords, fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken, getLinearApiKey, getLinearCredentials } from '../config/loader.js'
 import { enrichIssueContext } from '../issues/enrich.js'
@@ -173,9 +173,14 @@ export function buildFixRecheckSteps(
  * pointing the reader at an older commit while a fresh judgment sits on HEAD.
  *
  * A successful read supersedes the pre-run selection outright rather than being
- * merged with it: it is the same fetch over the same comments, one workflow
- * later, so where the two disagree the later one is the PR's current state. The
- * pre-run selection is the fallback for a failed read, not a floor.
+ * merged with it: it is a read of the same comments, one workflow later, so
+ * where the two disagree the later one is the PR's current state. The pre-run
+ * selection is the fallback for a failed read, not a floor.
+ *
+ * That only holds if the later read can see at least as far back as the earlier
+ * one, which is why it is not `fetchStepHistory` — see
+ * `fetchStandingVerdictRecords`, whose backward scan is complete where step
+ * detection's fast path truncates at the newest annotated review.
  */
 export async function standingVerdictForReport(
   preRun: { verdict: string; sha?: string } | undefined,
@@ -859,7 +864,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         // whether it covers HEAD — are claims about now, so both are read now.
         const standingNow = await standingVerdictForReport(
           standingVerdict,
-          () => fetchStepHistory(owner, repo, number, token),
+          () => fetchStandingVerdictRecords(owner, repo, number, token),
         )
         const reportHeadSha = await headShaForStalenessClaim(standingNow, async () => {
           const { data: currentPR } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })

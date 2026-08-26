@@ -262,6 +262,50 @@ export async function fetchStepHistory(
 }
 
 /**
+ * The records a standing-verdict selection needs: at most one — the newest
+ * review or recheck that actually carries a verdict — or none if the PR has
+ * never been judged. Returned as history so `selectStandingVerdict` stays the
+ * single definition of which record governs.
+ *
+ * `fetchStepHistory` cannot answer this. Its fast path anchors on the newest
+ * review/recheck carrying `next_step` and returns that comment plus what
+ * followed it — everything step routing needs, and not enough to say what
+ * verdict stands. A review that ran and emitted no parseable `VERDICT:` line is
+ * exactly such an anchor, so truncating there hides the `BLOCK` still gating
+ * the PR behind it, and reports no verdict standing in the one state that most
+ * needs saying out loud.
+ *
+ * Paging backward stops at the first record that carries a verdict, so the
+ * answer is complete however far back it sits, while the ordinary case — a
+ * verdict on the newest page — costs one request beyond the one that discovers
+ * how many pages there are. Commit records are not fetched at all: only review
+ * and recheck carry verdicts, and neither is ever reconstructed from a commit
+ * trailer, so the commit pagination `fetchStepHistory` pays for is dead weight
+ * here.
+ */
+export async function fetchStandingVerdictRecords(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<StepRecord[]> {
+  const { comments: firstPage, lastPage } = await fetchPRCommentPage(owner, repo, prNumber, token)
+  for (let page = lastPage ?? 1; page >= 1; page--) {
+    const comments = page === 1
+      ? firstPage
+      : (await fetchPRCommentPage(owner, repo, prNumber, token, { page })).comments
+    // Comments come back oldest-first within a page, so the last match on the
+    // newest page carrying one is the newest verdict on the PR.
+    const judged = comments
+      .map(commentToRecord)
+      .filter((r): r is StepRecord => r !== null && (r.type === 'review' || r.type === 'recheck') && r.verdict !== undefined)
+      .at(-1)
+    if (judged) return [judged]
+  }
+  return []
+}
+
+/**
  * Given the PR's step history and the current HEAD SHA, determine which workflow
  * step should run next.
  *
