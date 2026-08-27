@@ -38,7 +38,7 @@ jobs:
       # short-lived credential from this job's id-token once a Trusted Publisher
       # is configured for the package on npmjs.com, and it still falls back to
       # NODE_AUTH_TOKEN when no trusted publisher matches.
-      - run: npm install -g npm@^11.5.1
+      - run: npm install -g npm@11.5.1
 
       - run: npm ci
       - run: npm run build
@@ -117,7 +117,7 @@ jobs:
       # short-lived credential from this job's id-token once a Trusted Publisher
       # is configured for the package on npmjs.com, and it still falls back to
       # NODE_AUTH_TOKEN when no trusted publisher matches.
-      - run: npm install -g npm@^11.5.1
+      - run: npm install -g npm@11.5.1
 
       - run: npm ci
       - run: npm run build
