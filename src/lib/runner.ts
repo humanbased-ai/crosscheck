@@ -357,6 +357,23 @@ export interface StepOutcomes {
   /** Steps dispatched but skipped, each with the reason recorded on its
    *  step_skipped log entry. */
   skipped: { step: string; reason: string }[]
+  /** What the steps in `ran` actually produced, keyed by step name. Omitted
+   *  when nothing was recorded, so a caller comparing whole objects still sees
+   *  the two-field shape. Names alone cannot express the outcome that matters
+   *  most here: a review that ran, cost full tokens, and yielded no parseable
+   *  verdict is in `ran` exactly like one that approved. */
+  ranDetail?: Record<string, RanStepDetail>
+}
+
+export interface RanStepDetail {
+  vendor?: string
+  tokensUsed?: number
+  /** Fix steps only. 0 means the step ran and changed nothing. */
+  appliedCount?: number
+  /** Verdict-capable steps only — the key is present iff the step recorded a
+   *  verdict field. `null` means it ran and produced no parseable verdict,
+   *  which is not the same as a step that produces no verdicts at all. */
+  verdict?: string | null
 }
 
 // stepsRun holds every step the runner dispatched, skips included; results holds
@@ -367,11 +384,23 @@ export function summariseStepOutcomes(
   results: Record<string, StepResult>,
 ): StepOutcomes {
   const outcomes: StepOutcomes = { ran: [], skipped: [] }
+  const detail: Record<string, RanStepDetail> = {}
   for (const name of new Set(stepsRun)) {
     const result = results[name]
-    if (result?.skipped) outcomes.skipped.push({ step: name, reason: result.skipReason ?? 'unknown' })
-    else outcomes.ran.push(name)
+    if (result?.skipped) { outcomes.skipped.push({ step: name, reason: result.skipReason ?? 'unknown' }); continue }
+    outcomes.ran.push(name)
+    if (!result) continue
+    const entry: RanStepDetail = {
+      ...(result.vendor !== undefined && { vendor: result.vendor }),
+      ...(result.tokens_used !== undefined && { tokensUsed: result.tokens_used }),
+      ...(result.applied_count !== undefined && { appliedCount: result.applied_count }),
+      // Spread on key presence, not on truthiness: `verdict: null` is the whole
+      // point of recording this, and a falsiness check would drop it.
+      ...('verdict' in result && { verdict: result.verdict ?? null }),
+    }
+    if (Object.keys(entry).length > 0) detail[name] = entry
   }
+  if (Object.keys(detail).length > 0) outcomes.ranDetail = detail
   return outcomes
 }
 
@@ -398,7 +427,20 @@ export function mergeStepOutcomes(
   for (const entry of [...base.skipped, ...next.skipped]) {
     if (!ranSet.has(entry.step)) skipped.set(entry.step, entry.reason)
   }
-  return { ran, skipped: [...skipped].map(([step, reason]) => ({ step, reason })) }
+  // A step observed again in the later round is re-described by it, wholesale:
+  // a review that produced no verdict in round 1 and APPROVE in round 2 must not
+  // keep round 1's `verdict: null`, or the report calls a judged run unjudged.
+  const nextRan = new Set(next.ran)
+  const ranDetail: Record<string, RanStepDetail> = {}
+  for (const [step, detail] of Object.entries(base.ranDetail ?? {})) {
+    if (!nextRan.has(step)) ranDetail[step] = detail
+  }
+  Object.assign(ranDetail, next.ranDetail ?? {})
+  return {
+    ran,
+    skipped: [...skipped].map(([step, reason]) => ({ step, reason })),
+    ...(Object.keys(ranDetail).length > 0 && { ranDetail }),
+  }
 }
 
 function countComments(reviewText: string): number {

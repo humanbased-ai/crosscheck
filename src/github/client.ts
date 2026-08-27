@@ -867,7 +867,12 @@ export type RawPRCommit = {
  * the client layer.
  *
  * Returns the comments and the last-page number parsed from the Link header
- * (null when there is only one page or the header is absent).
+ * (null when there is only one page or the header is absent), plus `ok` —
+ * whether the request actually succeeded. A failed request returns no comments,
+ * which is indistinguishable from a thread that has none unless the caller
+ * checks `ok`; a caller that reads history to make a claim about the PR needs
+ * that distinction, since "the read failed" and "there is nothing there" are
+ * opposite answers.
  */
 export async function fetchPRCommentPage(
   owner: string,
@@ -875,7 +880,7 @@ export async function fetchPRCommentPage(
   prNumber: number,
   token: string,
   opts: { page?: number; since?: string } = {},
-): Promise<{ comments: RawPRComment[]; lastPage: number | null }> {
+): Promise<{ comments: RawPRComment[]; lastPage: number | null; ok: boolean }> {
   const params = new URLSearchParams({ per_page: '100' })
   if (opts.page !== undefined) params.set('page', String(opts.page))
   if (opts.since !== undefined) params.set('since', opts.since)
@@ -883,11 +888,11 @@ export async function fetchPRCommentPage(
     `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?${params}`,
     { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
   )
-  if (!res.ok) return { comments: [], lastPage: null }
+  if (!res.ok) return { comments: [], lastPage: null, ok: false }
   const comments = await res.json() as RawPRComment[]
   const link = res.headers.get('link') ?? ''
   const m = link.match(/page=(\d+)>;\s*rel="last"/)
-  return { comments, lastPage: m ? parseInt(m[1], 10) : null }
+  return { comments, lastPage: m ? parseInt(m[1], 10) : null, ok: true }
 }
 
 /**
