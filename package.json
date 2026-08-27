@@ -75,5 +75,9 @@
     "url": "https://github.com/humanbased-ai/crosscheck/issues"
   },
   "author": "Humanbased PTE LTD",
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }
