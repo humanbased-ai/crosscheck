@@ -87,6 +87,9 @@ export async function runFixStep(
   model = 'default',
   timeoutMs?: number,
   skillSession?: SkillActivationSession,
+  // Replies posted to the PR thread since the review being fixed — see
+  // lib/human-feedback.ts. Undefined/empty when there are none.
+  humanFeedback?: string,
 ): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort: string }> {
   const effort = claudeEffort(config.vendors?.claude?.effort)
   let diff = ''
@@ -102,7 +105,7 @@ export async function runFixStep(
     .replace('{PR_TITLE}', prTitle)
     .replace('{REVIEW_COMMENT}', reviewComment.slice(0, 8000))
     .replace('{DIFF}', diff.slice(0, 16000))
-    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
+    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', humanFeedback ?? '', skillSession ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
 
   let output = ''
   let tokensUsed: number | undefined
@@ -273,6 +276,9 @@ export async function runCodexFixStep(
   // skills.codex_full_access — see runCodexReview. The fix step reads the same
   // untrusted review comment and diff, so it is gated identically.
   codexFullAccess = false,
+  // Replies posted to the PR thread since the review being fixed — see
+  // lib/human-feedback.ts. Undefined/empty when there are none.
+  humanFeedback?: string,
 ): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort: string }> {
   const effort = codexReasoningEffort(configuredEffort ?? 'medium')
   let diff = ''
@@ -288,7 +294,7 @@ export async function runCodexFixStep(
     .replace('{PR_TITLE}', prTitle)
     .replace('{REVIEW_COMMENT}', reviewComment.slice(0, 8000))
     .replace('{DIFF}', diff.slice(0, 16000))
-    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', codexSkillsReachable(skillSession, codexFullAccess) ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
+    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', humanFeedback ?? '', codexSkillsReachable(skillSession, codexFullAccess) ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
 
   const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
   const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []

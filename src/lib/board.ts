@@ -133,7 +133,7 @@ export function fmtTokens(n?: number): string {
 }
 
 // Raw token count without surrounding parens: "900", "1.2K", "1.5M". Returns '' when undefined.
-function fmtTokensRaw(n?: number): string {
+export function fmtTokensRaw(n?: number): string {
   if (n == null) return ''
   if (n < 1_000) return `${n}`
   if (n < 1_000_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}K`

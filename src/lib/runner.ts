@@ -14,6 +14,7 @@ import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
+import { fetchCommentsAfter, selectHumanFeedback, formatHumanFeedback } from '../lib/human-feedback.js'
 import { autoFixBranchName, autoFixPRIntro, sourcePRHasMerged } from '../github/superseded-fix-pr.js'
 import { verifyReviewedSha, isVerifiedReviewedSha, reviewedShaRejection } from '../github/reviewed-sha.js'
 import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
@@ -356,6 +357,23 @@ export interface StepOutcomes {
   /** Steps dispatched but skipped, each with the reason recorded on its
    *  step_skipped log entry. */
   skipped: { step: string; reason: string }[]
+  /** What the steps in `ran` actually produced, keyed by step name. Omitted
+   *  when nothing was recorded, so a caller comparing whole objects still sees
+   *  the two-field shape. Names alone cannot express the outcome that matters
+   *  most here: a review that ran, cost full tokens, and yielded no parseable
+   *  verdict is in `ran` exactly like one that approved. */
+  ranDetail?: Record<string, RanStepDetail>
+}
+
+export interface RanStepDetail {
+  vendor?: string
+  tokensUsed?: number
+  /** Fix steps only. 0 means the step ran and changed nothing. */
+  appliedCount?: number
+  /** Verdict-capable steps only — the key is present iff the step recorded a
+   *  verdict field. `null` means it ran and produced no parseable verdict,
+   *  which is not the same as a step that produces no verdicts at all. */
+  verdict?: string | null
 }
 
 // stepsRun holds every step the runner dispatched, skips included; results holds
@@ -366,11 +384,23 @@ export function summariseStepOutcomes(
   results: Record<string, StepResult>,
 ): StepOutcomes {
   const outcomes: StepOutcomes = { ran: [], skipped: [] }
+  const detail: Record<string, RanStepDetail> = {}
   for (const name of new Set(stepsRun)) {
     const result = results[name]
-    if (result?.skipped) outcomes.skipped.push({ step: name, reason: result.skipReason ?? 'unknown' })
-    else outcomes.ran.push(name)
+    if (result?.skipped) { outcomes.skipped.push({ step: name, reason: result.skipReason ?? 'unknown' }); continue }
+    outcomes.ran.push(name)
+    if (!result) continue
+    const entry: RanStepDetail = {
+      ...(result.vendor !== undefined && { vendor: result.vendor }),
+      ...(result.tokens_used !== undefined && { tokensUsed: result.tokens_used }),
+      ...(result.applied_count !== undefined && { appliedCount: result.applied_count }),
+      // Spread on key presence, not on truthiness: `verdict: null` is the whole
+      // point of recording this, and a falsiness check would drop it.
+      ...('verdict' in result && { verdict: result.verdict ?? null }),
+    }
+    if (Object.keys(entry).length > 0) detail[name] = entry
   }
+  if (Object.keys(detail).length > 0) outcomes.ranDetail = detail
   return outcomes
 }
 
@@ -397,7 +427,20 @@ export function mergeStepOutcomes(
   for (const entry of [...base.skipped, ...next.skipped]) {
     if (!ranSet.has(entry.step)) skipped.set(entry.step, entry.reason)
   }
-  return { ran, skipped: [...skipped].map(([step, reason]) => ({ step, reason })) }
+  // A step observed again in the later round is re-described by it, wholesale:
+  // a review that produced no verdict in round 1 and APPROVE in round 2 must not
+  // keep round 1's `verdict: null`, or the report calls a judged run unjudged.
+  const nextRan = new Set(next.ran)
+  const ranDetail: Record<string, RanStepDetail> = {}
+  for (const [step, detail] of Object.entries(base.ranDetail ?? {})) {
+    if (!nextRan.has(step)) ranDetail[step] = detail
+  }
+  Object.assign(ranDetail, next.ranDetail ?? {})
+  return {
+    ran,
+    skipped: [...skipped].map(([step, reason]) => ({ step, reason })),
+    ...(Object.keys(ranDetail).length > 0 && { ranDetail }),
+  }
 }
 
 function countComments(reviewText: string): number {
@@ -822,7 +865,9 @@ function isNonFastForwardError(message: string): boolean {
 
 // Push with handling for non-fast-forward rejection. When the remote has new
 // commits, we fetch + rebase onto the PR branch and retry the push once.
-async function pushWithNonFastForwardHandling(params: {
+// Exported for the regression test that reproduces the shallow-clone case where
+// `origin/<branch>` does not exist as a tracking ref.
+export async function pushWithNonFastForwardHandling(params: {
   tmpDir: string
   branch: string
   token: string
@@ -855,11 +900,31 @@ async function pushWithNonFastForwardHandling(params: {
       })
       log(chalk.yellow(`⚠  push rejected (non-fast-forward) — fetching latest and rebasing...`))
       
+      // Capture the original HEAD (the fix commit) before attempting to rebase
+      const fixCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: tmpDir, env, encoding: 'utf8', stdio: 'pipe' }).trim()
+      
       try {
         // Fetch the latest state of the branch
         execFileSync('git', ['fetch', 'origin', branch], { cwd: tmpDir, env, stdio: 'pipe' })
-        // Rebase our changes onto the latest branch state
-        execFileSync('git', ['rebase', `origin/${branch}`], { cwd: tmpDir, env, stdio: 'pipe' })
+        
+        try {
+          // Rebase our changes onto the latest branch state. Rebase onto FETCH_HEAD,
+          // NOT `origin/${branch}`: crosscheck's clone fetches the PR head without a
+          // fetch refspec, so no `refs/remotes/origin/<branch>` tracking ref exists —
+          // `git rebase origin/<branch>` fails with `invalid upstream` and the whole
+          // land-on-branch push falls back to opening a separate fix PR. The fetch on
+          // the line above sets FETCH_HEAD to exactly the tip we just pulled, so that
+          // is the correct (and always-present) rebase target.
+          execFileSync('git', ['rebase', 'FETCH_HEAD'], { cwd: tmpDir, env, stdio: 'pipe' })
+        } catch (rebaseConflictErr: unknown) {
+          // If rebase fails (e.g., due to conflicts), abort it and restore the fix commit.
+          // Otherwise the outer catch's fallback logic sees a repo in in-progress-rebase
+          // state and incorrectly treats HEAD~1 as the fix commit.
+          execFileSync('git', ['rebase', '--abort'], { cwd: tmpDir, env, stdio: 'pipe' })
+          execFileSync('git', ['reset', '--hard', fixCommitSha], { cwd: tmpDir, env, stdio: 'pipe' })
+          throw rebaseConflictErr
+        }
+        
         // Retry the push
         execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { cwd: tmpDir, env })
         fileLog({
@@ -1148,15 +1213,38 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let effort: string | undefined
       let retried: { timeoutMs: number; delayMs: number } | undefined
       const skillSession = skillSessionFor(step.name, effectiveType)
+
+      // Hoisted up from the post-review linking code below (which still reuses
+      // this value): a recheck needs to know which review it is rechecking
+      // before it runs, not just when linking the posted comment afterward, so
+      // it can pull in anything the PR author (or their agent) said in reply.
+      let priorReviewId: number | undefined
+      if (isRecheck) {
+        priorReviewId = Object.values(results).reverse().find(r => r.commentId !== undefined)?.commentId
+        if (priorReviewId === undefined) {
+          priorReviewId = await getLastCrossCheckCommentId(owner, repoName, prNumber, token)
+        }
+      }
+      let humanFeedbackBlock = ''
+      if (priorReviewId !== undefined) {
+        try {
+          const commentsAfter = await fetchCommentsAfter(owner, repoName, prNumber, token, priorReviewId)
+          humanFeedbackBlock = formatHumanFeedback(selectHumanFeedback(commentsAfter, pr.user.login))
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'human_feedback_fetch_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
+        }
+      }
+      const reviewContext = [ctx.issueContext, humanFeedbackBlock].filter(Boolean).join('\n\n') || undefined
+
       // Under `quality.mode: smart` the PR's class picks the tier; under fixed
       // this is config.quality untouched.
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, codexVendor, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, ctx.issueContext, skillSession, config.skills.codex_full_access))
+          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, codexVendor, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, reviewContext, skillSession, config.skills.codex_full_access))
           inputTokens = undefined
           outputTokens = undefined
         } else {
-          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, effort, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, quality, claudeVendor, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, ctx.issueContext, skillSession))
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, effort, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, quality, claudeVendor, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, reviewContext, skillSession))
         }
       }
 
@@ -1265,16 +1353,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       } else {
         onPhaseChange(isRecheck ? 'posting recheck...' : 'posting comment...', phaseUpdate)
         const octokit = createGithubClient(token)
-        // For rechecks: look up the original review comment ID so the recheck
-        // can link back to it. Check in-run results first (single-run pipelines),
-        // then fall back to GitHub (cross-run: recheck triggered by a new push).
-        let priorReviewId: number | undefined
-        if (isRecheck) {
-          priorReviewId = Object.values(results).reverse().find(r => r.commentId !== undefined)?.commentId
-          if (priorReviewId === undefined) {
-            priorReviewId = await getLastCrossCheckCommentId(owner, repoName, prNumber, token)
-          }
-        }
+        // priorReviewId (for rechecks: the original review comment to link back
+        // to) is already resolved above, before the review ran — reused here
+        // rather than looked up a second time.
         // Pre-compute next_step for the annotation so readers can skip full
         // comment scans: find the first remaining step whose when-condition holds.
         const currentStepIdx = steps.indexOf(step)
@@ -1420,6 +1501,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
       if (!reviewCommentBody) { skipFix('no_review_comment'); continue }
 
+      // Replies the PR author (or their agent) posted since that review — e.g.
+      // "already fixed in the last commit" or "not applicable here" — so the
+      // fixer doesn't blindly redo work the thread already settled.
+      let fixHumanFeedback = ''
+      if (reviewCommentId !== undefined) {
+        try {
+          const commentsAfter = await fetchCommentsAfter(owner, repoName, prNumber, token, reviewCommentId)
+          fixHumanFeedback = formatHumanFeedback(selectHumanFeedback(commentsAfter, pr.user.login))
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'human_feedback_fetch_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
+        }
+      }
+
       // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.
       // Use 'origin' to fix with the same vendor that authored the PR (recommended default).
       // resolveFixVendor extends resolveReviewer with a human-origin fallback so human-authored
@@ -1475,7 +1569,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           return runCodexFixStep(
             tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
             codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs, skillSession,
-            codexVendor.effort, config.skills.codex_full_access,
+            codexVendor.effort, config.skills.codex_full_access, fixHumanFeedback,
           )
         }
         // roundConfig, not config: runFixStep reads vendors.claude.effort and
@@ -1483,6 +1577,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         return runFixStep(
           tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
           roundConfig, claudeFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs, skillSession,
+          fixHumanFeedback,
         )
       }
 

@@ -16,6 +16,7 @@ import {
   summariseStepOutcomes,
   mergeStepOutcomes,
   resolveFixLanding,
+  pushWithNonFastForwardHandling,
 } from '../lib/runner.js'
 import type { StepResult } from '../lib/workflow.js'
 import type { Config } from '../config/schema.js'
@@ -622,6 +623,39 @@ describe('summariseStepOutcomes', () => {
   it('returns empty lists when no step was dispatched', () => {
     expect(summariseStepOutcomes([], results({}))).toEqual({ ran: [], skipped: [] })
   })
+
+  describe('ranDetail', () => {
+    it('records vendor, tokens and applied count for a step that ran', () => {
+      const out = summariseStepOutcomes(['fix'], results({
+        fix: { applied_count: 0, tokens_used: 3483, vendor: 'claude' },
+      }))
+      expect(out.ranDetail).toEqual({ fix: { vendor: 'claude', tokensUsed: 3483, appliedCount: 0 } })
+    })
+
+    // The distinction the whole no-verdict report rests on: a review that ran and
+    // produced no parseable verdict is in `ran` exactly like one that approved.
+    it('keeps a null verdict, which says the step ran and judged nothing', () => {
+      const out = summariseStepOutcomes(['review'], results({ review: { verdict: null } }))
+      expect(out.ranDetail?.review).toEqual({ verdict: null })
+      expect('verdict' in (out.ranDetail?.review ?? {})).toBe(true)
+    })
+
+    it('omits the verdict key for a step that produces no verdict', () => {
+      const out = summariseStepOutcomes(['fix'], results({ fix: { applied_count: 1 } }))
+      expect('verdict' in (out.ranDetail?.fix ?? {})).toBe(false)
+    })
+
+    // Existing callers compare the whole object; an always-present empty record
+    // would break them for no gain.
+    it('is omitted entirely when nothing was recorded', () => {
+      expect(summariseStepOutcomes(['fix'], results({}))).toEqual({ ran: ['fix'], skipped: [] })
+    })
+
+    it('records nothing for a skipped step', () => {
+      const out = summariseStepOutcomes(['fix'], results({ fix: { skipped: true, skipReason: 'no_vendor' } }))
+      expect(out.ranDetail).toBeUndefined()
+    })
+  })
 })
 
 describe('mergeStepOutcomes', () => {
@@ -672,5 +706,116 @@ describe('mergeStepOutcomes', () => {
     expect(mergeStepOutcomes(undefined, only)).toBe(only)
     expect(mergeStepOutcomes(only, undefined)).toBe(only)
     expect(mergeStepOutcomes(undefined, undefined)).toBeUndefined()
+  })
+
+  describe('ranDetail', () => {
+    // A step the later round ran again is re-described by it wholesale. Merging
+    // field-by-field would leave round 1's `verdict: null` standing after round 2
+    // approved, and the report would call a judged run unjudged.
+    it('lets the later round replace an earlier observation of the same step', () => {
+      const merged = mergeStepOutcomes(
+        { ran: ['review'], skipped: [], ranDetail: { review: { verdict: null, tokensUsed: 900 } } },
+        { ran: ['review'], skipped: [], ranDetail: { review: { verdict: 'APPROVE' } } },
+      )
+      expect(merged?.ranDetail).toEqual({ review: { verdict: 'APPROVE' } })
+    })
+
+    it('keeps detail for a step the later round did not run', () => {
+      const merged = mergeStepOutcomes(
+        { ran: ['fix'], skipped: [], ranDetail: { fix: { appliedCount: 0 } } },
+        { ran: ['recheck'], skipped: [], ranDetail: { recheck: { verdict: 'BLOCK' } } },
+      )
+      expect(merged?.ranDetail).toEqual({ fix: { appliedCount: 0 }, recheck: { verdict: 'BLOCK' } })
+    })
+
+    it('is omitted when neither side recorded any', () => {
+      expect(mergeStepOutcomes({ ran: ['fix'], skipped: [] }, { ran: ['fix'], skipped: [] }))
+        .toEqual({ ran: ['fix'], skipped: [] })
+    })
+  })
+})
+
+describe('pushWithNonFastForwardHandling', () => {
+  // Reproduces the production scenario behind the recurring "crosscheck opened a
+  // separate fix PR": crosscheck's shallow PR clone fetches the head WITHOUT a
+  // fetch refspec, so `refs/remotes/origin/<branch>` never exists. When the author
+  // pushes while a fix is being generated, the fix push is rejected non-fast-forward
+  // and the recovery must fetch + rebase + retry. Rebasing onto `origin/<branch>`
+  // died with `invalid upstream` here (no tracking ref) and fell back to a PR;
+  // rebasing onto FETCH_HEAD recovers and lands the fix on the branch.
+  let originDir: string
+  let workDir: string
+  const noop = (): void => undefined
+
+  const git = (dir: string, ...args: string[]): string =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+
+  const commitIn = (dir: string, file: string, content: string, message: string): string => {
+    writeFileSync(join(dir, file), content)
+    git(dir, 'add', file)
+    git(dir, '-c', 'user.email=t@e.co', '-c', 'user.name=T', '-c', 'commit.gpgsign=false', 'commit', '-m', message)
+    return git(dir, 'rev-parse', 'HEAD').trim()
+  }
+
+  beforeEach(() => {
+    // Bare "origin" with branch `main` at C1.
+    originDir = mkdtempSync(join(tmpdir(), 'crosscheck-nonff-origin-'))
+    git(originDir, 'init', '-q', '--bare', '-b', 'main')
+
+    const seedDir = mkdtempSync(join(tmpdir(), 'crosscheck-nonff-seed-'))
+    git(seedDir, 'init', '-q', '-b', 'main')
+    commitIn(seedDir, 'base.txt', 'c1\n', 'C1')
+    git(seedDir, 'remote', 'add', 'origin', originDir)
+    git(seedDir, 'push', '-q', 'origin', 'main')
+
+    // crosscheck-like work repo: fetch the branch (sets FETCH_HEAD, NO
+    // refs/remotes/origin/main), branch from it, and add a fix commit on top of C1.
+    workDir = mkdtempSync(join(tmpdir(), 'crosscheck-nonff-work-'))
+    git(workDir, 'init', '-q', '-b', 'work')
+    git(workDir, 'remote', 'add', 'origin', originDir)
+    // Drop the default fetch refspec so `git fetch origin main` updates only
+    // FETCH_HEAD and never creates refs/remotes/origin/main — the exact shallow-
+    // clone state in production where `git rebase origin/main` failed.
+    git(workDir, 'config', '--unset-all', 'remote.origin.fetch')
+    git(workDir, 'fetch', '-q', 'origin', 'main')
+    git(workDir, 'checkout', '-q', '-B', 'work', 'FETCH_HEAD')
+    commitIn(workDir, 'fix.txt', 'the fix\n', '[crosscheck] fix')
+
+    // Author advances origin/main to C2 while the fix was being made.
+    commitIn(seedDir, 'base.txt', 'c2\n', 'C2')
+    git(seedDir, 'push', '-q', 'origin', 'main')
+    rmSync(seedDir, { force: true, recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(originDir, { force: true, recursive: true })
+    rmSync(workDir, { force: true, recursive: true })
+  })
+
+  it('recovers from a non-fast-forward by rebasing onto FETCH_HEAD and lands the fix', async () => {
+    // Precondition: the tracking ref the old code rebased onto genuinely does not exist.
+    expect(() => git(workDir, 'rev-parse', 'origin/main')).toThrow()
+
+    const events: string[] = []
+    await pushWithNonFastForwardHandling({
+      tmpDir: workDir,
+      branch: 'main',
+      token: 'unused-for-local-remote',
+      log: noop,
+      fileLog: (entry) => events.push(entry.event),
+      owner: 'o',
+      repoName: 'r',
+      prNumber: 1,
+    })
+
+    // It hit the non-ff path and recovered (did NOT throw / fall back).
+    expect(events).toContain('push_non_fast_forward')
+    expect(events).toContain('push_rebase_succeeded')
+    expect(events).not.toContain('push_rebase_failed')
+
+    // The fix and the author's C2 both landed on origin/main.
+    const originLog = git(originDir, 'log', '--format=%s', 'main')
+    expect(originLog).toContain('[crosscheck] fix')
+    expect(originLog).toContain('C2')
   })
 })
