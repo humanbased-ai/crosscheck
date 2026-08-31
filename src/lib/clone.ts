@@ -119,6 +119,37 @@ export async function clonePRForReview(params: {
   }
 }
 
+const HOOKS_DISABLED = '/dev/null'
+
+// git looks for hook scripts under core.hooksPath, so pointing it at /dev/null
+// means none is ever found, whatever is sitting in .git/hooks.
+function disableHooks(repoDir: string): void {
+  try {
+    execFileSync('git', ['config', 'core.hooksPath', HOOKS_DISABLED], { cwd: repoDir })
+  } catch { /* not a git repo — fn() will fail on its own */ }
+}
+
+// Asks git for its fully-resolved value rather than reading .git/config, because
+// an agent can append `[include] path = ...` (or an `includeIf`) pointing at a
+// file that sets core.hooksPath. Includes are applied in file order and the last
+// value wins, so re-setting the key in place does NOT beat an include that comes
+// after it — measured, not assumed. Enumerating the include forms would be a
+// denylist; asking git what it actually resolved is the check that cannot be
+// out-spelled.
+function hooksAreDisabled(repoDir: string): boolean {
+  try {
+    return execFileSync('git', ['config', '--get', 'core.hooksPath'], { cwd: repoDir, encoding: 'utf8' }).trim() === HOOKS_DISABLED
+  } catch {
+    return false
+  }
+}
+
+function restoreOrigin(repoDir: string, url: string): void {
+  try {
+    execFileSync('git', ['remote', 'set-url', 'origin', url], { cwd: repoDir })
+  } catch { /* clone is disposable; a failed restore must not mask fn's result */ }
+}
+
 // Runs `fn` with the clone's `origin` URL stripped of its embedded credentials.
 //
 // An HTTPS clone stores `https://x-access-token:<token>@github.com/...` in
@@ -129,38 +160,58 @@ export async function clonePRForReview(params: {
 //
 // The token is not needed while an agent runs: reviews only read, and the fix
 // step's push happens back in the runner after the agent has exited. So it is
-// removed for the duration and restored in `finally`, whether `fn` returned or
-// threw. A crash hard enough to skip the finally loses only the throwaway clone.
+// removed for the duration and restored afterwards, whether `fn` returned or
+// threw. A crash hard enough to skip that loses only the throwaway clone.
+//
+// Hooks are the second half of the same hole, and disabling them up front does
+// not close it: the agent can re-enable them while it runs, and the hook then
+// fires on the runner's own `git commit`/`git push` here — after the credential
+// is back, and with crosscheck's environment, which carries GITHUB_TOKEN. So the
+// check that matters happens *after* the agent exits: if hooks are not verifiably
+// disabled at that point the clone is treated as compromised, the credential is
+// left off, and the step fails rather than committing in a booby-trapped clone.
 //
 // SSH remotes carry no credential and are left untouched.
 export async function withCredentialFreeOrigin<T>(repoDir: string, fn: () => Promise<T>): Promise<T> {
-  // Disable hooks before the agent runs, and leave them disabled. Otherwise an
-  // agent with full filesystem access can drop a `.git/hooks/pre-commit` (or
-  // repoint `core.hooksPath`) while the origin is scrubbed, and that hook fires
-  // later when the runner commits/pushes — after this function has restored
-  // the credential-bearing origin — letting it exfiltrate the token from
-  // `.git/config`. The clone is disposable, so hooks are never re-enabled.
-  try {
-    execFileSync('git', ['config', 'core.hooksPath', '/dev/null'], { cwd: repoDir })
-  } catch { /* not a git repo — fn() will fail on its own */ }
+  disableHooks(repoDir)
 
   let original: string | undefined
   try {
     original = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repoDir, encoding: 'utf8' }).trim()
   } catch {
     // No origin (or no repo) — nothing to strip, and nothing to restore.
-    return fn()
   }
 
-  const scrubbed = original.replace(/^https:\/\/[^@/]*@github\.com\//, 'https://github.com/')
-  if (scrubbed === original) return fn()
+  const scrubbed = original?.replace(/^https:\/\/[^@/]*@github\.com\//, 'https://github.com/')
+  const stripped = original !== undefined && scrubbed !== original
+  if (stripped) execFileSync('git', ['remote', 'set-url', 'origin', scrubbed as string], { cwd: repoDir })
 
-  execFileSync('git', ['remote', 'set-url', 'origin', scrubbed], { cwd: repoDir })
+  let result: T
   try {
-    return await fn()
-  } finally {
-    try {
-      execFileSync('git', ['remote', 'set-url', 'origin', original], { cwd: repoDir })
-    } catch { /* clone is disposable; a failed restore must not mask fn's result */ }
+    result = await fn()
+  } catch (err) {
+    // Re-assert first: putting the token back is only safe if no hook can run.
+    disableHooks(repoDir)
+    if (stripped && hooksAreDisabled(repoDir)) restoreOrigin(repoDir, original as string)
+    throw err
   }
+
+  // Only meaningful when there is a token to put back. With no origin, or an SSH
+  // one, .git/config holds nothing worth planting a hook for — and `git config`
+  // failing because this is not a repository at all must not read as tampering.
+  if (!stripped) return result
+
+  disableHooks(repoDir)
+  if (!hooksAreDisabled(repoDir)) {
+    // Deliberately free of the words this repo's error classifier keys on
+    // ('auth', 'credential', 'not logged in') — a security abort must not be
+    // reported to the operator as a vendor login problem.
+    throw new Error(
+      'Review clone is compromised: core.hooksPath is no longer /dev/null, so the agent re-enabled git hooks. ' +
+      'A hook would run on the next commit or push here, with the git token back in .git/config and crosscheck\'s environment. ' +
+      'The token has been left off and this clone must be discarded.',
+    )
+  }
+  restoreOrigin(repoDir, original as string)
+  return result
 }
