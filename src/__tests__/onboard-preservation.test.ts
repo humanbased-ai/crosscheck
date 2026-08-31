@@ -140,7 +140,6 @@ describe('applyOnboardConfig — first run', () => {
   })
 
   it('workflow.yml has correct step count per preset', () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const loadWf = (dir: string) => {
       const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: unknown[] }
       return raw.steps.length

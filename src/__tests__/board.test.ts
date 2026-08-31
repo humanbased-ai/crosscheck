@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { PRBoard, fmtTokens } from '../lib/board.js'
 import type { Config } from '../config/schema.js'
 import type { WorkflowStep } from '../lib/workflow.js'
@@ -63,6 +63,7 @@ const baseConfig = {
   },
 } as unknown as Config
 
+// eslint-disable-next-line no-control-regex -- matching the ESC byte is the point
 const stripAnsi = (s: string) => s.replace(/\x1B\[[0-9;]*m/g, '')
 
 const reviewStep: WorkflowStep = {
@@ -380,6 +381,7 @@ function emulateVT(data: string, rows: number, cols: number): { scrollback: stri
   while (i < data.length) {
     const ch = data[i]
     if (ch === '\x1B') {
+      // eslint-disable-next-line no-control-regex -- matching the ESC byte is the point
       const m = /^\x1B\[([0-9;]*)([A-Za-z])/.exec(data.slice(i))
       if (m) {
         const [full, params, cmd] = m

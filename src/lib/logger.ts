@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync, existsSync } from 'fs'
+import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import type { LogsConfig } from '../config/schema.js'

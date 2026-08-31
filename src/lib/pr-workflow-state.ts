@@ -72,7 +72,10 @@ export function shaCovers(recordSha: string | undefined, currentSha: string): bo
   return recordSha.startsWith(currentSha) || currentSha.startsWith(recordSha)
 }
 
-function commentToRecord(comment: { id: number; body: string; created_at: string }): StepRecord | null {
+// Exported for human-feedback.ts: the single classifier for "is this comment one
+// of crosscheck's own step records" — reused there so a PR reply never gets
+// misread as automation, or a crosscheck comment misread as a human opinion.
+export function commentToRecord(comment: { id: number; body: string; created_at: string }): StepRecord | null {
   const fields = parseAnnotationFields(comment.body)
 
   if (!fields) {
@@ -256,6 +259,63 @@ export async function fetchStepHistory(
     if (record) records.push(record)
   }
   return mergeStepHistory(records, commitHistory)
+}
+
+/**
+ * The records a standing-verdict selection needs: at most one — the newest
+ * review or recheck that actually carries a verdict — or none if the PR has
+ * never been judged. Returned as history so `selectStandingVerdict` stays the
+ * single definition of which record governs.
+ *
+ * `fetchStepHistory` cannot answer this. Its fast path anchors on the newest
+ * review/recheck carrying `next_step` and returns that comment plus what
+ * followed it — everything step routing needs, and not enough to say what
+ * verdict stands. A review that ran and emitted no parseable `VERDICT:` line is
+ * exactly such an anchor, so truncating there hides the `BLOCK` still gating
+ * the PR behind it, and reports no verdict standing in the one state that most
+ * needs saying out loud.
+ *
+ * Paging backward stops at the first record that carries a verdict, so the
+ * answer is complete however far back it sits, while the ordinary case — a
+ * verdict on the newest page — costs one request beyond the one that discovers
+ * how many pages there are. Commit records are not fetched at all: only review
+ * and recheck carry verdicts, and neither is ever reconstructed from a commit
+ * trailer, so the commit pagination `fetchStepHistory` pays for is dead weight
+ * here.
+ *
+ * A page the API refuses throws rather than reading as an empty page. An empty
+ * read and a failed read mean opposite things to the caller — "no verdict
+ * stands" is a claim about the PR, and this function is the only thing standing
+ * behind it — so the report falls back to what step detection already read
+ * rather than printing a claim built from an error. `fetchStepHistory` keeps
+ * treating a failed page as empty: there a failed read degrades to routing a
+ * step, not to asserting something untrue, and changing it is a separate
+ * decision with its own blast radius.
+ */
+export async function fetchStandingVerdictRecords(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<StepRecord[]> {
+  const first = await fetchPRCommentPage(owner, repo, prNumber, token)
+  if (!first.ok) throw new Error(`could not read PR comments for ${owner}/${repo}#${prNumber}`)
+  for (let page = first.lastPage ?? 1; page >= 1; page--) {
+    let comments = first.comments
+    if (page !== 1) {
+      const nextPage = await fetchPRCommentPage(owner, repo, prNumber, token, { page })
+      if (!nextPage.ok) throw new Error(`could not read PR comments page ${page} for ${owner}/${repo}#${prNumber}`)
+      comments = nextPage.comments
+    }
+    // Comments come back oldest-first within a page, so the last match on the
+    // newest page carrying one is the newest verdict on the PR.
+    const judged = comments
+      .map(commentToRecord)
+      .filter((r): r is StepRecord => r !== null && (r.type === 'review' || r.type === 'recheck') && r.verdict !== undefined)
+      .at(-1)
+    if (judged) return [judged]
+  }
+  return []
 }
 
 /**
