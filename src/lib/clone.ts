@@ -196,11 +196,9 @@ export async function withCredentialFreeOrigin<T>(repoDir: string, fn: () => Pro
     throw err
   }
 
-  // Only meaningful when there is a token to put back. With no origin, or an SSH
-  // one, .git/config holds nothing worth planting a hook for — and `git config`
-  // failing because this is not a repository at all must not read as tampering.
-  if (!stripped) return result
-
+  // Hooks must be verified for every clone, credentialed or not: an SSH (or
+  // otherwise unstripped) origin carries no token, but a planted hook still
+  // fires on the runner's own commit/push here, in crosscheck's environment.
   disableHooks(repoDir)
   if (!hooksAreDisabled(repoDir)) {
     // Deliberately free of the words this repo's error classifier keys on
@@ -212,6 +210,6 @@ export async function withCredentialFreeOrigin<T>(repoDir: string, fn: () => Pro
       'The token has been left off and this clone must be discarded.',
     )
   }
-  restoreOrigin(repoDir, original as string)
+  if (stripped) restoreOrigin(repoDir, original as string)
   return result
 }
