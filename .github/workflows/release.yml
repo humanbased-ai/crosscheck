@@ -101,8 +101,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org/'
+          scope: '@humanbased'
           cache: npm
 
       - run: npm ci
@@ -134,7 +135,7 @@ jobs:
             echo "Version ${VERSION} already on npm — skipping publish."
             echo "published=false" >> "$GITHUB_OUTPUT"
           else
-            npm publish --access public
+            npm publish --access public --provenance
             echo "published=true" >> "$GITHUB_OUTPUT"
           fi
         env:
