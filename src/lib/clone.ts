@@ -134,6 +134,16 @@ export async function clonePRForReview(params: {
 //
 // SSH remotes carry no credential and are left untouched.
 export async function withCredentialFreeOrigin<T>(repoDir: string, fn: () => Promise<T>): Promise<T> {
+  // Disable hooks before the agent runs, and leave them disabled. Otherwise an
+  // agent with full filesystem access can drop a `.git/hooks/pre-commit` (or
+  // repoint `core.hooksPath`) while the origin is scrubbed, and that hook fires
+  // later when the runner commits/pushes — after this function has restored
+  // the credential-bearing origin — letting it exfiltrate the token from
+  // `.git/config`. The clone is disposable, so hooks are never re-enabled.
+  try {
+    execFileSync('git', ['config', 'core.hooksPath', '/dev/null'], { cwd: repoDir })
+  } catch { /* not a git repo — fn() will fail on its own */ }
+
   let original: string | undefined
   try {
     original = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repoDir, encoding: 'utf8' }).trim()
