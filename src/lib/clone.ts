@@ -160,6 +160,9 @@ export async function withCredentialFreeOrigin<T>(repoDir: string, fn: () => Pro
     return await fn()
   } finally {
     try {
+      execFileSync('git', ['config', 'core.hooksPath', '/dev/null'], { cwd: repoDir })
+    } catch { /* clone is disposable; best-effort hook lockdown before restoring credentials */ }
+    try {
       execFileSync('git', ['remote', 'set-url', 'origin', original], { cwd: repoDir })
     } catch { /* clone is disposable; a failed restore must not mask fn's result */ }
   }
