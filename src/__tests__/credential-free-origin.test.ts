@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { execFileSync } from 'child_process'
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync } from 'fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { withCredentialFreeOrigin } from '../lib/clone.js'
+import { CompromisedCloneError, isolateGitConfig, withCredentialFreeOrigin } from '../lib/clone.js'
 
 // An HTTPS clone stores https://x-access-token:<token>@github.com/... in
 // .git/config, so the checkout carries a writable GitHub token as a plain file.
@@ -82,8 +82,7 @@ describe('withCredentialFreeOrigin', () => {
       expect(seen).toBe('/dev/null')
     })
 
-    // A plain re-point writes the key in place, so re-asserting after the agent
-    // genuinely wins and the clone is safe again — no need to fail the step.
+    // The trusted config snapshot removes the re-point after the agent exits.
     it('neutralises a plain core.hooksPath re-point and restores the credential', async () => {
       setOrigin(withToken)
 
@@ -95,15 +94,67 @@ describe('withCredentialFreeOrigin', () => {
       expect(originUrl()).toBe(withToken)
     })
 
-    it('refuses when the body hides the re-point behind an include, which re-setting cannot beat', async () => {
+    it('neutralises a core.hooksPath re-point for an SSH remote', async () => {
+      const ssh = 'git@github.com:o/r.git'
+      setOrigin(ssh)
+
+      await withCredentialFreeOrigin(dir, async () => {
+        execFileSync('git', ['config', 'core.hooksPath', '.git/hooks'], { cwd: dir })
+      })
+
+      expect(effectiveHooksPath()).toBe('/dev/null')
+      expect(originUrl()).toBe(ssh)
+    })
+
+    it('neutralises a core.hooksPath re-point without an origin', async () => {
+      await withCredentialFreeOrigin(dir, async () => {
+        execFileSync('git', ['config', 'core.hooksPath', '.git/hooks'], { cwd: dir })
+      })
+
+      expect(effectiveHooksPath()).toBe('/dev/null')
+    })
+
+    it('removes a re-point hidden behind an include', async () => {
+      setOrigin(withToken)
+
+      await withCredentialFreeOrigin(dir, async () => {
+        writeFileSync(join(dir, 'evil.cfg'), '[core]\n\thooksPath = .git/hooks\n')
+        appendFileSync(join(dir, '.git', 'config'), '[include]\n\tpath = ../evil.cfg\n')
+      })
+
+      expect(effectiveHooksPath()).toBe('/dev/null')
+      expect(originUrl()).toBe(withToken)
+    })
+
+    it('restores non-hook config that could execute during later Git commands', async () => {
+      const monitor = join(dir, 'fsmonitor.sh')
+      const marker = join(dir, 'fsmonitor-ran')
+      writeFileSync(monitor, '#!/bin/sh\nprintf ran > fsmonitor-ran\n')
+      chmodSync(monitor, 0o755)
+
+      await withCredentialFreeOrigin(dir, async () => {
+        execFileSync('git', ['config', 'core.fsmonitor', monitor], { cwd: dir })
+        execFileSync('git', ['status', '--short'], { cwd: dir, stdio: 'pipe' })
+        expect(existsSync(marker)).toBe(true)
+        rmSync(marker)
+      })
+
+      execFileSync('git', ['status', '--short'], { cwd: dir, stdio: 'pipe' })
+      expect(existsSync(marker)).toBe(false)
+      expect(() => execFileSync('git', ['config', '--get', 'core.fsmonitor'], { cwd: dir, stdio: 'pipe' })).toThrow()
+    })
+
+    it('leaves the origin scrubbed when a pre-existing include is changed', async () => {
+      const included = join(dir, 'trusted.cfg')
+      writeFileSync(included, '[user]\n\tname = trusted\n')
+      appendFileSync(join(dir, '.git', 'config'), `[include]\n\tpath = ${included}\n`)
       setOrigin(withToken)
 
       await expect(withCredentialFreeOrigin(dir, async () => {
-        writeFileSync(join(dir, 'evil.cfg'), '[core]\n\thooksPath = .git/hooks\n')
-        appendFileSync(join(dir, '.git', 'config'), '[include]\n\tpath = ../evil.cfg\n')
-      })).rejects.toThrow(/core\.hooksPath is no longer/)
+        writeFileSync(included, '[user]\n\tname = changed\n')
+      })).rejects.toBeInstanceOf(CompromisedCloneError)
 
-      expect(originUrl()).not.toContain('ghs_secret')
+      expect(originUrl()).toBe('https://github.com/o/r.git')
     })
 
     it('still restores the credential on the honest path', async () => {
@@ -117,5 +168,58 @@ describe('withCredentialFreeOrigin', () => {
     let ran = false
     await withCredentialFreeOrigin(dir, async () => { ran = true })
     expect(ran).toBe(true)
+  })
+})
+
+describe('isolated Git config', () => {
+  const envKeys = [
+    'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL',
+    'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL',
+  ] as const
+  let root: string
+  let savedEnv: Partial<Record<(typeof envKeys)[number], string>>
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'crosscheck-git-config-'))
+    savedEnv = {}
+    for (const key of envKeys) {
+      if (process.env[key] !== undefined) savedEnv[key] = process.env[key]
+    }
+  })
+
+  afterEach(() => {
+    for (const key of envKeys) {
+      const value = savedEnv[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    rmSync(root, { force: true, recursive: true })
+  })
+
+  it('prevents a poisoned global hooksPath from reaching a later clone', () => {
+    const source = join(root, 'source')
+    const hooks = join(root, 'hooks')
+    const marker = join(root, 'hook-ran')
+    const poisonedConfig = join(root, 'global.gitconfig')
+    execFileSync('git', ['init', '-q', source])
+    writeFileSync(join(source, 'file.txt'), 'content\n')
+    execFileSync('git', ['-C', source, 'add', 'file.txt'])
+    execFileSync('git', ['-C', source, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'initial'])
+    mkdirSync(hooks)
+    writeFileSync(join(hooks, 'post-checkout'), `#!/bin/sh\nprintf ran > ${JSON.stringify(marker)}\n`)
+    chmodSync(join(hooks, 'post-checkout'), 0o755)
+    execFileSync('git', ['config', '--file', poisonedConfig, 'core.hooksPath', hooks])
+
+    const poisonedEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: poisonedConfig }
+    execFileSync('git', ['clone', '-q', source, join(root, 'control')], { env: poisonedEnv })
+    expect(existsSync(marker)).toBe(true)
+    rmSync(marker)
+
+    process.env.GIT_CONFIG_GLOBAL = poisonedConfig
+    isolateGitConfig()
+    execFileSync('git', ['clone', '-q', source, join(root, 'isolated')])
+
+    expect(process.env.GIT_CONFIG_GLOBAL).toBe(process.platform === 'win32' ? 'NUL' : '/dev/null')
+    expect(existsSync(marker)).toBe(false)
   })
 })

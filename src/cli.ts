@@ -23,6 +23,9 @@ import { isLinearConfigError } from './linear/identity.js'
 import { runScan } from './commands/scan.js'
 import { runKickass } from './commands/kickass.js'
 import { runSkillInstall } from './commands/skill.js'
+import { isolateGitConfig } from './lib/clone.js'
+
+isolateGitConfig()
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }

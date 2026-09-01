@@ -1,5 +1,8 @@
 import { setTimeout as sleep } from 'node:timers/promises'
+import { randomUUID } from 'crypto'
 import { execFileSync } from 'child_process'
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+import { isAbsolute, resolve } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 
@@ -10,6 +13,35 @@ const GIT_RESILIENCE_ARGS = [
   '-c', 'http.keepAlive=true',
   '-c', 'http.connectTimeout=30',
 ]
+
+const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null'
+
+// Agents share the operator's HOME, so a full-access run can edit global Git
+// config. Preserve only the identity needed for commits, then make every Git
+// child in this process ignore global and system config.
+export function isolateGitConfig(): void {
+  const configValue = (key: string): string | undefined => {
+    for (const scope of ['--global', '--system']) {
+      try {
+        const value = execFileSync('git', ['config', scope, '--get', key], { encoding: 'utf8', stdio: 'pipe' }).trim()
+        if (value) return value
+      } catch { /* try the next scope */ }
+    }
+    return undefined
+  }
+  const name = process.env.GIT_COMMITTER_NAME ?? process.env.GIT_AUTHOR_NAME ?? configValue('user.name')
+  const email = process.env.GIT_COMMITTER_EMAIL ?? process.env.GIT_AUTHOR_EMAIL ?? configValue('user.email')
+  if (name) {
+    process.env.GIT_AUTHOR_NAME ??= name
+    process.env.GIT_COMMITTER_NAME ??= name
+  }
+  if (email) {
+    process.env.GIT_AUTHOR_EMAIL ??= email
+    process.env.GIT_COMMITTER_EMAIL ??= email
+  }
+  process.env.GIT_CONFIG_NOSYSTEM = '1'
+  process.env.GIT_CONFIG_GLOBAL = NULL_DEVICE
+}
 
 // Bypass `gh repo clone` so gh's keyring auth (which may bridge to VS Code's
 // GitHub extension) is never invoked. HTTPS embeds the token in the URL.
@@ -36,6 +68,7 @@ const MAX_GIT_RETRIES = 3
 const GIT_RETRY_DELAY_MS = 2000
 
 async function runGit(args: string[], cwd?: string, retryable = false, onProgress?: (line: string) => void): Promise<void> {
+  isolateGitConfig()
   let lastErr: Error | undefined
   for (let attempt = 1; attempt <= (retryable ? MAX_GIT_RETRIES : 1); attempt++) {
     try {
@@ -119,35 +152,70 @@ export async function clonePRForReview(params: {
   }
 }
 
-const HOOKS_DISABLED = '/dev/null'
+const HOOKS_DISABLED = NULL_DEVICE
 
-// git looks for hook scripts under core.hooksPath, so pointing it at /dev/null
-// means none is ever found, whatever is sitting in .git/hooks.
-function disableHooks(repoDir: string): void {
-  try {
-    execFileSync('git', ['config', 'core.hooksPath', HOOKS_DISABLED], { cwd: repoDir })
-  } catch { /* not a git repo — fn() will fail on its own */ }
+export function runGitWithoutHooks(repoDir: string, args: string[], env?: NodeJS.ProcessEnv): void {
+  isolateGitConfig()
+  execFileSync('git', ['-c', `core.hooksPath=${HOOKS_DISABLED}`, ...args], {
+    cwd: repoDir,
+    env: { ...process.env, ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: NULL_DEVICE },
+    stdio: 'pipe',
+  })
 }
 
-// Asks git for its fully-resolved value rather than reading .git/config, because
-// an agent can append `[include] path = ...` (or an `includeIf`) pointing at a
-// file that sets core.hooksPath. Includes are applied in file order and the last
-// value wins, so re-setting the key in place does NOT beat an include that comes
-// after it — measured, not assumed. Enumerating the include forms would be a
-// denylist; asking git what it actually resolved is the check that cannot be
-// out-spelled.
-function hooksAreDisabled(repoDir: string): boolean {
+export class CompromisedCloneError extends Error {
+  constructor() {
+    super('Review clone is compromised: its Git configuration could not be restored after the agent exited. This clone must be discarded before another Git operation runs.')
+    this.name = 'CompromisedCloneError'
+  }
+}
+
+function isGitRepository(repoDir: string): boolean {
   try {
-    return execFileSync('git', ['config', '--get', 'core.hooksPath'], { cwd: repoDir, encoding: 'utf8' }).trim() === HOOKS_DISABLED
+    execFileSync('git', ['rev-parse', '--git-dir'], { cwd: repoDir, stdio: 'pipe' })
+    return true
   } catch {
     return false
   }
 }
 
-function restoreOrigin(repoDir: string, url: string): void {
+function disableHooks(repoDir: string): void {
+  execFileSync('git', ['config', 'core.hooksPath', HOOKS_DISABLED], { cwd: repoDir })
+}
+
+interface FileSnapshot {
+  path: string
+  contents?: Buffer
+  mode?: number
+}
+
+function gitPath(repoDir: string, name: string): string {
+  const path = execFileSync('git', ['rev-parse', '--git-path', name], { cwd: repoDir, encoding: 'utf8' }).trim()
+  return isAbsolute(path) ? path : resolve(repoDir, path)
+}
+
+function snapshotFile(path: string): FileSnapshot {
+  if (!existsSync(path)) return { path }
+  return { path, contents: readFileSync(path), mode: statSync(path).mode }
+}
+
+function restoreFile(snapshot: FileSnapshot): void {
+  if (snapshot.contents === undefined) {
+    rmSync(snapshot.path, { force: true })
+    return
+  }
+
+  const tmpPath = `${snapshot.path}.crosscheck-restore-${randomUUID()}`
   try {
-    execFileSync('git', ['remote', 'set-url', 'origin', url], { cwd: repoDir })
-  } catch { /* clone is disposable; a failed restore must not mask fn's result */ }
+    writeFileSync(tmpPath, snapshot.contents, { mode: snapshot.mode })
+    renameSync(tmpPath, snapshot.path)
+  } finally {
+    rmSync(tmpPath, { force: true })
+  }
+}
+
+function resolvedGitConfig(repoDir: string): Buffer {
+  return execFileSync('git', ['config', '--null', '--list', '--show-origin'], { cwd: repoDir, stdio: 'pipe' })
 }
 
 // Runs `fn` with the clone's `origin` URL stripped of its embedded credentials.
@@ -163,53 +231,50 @@ function restoreOrigin(repoDir: string, url: string): void {
 // removed for the duration and restored afterwards, whether `fn` returned or
 // threw. A crash hard enough to skip that loses only the throwaway clone.
 //
-// Hooks are the second half of the same hole, and disabling them up front does
-// not close it: the agent can re-enable them while it runs, and the hook then
-// fires on the runner's own `git commit`/`git push` here — after the credential
-// is back, and with crosscheck's environment, which carries GITHUB_TOKEN. So the
-// check that matters happens *after* the agent exits: if hooks are not verifiably
-// disabled at that point the clone is treated as compromised, the credential is
-// left off, and the step fails rather than committing in a booby-trapped clone.
-//
-// SSH remotes carry no credential and are left untouched.
+// Git config is the second half of the same hole: hooks, fsmonitor, filters, and
+// other settings can execute programs during the runner's later Git commands.
+// Snapshotting and restoring the trusted config closes those paths together;
+// comparing Git's resolved view also detects changes hidden in pre-existing
+// includes. The clone is disposable, so a failed restore fails shut.
 export async function withCredentialFreeOrigin<T>(repoDir: string, fn: () => Promise<T>): Promise<T> {
+  isolateGitConfig()
+  if (!isGitRepository(repoDir)) return fn()
+
   disableHooks(repoDir)
 
   let original: string | undefined
   try {
-    original = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repoDir, encoding: 'utf8' }).trim()
+    original = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repoDir, encoding: 'utf8', stdio: 'pipe' }).trim()
   } catch {
-    // No origin (or no repo) — nothing to strip, and nothing to restore.
+    // No origin — nothing to strip.
   }
 
   const scrubbed = original?.replace(/^https:\/\/[^@/]*@github\.com\//, 'https://github.com/')
   const stripped = original !== undefined && scrubbed !== original
   if (stripped) execFileSync('git', ['remote', 'set-url', 'origin', scrubbed as string], { cwd: repoDir })
+  const configSnapshots = [...new Set(['config', 'config.worktree'].map(name => gitPath(repoDir, name)))]
+    .map(snapshotFile)
+  const trustedConfig = resolvedGitConfig(repoDir)
 
-  let result: T
+  let result: T | undefined
+  let bodyError: unknown
+  let bodyFailed = false
   try {
     result = await fn()
   } catch (err) {
-    // Re-assert first: putting the token back is only safe if no hook can run.
-    disableHooks(repoDir)
-    if (stripped && hooksAreDisabled(repoDir)) restoreOrigin(repoDir, original as string)
-    throw err
+    bodyError = err
+    bodyFailed = true
   }
 
-  // Hooks must be verified for every clone, credentialed or not: an SSH (or
-  // otherwise unstripped) origin carries no token, but a planted hook still
-  // fires on the runner's own commit/push here, in crosscheck's environment.
-  disableHooks(repoDir)
-  if (!hooksAreDisabled(repoDir)) {
-    // Deliberately free of the words this repo's error classifier keys on
-    // ('auth', 'credential', 'not logged in') — a security abort must not be
-    // reported to the operator as a vendor login problem.
-    throw new Error(
-      'Review clone is compromised: core.hooksPath is no longer /dev/null, so the agent re-enabled git hooks. ' +
-      'A hook would run on the next commit or push here, with the git token back in .git/config and crosscheck\'s environment. ' +
-      'The token has been left off and this clone must be discarded.',
-    )
+  try {
+    for (const snapshot of configSnapshots) restoreFile(snapshot)
+    if (!resolvedGitConfig(repoDir).equals(trustedConfig)) throw new Error('resolved Git config changed')
+    if (stripped) execFileSync('git', ['remote', 'set-url', 'origin', original as string], { cwd: repoDir })
+  } catch {
+    // Deliberately avoids the words the vendor-login classifier keys on.
+    throw new CompromisedCloneError()
   }
-  if (stripped) restoreOrigin(repoDir, original as string)
-  return result
+
+  if (bodyFailed) throw bodyError
+  return result as T
 }
