@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { execFileSync } from 'child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -18,6 +18,7 @@ import {
   resolveFixLanding,
   pushWithNonFastForwardHandling,
 } from '../lib/runner.js'
+import { CompromisedCloneError, runGitWithoutHooks } from '../lib/clone.js'
 import type { StepResult } from '../lib/workflow.js'
 import type { Config } from '../config/schema.js'
 
@@ -45,6 +46,10 @@ describe('isRetryableFixError', () => {
 
   it('returns true for unknown/unexpected errors', () => {
     expect(isRetryableFixError(new Error('something unexpected happened'))).toBe(true)
+  })
+
+  it('does not retry a compromised clone', () => {
+    expect(isRetryableFixError(new CompromisedCloneError())).toBe(false)
   })
 
   it('handles non-Error thrown values', () => {
@@ -817,5 +822,44 @@ describe('pushWithNonFastForwardHandling', () => {
     const originLog = git(originDir, 'log', '--format=%s', 'main')
     expect(originLog).toContain('[crosscheck] fix')
     expect(originLog).toContain('C2')
+  })
+
+  it('does not run a pre-push hook from the agent checkout', async () => {
+    const hook = join(workDir, '.git', 'hooks', 'pre-push')
+    const marker = join(workDir, 'hook-ran')
+    writeFileSync(hook, '#!/bin/sh\nprintf "%s" "$GITHUB_TOKEN" > hook-ran\n')
+    chmodSync(hook, 0o755)
+    git(workDir, 'config', 'core.hooksPath', '.git/hooks')
+
+    await pushWithNonFastForwardHandling({
+      tmpDir: workDir,
+      branch: 'main',
+      token: 'secret',
+      log: noop,
+      fileLog: noop,
+      owner: 'o',
+      repoName: 'r',
+      prNumber: 1,
+    })
+
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  it('disables post-index-change hooks for runner mutations', () => {
+    const hook = join(workDir, '.git', 'hooks', 'post-index-change')
+    const marker = join(workDir, 'hook-ran')
+    writeFileSync(hook, '#!/bin/sh\nprintf ran > hook-ran\n')
+    chmodSync(hook, 0o755)
+    git(workDir, 'config', 'core.hooksPath', '.git/hooks')
+    writeFileSync(join(workDir, 'precondition.txt'), 'change\n')
+    git(workDir, 'add', 'precondition.txt')
+    expect(existsSync(marker)).toBe(true)
+    rmSync(marker)
+
+    writeFileSync(join(workDir, 'staged.txt'), 'change\n')
+
+    runGitWithoutHooks(workDir, ['add', 'staged.txt'])
+
+    expect(existsSync(marker)).toBe(false)
   })
 })
