@@ -111,3 +111,22 @@ describe('classifyError — a failing clone is classified by its cause, not its 
     )).toBe('permission')
   })
 })
+
+describe('crosscheck fail-closed categories', () => {
+  it('classifies an unresolvable base ref', () => {
+    expect(classifyError(
+      'base ref origin/chore/in-4439-registry-machine-ownership could not be resolved — the branch is deleted or renamed, '
+      + 'so the PR diff cannot be computed. Retarget the PR to a live base branch and re-run.',
+    )).toBe('base_ref')
+  })
+
+  it('classifies a reviewer that reported it could not review', () => {
+    expect(classifyError('codex review inconclusive — reviewer reported it could not perform the review')).toBe('inconclusive')
+  })
+
+  it('does not let the base-ref message fall through to auth', () => {
+    // The message contains no credential words, but the auth pattern is broad
+    // enough that ordering matters — assert the outcome, not the intent.
+    expect(classifyError('base ref origin/main could not be resolved')).not.toBe('auth')
+  })
+})

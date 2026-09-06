@@ -22,6 +22,13 @@ export interface PRRef {
   number: number
   /** Canonical https URL for the PR. */
   url: string
+  /**
+   * The `#issuecomment-<id>` anchor, when the token carried one. Callers that act
+   * on a specific review comment use it to target exactly the comment the user
+   * pasted; before this existed the fragment was silently dropped and `ck fix`
+   * ran against whatever the latest review happened to be.
+   */
+  commentId?: number
 }
 
 export interface ParsePRSpecOptions {
@@ -34,6 +41,8 @@ export const DEFAULT_MAX_PRS = 100
 // Full-URL token: optional scheme, github.com host, owner/repo, /pull/<numspec>.
 // Anything trailing (e.g. /files, query string) is ignored.
 const URL_TOKEN_RE = /^(?:https?:\/\/)?github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+(?:-\d+)?)\b/i
+// `#issuecomment-<id>` fragment on a PR URL — GitHub's anchor for one comment.
+const COMMENT_ANCHOR_RE = /#issuecomment-(\d+)\b/i
 // Bare numeric token: a single number or an inclusive range.
 const NUM_TOKEN_RE = /^\d+(?:-\d+)?$/
 
@@ -69,6 +78,8 @@ export function parsePRSpec(spec: string, options: ParsePRSpecOptions = {}): PRR
     let owner: string
     let repo: string
     let numspec: string
+    const anchorMatch = token.match(COMMENT_ANCHOR_RE)
+    const commentId = anchorMatch ? parseInt(anchorMatch[1], 10) : undefined
 
     const urlMatch = token.match(URL_TOKEN_RE)
     if (urlMatch) {
@@ -91,7 +102,14 @@ export function parsePRSpec(spec: string, options: ParsePRSpecOptions = {}): PRR
       const key = `${owner}/${repo}#${number}`
       if (seen.has(key)) continue
       seen.add(key)
-      refs.push({ owner, repo, number, url: `https://github.com/${owner}/${repo}/pull/${number}` })
+      // A range expands to several PRs but the anchor names one comment, which can
+      // only belong to one of them — so it is carried only on a single-PR token.
+      const anchored = commentId !== undefined && !numspec.includes('-')
+      refs.push({
+        owner, repo, number,
+        url: `https://github.com/${owner}/${repo}/pull/${number}`,
+        ...(anchored && { commentId }),
+      })
       if (refs.length > maxPRs) {
         throw new Error(`Too many PRs requested (>${maxPRs}). Narrow the ranges or split into multiple commands.`)
       }

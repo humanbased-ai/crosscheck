@@ -78,6 +78,44 @@ async function runGit(args: string[], cwd?: string, retryable = false, onProgres
   if (lastErr) throw lastErr
 }
 
+/**
+ * How `refs/remotes/origin/<base>` came to exist — or that it does not.
+ *
+ * `unavailable` is the one that matters: without the base ref there is no PR diff,
+ * and every downstream step degrades silently rather than failing. The review
+ * vendor answers "could not be performed", the commit counter falls back to whole
+ * history and skips the fix step, and `git diff origin/<base>...HEAD` in the fixer
+ * falls through to `HEAD~1` — a diff of the wrong thing.
+ */
+export type BaseRefStatus = 'fetched' | 'recovered_by_sha' | 'recovered_by_merge_ref' | 'unavailable'
+
+export interface CloneResult {
+  baseRefStatus: BaseRefStatus
+}
+
+export class BaseRefUnavailableError extends Error {
+  constructor(public readonly baseRef: string) {
+    super(
+      `base ref origin/${baseRef} could not be resolved — the branch is deleted or renamed, `
+      + 'so the PR diff cannot be computed. Retarget the PR to a live base branch and re-run.',
+    )
+    this.name = 'BaseRefUnavailableError'
+  }
+}
+
+export function isBaseRefUnavailableError(err: unknown): err is BaseRefUnavailableError {
+  return err instanceof BaseRefUnavailableError
+}
+
+function refExists(tmpDir: string, ref: string): boolean {
+  try {
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: tmpDir, stdio: ['ignore', 'pipe', 'ignore'] })
+    return true
+  } catch {
+    return false
+  }
+}
+
 // Clone the repo, fetch & checkout the PR head, and fetch the base ref into
 // refs/remotes/origin/<base>. onBaseFetchFailed lets callers log a warning;
 // other failures bubble up.
@@ -86,13 +124,20 @@ export async function clonePRForReview(params: {
   repo: string
   prNumber: number
   baseRef: string
+  /**
+   * The base commit from the PR payload. A branch that was deleted or renamed after
+   * the PR opened no longer resolves by name, but GitHub still serves the commit
+   * itself — so this is what turns an unreviewable PR back into a reviewable one.
+   */
+  baseSha?: string
   tmpDir: string
   token: string
   protocol: Config['clone_protocol']
   onBaseFetchFailed?: () => void
+  onBaseRefRecovered?: (status: BaseRefStatus) => void
   onProgress?: (line: string) => void
-}): Promise<void> {
-  const { owner, repo, prNumber, baseRef, tmpDir, token, protocol, onBaseFetchFailed, onProgress } = params
+}): Promise<CloneResult> {
+  const { owner, repo, prNumber, baseRef, baseSha, tmpDir, token, protocol, onBaseFetchFailed, onBaseRefRecovered, onProgress } = params
   const cloneUrl = buildCloneUrl(owner, repo, token, protocol)
   // Clone is retryable — transient network issues (curl 16/18, framing errors) are common.
   // GIT_RESILIENCE_ARGS inline (-c flags) apply HTTP buffer/timeout settings without
@@ -112,11 +157,76 @@ export async function clonePRForReview(params: {
   // origin/<base>, countCrosscheckCommitsForPR cannot scope its range and falls
   // back to counting the whole history — which trips the auto-fix commit cap on
   // any repo with prior [crosscheck] commits and silently disables fixing.
+  const baseRefStatus = await resolveBaseRef({
+    tmpDir, baseRef, prNumber,
+    ...(baseSha !== undefined && { baseSha }),
+    ...(onBaseFetchFailed !== undefined && { onBaseFetchFailed }),
+    ...(onBaseRefRecovered !== undefined && { onBaseRefRecovered }),
+  })
+  return { baseRefStatus }
+}
+
+/**
+ * Puts `refs/remotes/origin/<baseRef>` in place, or reports that it cannot be.
+ *
+ * Split out of clonePRForReview so it is testable against a local origin: the
+ * clone itself is hard-wired to github.com, and the part worth testing is the
+ * recovery chain, not the URL building.
+ *
+ * Assumes `tmpDir` is a git repo with an `origin` remote and the PR head checked
+ * out — never the base branch, since git refuses to update a checked-out ref.
+ */
+export async function resolveBaseRef(params: {
+  tmpDir: string
+  baseRef: string
+  prNumber: number
+  baseSha?: string
+  onBaseFetchFailed?: () => void
+  onBaseRefRecovered?: (status: BaseRefStatus) => void
+}): Promise<BaseRefStatus> {
+  const { tmpDir, baseRef, prNumber, baseSha, onBaseFetchFailed, onBaseRefRecovered } = params
+  let baseRefStatus: BaseRefStatus = 'fetched'
   try {
     await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir, true)
   } catch {
     onBaseFetchFailed?.()
+    baseRefStatus = 'unavailable'
   }
+
+  // Fetching by name reports success in cases where the ref did not actually land,
+  // so trust the ref, not the exit code.
+  if (baseRefStatus === 'fetched' && !refExists(tmpDir, `refs/remotes/origin/${baseRef}`)) {
+    onBaseFetchFailed?.()
+    baseRefStatus = 'unavailable'
+  }
+
+  // Recovery 1 — by commit. A deleted or renamed base branch has no name to fetch,
+  // but the commit stays reachable and GitHub still serves it. Depth matches the
+  // clone so the recovered ref carries the same history a by-name fetch would.
+  if (baseRefStatus === 'unavailable' && baseSha) {
+    try {
+      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', '--depth=50', 'origin', baseSha], tmpDir, true)
+      execFileSync('git', ['update-ref', `refs/remotes/origin/${baseRef}`, 'FETCH_HEAD'], { cwd: tmpDir, stdio: 'ignore' })
+      if (refExists(tmpDir, `refs/remotes/origin/${baseRef}`)) baseRefStatus = 'recovered_by_sha'
+    } catch { /* fall through to the merge-ref recovery */ }
+  }
+
+  // Recovery 2 — via the PR's merge ref. GitHub keeps refs/pull/<n>/merge for an
+  // open, mergeable PR; its first parent is the base tip. This survives even when
+  // the base commit itself is no longer directly fetchable.
+  if (baseRefStatus === 'unavailable') {
+    try {
+      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', '--depth=50', 'origin', `pull/${prNumber}/merge:refs/crosscheck/pr-${prNumber}-merge`], tmpDir, true)
+      const parent = execFileSync('git', ['rev-parse', `refs/crosscheck/pr-${prNumber}-merge^1`], { cwd: tmpDir, encoding: 'utf8' }).trim()
+      execFileSync('git', ['update-ref', `refs/remotes/origin/${baseRef}`, parent], { cwd: tmpDir, stdio: 'ignore' })
+      if (refExists(tmpDir, `refs/remotes/origin/${baseRef}`)) baseRefStatus = 'recovered_by_merge_ref'
+    } catch { /* base ref is genuinely unavailable */ }
+  }
+
+  if (baseRefStatus === 'recovered_by_sha' || baseRefStatus === 'recovered_by_merge_ref') {
+    onBaseRefRecovered?.(baseRefStatus)
+  }
+  return baseRefStatus
 }
 
 // Runs `fn` with the clone's `origin` URL stripped of its embedded credentials.

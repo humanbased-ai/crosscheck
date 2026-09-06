@@ -98,3 +98,35 @@ describe('parsePRSpec', () => {
     expect(refs).toHaveLength(5)
   })
 })
+
+describe('#issuecomment anchors', () => {
+  it('carries the comment id from a PR URL fragment', () => {
+    // Previously dropped on the floor: `ck fix <url>#issuecomment-N` acted on
+    // whatever the latest review was, not the comment the user pasted.
+    const refs = parsePRSpec('https://github.com/humanbased-ai/monorepo/pull/3649#issuecomment-5557885314')
+    expect(refs).toHaveLength(1)
+    expect(refs[0].commentId).toBe(5557885314)
+    expect(refs[0].number).toBe(3649)
+  })
+
+  it('leaves commentId unset when there is no anchor', () => {
+    expect(parsePRSpec('https://github.com/o/r/pull/7')[0].commentId).toBeUndefined()
+  })
+
+  it('keeps the canonical URL free of the fragment', () => {
+    const refs = parsePRSpec('https://github.com/o/r/pull/7#issuecomment-42')
+    expect(refs[0].url).toBe('https://github.com/o/r/pull/7')
+  })
+
+  it('drops the anchor on a range — one comment cannot belong to several PRs', () => {
+    const refs = parsePRSpec('https://github.com/o/r/pull/7-9#issuecomment-42')
+    expect(refs).toHaveLength(3)
+    expect(refs.every(r => r.commentId === undefined)).toBe(true)
+  })
+
+  it('applies the anchor only to the token that carried it', () => {
+    const refs = parsePRSpec('https://github.com/o/r/pull/7#issuecomment-42,8')
+    expect(refs[0].commentId).toBe(42)
+    expect(refs[1].commentId).toBeUndefined()
+  })
+})

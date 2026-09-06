@@ -39,7 +39,7 @@ import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, read
 import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly, type StepRecord } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
-import { clonePRForReview } from '../lib/clone.js'
+import { clonePRForReview, BaseRefUnavailableError } from '../lib/clone.js'
 import { resolveLinearAuth, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import {
   getSmartSwitch,
@@ -309,6 +309,11 @@ export async function runWatch(opts: WatchOpts = {}) {
     owner: string; repoName: string; prNumber: number; title: string;
     body: string | null; author: string; headSha: string; headRef: string;
     headRepo: string | null; baseRef: string; action: string;
+    // Base commit from the PR payload — the fallback that keeps a PR reviewable
+    // after its base branch is deleted or renamed. Optional: the backtrace path
+    // builds params from a scan result that carries no base sha, and the clone's
+    // merge-ref recovery covers that case.
+    baseSha?: string;
     // Feed the review strategy's `risky` class: without these its `or_labels`
     // (risk:T3) and `or_hotfix_to_default_branch` rules can never fire.
     labels?: string[]; defaultBranch?: string;
@@ -603,11 +608,20 @@ export async function runWatch(opts: WatchOpts = {}) {
           }
         }
 
-        await clonePRForReview({
-          owner, repo: repoName, prNumber, baseRef: params.baseRef,
+        const { baseRefStatus } = await clonePRForReview({
+          owner, repo: repoName, prNumber, baseRef: params.baseRef, baseSha: params.baseSha,
           tmpDir, token, protocol: config.clone_protocol,
           onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef }),
+          onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef, via: status }),
         })
+        // Fail closed rather than review a PR whose diff cannot be computed: the
+        // vendor would answer "could not review" and that answer would become a
+        // posted verdict. A failed run is visible and recoverable; a verdict
+        // derived from no diff is neither.
+        if (baseRefStatus === 'unavailable') {
+          fileLog({ level: 'error', event: 'base_ref_unavailable', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef, ...(params.baseSha && { base_sha: params.baseSha }) })
+          throw new BaseRefUnavailableError(params.baseRef)
+        }
 
         // Diff-aware skip: a new HEAD SHA with the same patch vs base as the last
         // successfully-reviewed SHA (force-push, amend, no-op rebase) doesn't need
@@ -860,6 +874,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         title: pr.title, body: pr.body, author: pr.user.login,
         headSha: pr.head.sha, headRef: pr.head.ref, headRepo: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref, action: event.action,
+        ...(pr.base.sha !== undefined && { baseSha: pr.base.sha }),
         ...(pr.labels !== undefined && { labels: pr.labels.map(l => l.name) }),
         ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
         ...(pr.created_at !== undefined && { createdAt: pr.created_at }),
@@ -965,6 +980,7 @@ export async function runWatch(opts: WatchOpts = {}) {
             headRef: prData.head.ref,
             headRepo: prData.head.repo?.full_name ?? null,
             baseRef: prData.base.ref,
+            ...(prData.base.sha !== undefined && { baseSha: prData.base.sha }),
             action: 'comment',
             // Same fields the webhook path forwards: without them the risky
             // class's label and hotfix rules classify this PR differently

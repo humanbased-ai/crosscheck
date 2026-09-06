@@ -6,7 +6,7 @@ import chalk from 'chalk'
 import { execa } from 'execa'
 import { parseDuration } from '../lib/durations.js'
 import ora from 'ora'
-import { createGithubClient } from '../github/client.js'
+import { createGithubClient, fetchIssueComment, isFreshReviewComment } from '../github/client.js'
 import { fetchStandingVerdictRecords, fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken, getLinearApiKey, getLinearCredentials } from '../config/loader.js'
@@ -24,7 +24,7 @@ import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { buildNoVerdictReport, renderNoVerdictReport, selectStandingVerdict, type JudgedRecordShape } from '../lib/no-verdict.js'
-import { clonePRForReview } from '../lib/clone.js'
+import { clonePRForReview, BaseRefUnavailableError } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import type { PREvent } from '../github/webhook.js'
@@ -41,6 +41,12 @@ export interface RunOpts {
     id?: number
     body: string
   }
+  /**
+   * A specific review comment to act on, from the `#issuecomment-<id>` anchor on
+   * the PR URL. Without it a fix step falls back to "whatever the latest review
+   * is", which can be a different comment from the one the user pasted.
+   */
+  reviewCommentId?: number
   expectedHeadSha?: string
   timeout?: string
   noTimeout?: boolean
@@ -378,6 +384,24 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   let stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
   let initialReviewComment = opts.initialReviewComment
 
+  // An explicit `#issuecomment-<id>` anchor names the review to act on. Resolve it
+  // here rather than letting the step fall back to the latest review: the two are
+  // often the same comment, and when they are not, the silent substitution means
+  // the command did something other than what the URL said.
+  if (initialReviewComment === undefined && opts.reviewCommentId !== undefined) {
+    const anchored = await fetchIssueComment(owner, repo, opts.reviewCommentId, token)
+    if (!anchored) {
+      console.error(chalk.red(`✗ Comment ${opts.reviewCommentId} not found on ${owner}/${repo}`))
+      process.exit(1)
+    }
+    if (!isFreshReviewComment(anchored.body)) {
+      console.error(chalk.red(`✗ Comment ${opts.reviewCommentId} is not a crosscheck review comment — nothing to act on`))
+      process.exit(1)
+    }
+    initialReviewComment = { id: opts.reviewCommentId, body: anchored.body }
+    console.log(chalk.dim(`  targeting review comment ${opts.reviewCommentId}`))
+  }
+
   // When running without an explicit --steps flag, detect the next step from live
   // PR comment history. When triggered by kickass the dispatch is intentionally
   // one-step-at-a-time (watch owns continuation via webhooks). For all other
@@ -591,12 +615,20 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         ? await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
         : null
 
-      await clonePRForReview({
-        owner, repo, prNumber: number, baseRef: prData.base.ref,
+      const { baseRefStatus } = await clonePRForReview({
+        owner, repo, prNumber: number, baseRef: prData.base.ref, baseSha: prData.base.sha,
         tmpDir, token, protocol: config.clone_protocol,
         onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref }),
+        onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref, via: status }),
       })
       cloneSpinner.succeed('Repo ready')
+      if (baseRefStatus === 'unavailable') {
+        fileLog({ level: 'error', event: 'base_ref_unavailable', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref, base_sha: prData.base.sha })
+        throw new BaseRefUnavailableError(prData.base.ref)
+      }
+      if (baseRefStatus !== 'fetched') {
+        console.log(chalk.yellow(`  base ref origin/${prData.base.ref} was missing — recovered ${baseRefStatus === 'recovered_by_sha' ? 'from the PR base commit' : "from the PR's merge ref"}`))
+      }
 
       // Recover the linked tracker issue (if enabled) so the review is anchored
       // to the stated goal, not just the diff. Done here — after the PR and
@@ -980,8 +1012,19 @@ export async function runRunSpec(spec: string, opts: RunSpecOpts = {}): Promise<
   }
 
   if (refs.length === 1) {
-    await runRun(refs[0].url, opts)
+    await runRun(refs[0].url, {
+      ...opts,
+      ...(refs[0].commentId !== undefined && { reviewCommentId: refs[0].commentId }),
+    })
     return
+  }
+
+  // Past this point the spec fans out across PRs; a comment anchor names exactly
+  // one review and cannot be applied to all of them.
+  const anchored = refs.filter(r => r.commentId !== undefined)
+  if (anchored.length > 0) {
+    console.error(chalk.red('✗ an #issuecomment- anchor targets a single review comment and cannot be combined with multiple PRs'))
+    process.exit(1)
   }
 
   // expected-head-sha is a single-PR guard (set by kickass dispatch); it can't
