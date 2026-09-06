@@ -5,6 +5,7 @@ import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync }
 import { isAbsolute, resolve } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
+import { getGitIdentityFromEnv } from '../config/loader.js'
 
 const GIT_RESILIENCE_ARGS = [
   '-c', 'http.postBuffer=524288000',
@@ -29,8 +30,9 @@ export function isolateGitConfig(): void {
     }
     return undefined
   }
-  const name = process.env.GIT_COMMITTER_NAME ?? process.env.GIT_AUTHOR_NAME ?? configValue('user.name')
-  const email = process.env.GIT_COMMITTER_EMAIL ?? process.env.GIT_AUTHOR_EMAIL ?? configValue('user.email')
+  const envIdentity = getGitIdentityFromEnv()
+  const name = envIdentity.name ?? configValue('user.name')
+  const email = envIdentity.email ?? configValue('user.email')
   if (name) {
     process.env.GIT_AUTHOR_NAME ??= name
     process.env.GIT_COMMITTER_NAME ??= name
@@ -125,6 +127,10 @@ export async function clonePRForReview(params: {
   onBaseFetchFailed?: () => void
   onProgress?: (line: string) => void
 }): Promise<void> {
+  // Isolation is scoped here, not globally in cli.ts, so commands like `skill install`
+  // that don't execute agents keep using the operator's normal Git config (credential
+  // helpers, url.*.insteadOf, CA/proxy settings).
+  isolateGitConfig()
   const { owner, repo, prNumber, baseRef, tmpDir, token, protocol, onBaseFetchFailed, onProgress } = params
   const cloneUrl = buildCloneUrl(owner, repo, token, protocol)
   // Clone is retryable — transient network issues (curl 16/18, framing errors) are common.

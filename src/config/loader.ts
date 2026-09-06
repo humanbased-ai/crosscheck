@@ -108,6 +108,15 @@ export function getLinearApiKey(): string | undefined {
   return process.env.LINEAR_API_KEY ?? undefined
 }
 
+// Read once here per the "env vars only in loader" rule. clone.ts uses this to
+// seed commit identity before isolating Git from global/system config.
+export function getGitIdentityFromEnv(): { name?: string; email?: string } {
+  return {
+    name: process.env.GIT_COMMITTER_NAME ?? process.env.GIT_AUTHOR_NAME ?? undefined,
+    email: process.env.GIT_COMMITTER_EMAIL ?? process.env.GIT_AUTHOR_EMAIL ?? undefined,
+  }
+}
+
 export function detectGitHubLogin(): string | null {
   const envVariants = [
     { ...process.env, GITHUB_TOKEN: undefined, GH_TOKEN: undefined }, // keyring first
