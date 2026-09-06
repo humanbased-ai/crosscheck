@@ -851,7 +851,7 @@ export async function getLastCrossCheckReviewComment(
   return lastComment
 }
 
-export type RawPRComment = { id: number; body: string; created_at: string; user: { login: string }; author_association: string }
+export type RawPRComment = { id: number; body: string; created_at: string; user: { login: string }; author_association: string; issue_url?: string }
 export type RawPRCommit = {
   sha: string
   commit: {

@@ -12,7 +12,7 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
-import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
+import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, detectInconclusiveReview, reviewHasNoFindings } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
 import { fetchCommentsAfter, selectHumanFeedback, formatHumanFeedback } from '../lib/human-feedback.js'
 import { autoFixBranchName, autoFixPRIntro, sourcePRHasMerged } from '../github/superseded-fix-pr.js'
@@ -23,7 +23,8 @@ import { shouldPostToLinear } from '../linear/comment.js'
 import { getLinearCredentials } from '../config/loader.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError, classifyError, type LogEntry } from '../lib/logger.js'
-import { buildCommitTrailers } from '../lib/annotation.js'
+import { buildCommitTrailers, parseAnnotation } from '../lib/annotation.js'
+import { shaCovers } from '../lib/pr-workflow-state.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { resolveReviewStrategy, escalate, clampToLevels, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
@@ -1317,6 +1318,20 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (parsed.verdict === null) {
         fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, output_length: rawReview.length })
       }
+      // Inconclusive gate — must run BEFORE the severity gate. A reviewer that
+      // reports it could not review produces a findings-free body, which the
+      // severity gate reads as "nits only" and upgrades to APPROVE: a PR cleared
+      // to merge on the strength of a review that never ran. Refuse to post at
+      // all instead, the same way an unverifiable sha is refused below.
+      const inconclusive = detectInconclusiveReview(clean)
+      if (inconclusive.inconclusive) {
+        fileLog({ level: 'error', event: 'review_inconclusive', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, reason: inconclusive.reason, raw_verdict: parsed.verdict, output_length: rawReview.length, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+        log(chalk.red(`✗ ${reviewer} did not review PR #${prNumber} — ${inconclusive.reason}`))
+        // The review cost vendor tokens — surface it rather than lose it silently.
+        log(chalk.dim(`\n--- unposted review ---\n${clean}\n--- end ---`))
+        throw new Error(`${reviewer} review inconclusive — ${inconclusive.reason}`)
+      }
+
       // Severity gate: NEEDS WORK with only P3 nits is downgraded to APPROVE so
       // suggestion-only reviews don't drive the fix/recheck loop. P2 (correctness)
       // and above keep NEEDS WORK and require human attention before merge.
@@ -1500,6 +1515,26 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
       }
       if (!reviewCommentBody) { skipFix('no_review_comment'); continue }
+
+      // A review with nothing actionable in it cannot produce a fix. Dispatching one
+      // anyway spends a full vendor call to be told NO_CHANGES — the outcome that
+      // made `ck fix` look like it had worked when its review was a non-review.
+      if (reviewHasNoFindings(reviewCommentBody)) {
+        log(chalk.dim(`  review has no actionable findings — nothing for the fix step to apply`))
+        skipFix('review_has_no_findings')
+        continue
+      }
+
+      // Findings raised against a different commit still usually apply, so this
+      // warns rather than skips — but silently fixing against a stale review is how
+      // a round gets spent re-fixing something the author already pushed.
+      // shaCovers, not ===: annotations carry the short or full form interchangeably,
+      // and a raw compare would call every short-form annotation stale.
+      const reviewSha = parseAnnotation(reviewCommentBody)?.sha
+      if (reviewSha && !shaCovers(reviewSha, pr.head.sha)) {
+        log(chalk.yellow(`⚠  review was written against ${reviewSha.slice(0, 7)}, PR head is ${pr.head.sha.slice(0, 7)} — fixing against a stale review`))
+        fileLog({ level: 'warn', event: 'fix_review_stale', repo: `${owner}/${repoName}`, pr: prNumber, review_sha: reviewSha, head_sha: pr.head.sha, ...triggerField })
+      }
 
       // Replies the PR author (or their agent) posted since that review — e.g.
       // "already fixed in the last commit" or "not applicable here" — so the

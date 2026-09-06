@@ -405,3 +405,66 @@ describe('selectStandingVerdict', () => {
     expect(selectStandingVerdict([{ type: 'review' }, { type: 'fix' }])).toBeUndefined()
   })
 })
+
+describe('fix_noop — a scoped fix that changed nothing', () => {
+  // The `ck fix` invocation on humanbased-ai/monorepo#3649: one fix step, dispatched
+  // deliberately, which ran for 12 tokens and applied nothing. Every other signal
+  // said "expected" — no verdict was ever in reach — so the run closed green while
+  // having written nothing to the PR.
+  const noopFixRun: StepOutcomes = {
+    ran: ['fix'],
+    skipped: [],
+    ranDetail: { fix: { vendor: 'claude', tokensUsed: 12, appliedCount: 0 } },
+  }
+
+  it('is not reported as expected, so the completion line warns', () => {
+    const report = buildNoVerdictReport(input({ outcomes: noopFixRun, stepsExplicitlyScoped: true }))
+    expect(report.cause).toBe('fix_noop')
+    expect(report.expected).toBe(false)
+  })
+
+  it('says the fix applied nothing and points at the review it read', () => {
+    const report = buildNoVerdictReport(input({ outcomes: noopFixRun, stepsExplicitlyScoped: true }))
+    expect(report.why.join(' ')).toContain('applied no changes')
+    expect(report.notes.join(' ')).toContain('findings-free')
+  })
+
+  it('recommends a review as the way forward', () => {
+    const report = buildNoVerdictReport(input({ outcomes: noopFixRun, stepsExplicitlyScoped: true }))
+    expect(report.next.some(n => n.recommended && n.text.includes('--steps review'))).toBe(true)
+  })
+
+  it('stays expected when the scoped fix actually applied something', () => {
+    const report = buildNoVerdictReport(input({
+      outcomes: { ran: ['fix'], skipped: [], ranDetail: { fix: { vendor: 'claude', appliedCount: 3 } } },
+      stepsExplicitlyScoped: true,
+    }))
+    expect(report.cause).toBe('not_dispatched')
+    expect(report.expected).toBe(true)
+  })
+
+  it('does not fire for a conflict-resolve that had no conflicts to resolve', () => {
+    // applied_count: 0 is routine there and says nothing about a review's findings.
+    const report = buildNoVerdictReport(input({
+      outcomes: {
+        ran: ['conflict-resolve'],
+        skipped: [],
+        ranDetail: { 'conflict-resolve': { vendor: 'claude', appliedCount: 0 } },
+      },
+      stepsExplicitlyScoped: true,
+    }))
+    expect(report.cause).toBe('not_dispatched')
+    expect(report.expected).toBe(true)
+  })
+
+  it('still defers to a review that ran and produced no parseable verdict', () => {
+    const report = buildNoVerdictReport(input({
+      outcomes: {
+        ran: ['review', 'fix'],
+        skipped: [],
+        ranDetail: { review: { verdict: null }, fix: { appliedCount: 0 } },
+      },
+    }))
+    expect(report.cause).toBe('ran_no_verdict')
+  })
+})
