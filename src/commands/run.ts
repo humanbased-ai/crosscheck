@@ -7,6 +7,7 @@ import { execa } from 'execa'
 import { parseDuration } from '../lib/durations.js'
 import ora from 'ora'
 import { createGithubClient, fetchIssueComment, isFreshReviewComment } from '../github/client.js'
+import { parseAnnotation } from '../lib/annotation.js'
 import { fetchStandingVerdictRecords, fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken, getLinearApiKey, getLinearCredentials } from '../config/loader.js'
@@ -394,7 +395,16 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       console.error(chalk.red(`✗ Comment ${opts.reviewCommentId} not found on ${owner}/${repo}`))
       process.exit(1)
     }
-    if (!isFreshReviewComment(anchored.body)) {
+    const expectedIssueUrl = `https://api.github.com/repos/${owner}/${repo}/issues/${number}`
+    if (anchored.issue_url !== expectedIssueUrl) {
+      console.error(chalk.red(`✗ Comment ${opts.reviewCommentId} does not belong to ${owner}/${repo}#${number} — nothing to act on`))
+      process.exit(1)
+    }
+    // A comment ID is user-supplied and untrusted, so this mutation path requires the
+    // stricter annotation-based check rather than isFreshReviewComment's legacy header
+    // fallback — the header alone is too permissive to gate a fix dispatch on.
+    const parsedAnnotation = parseAnnotation(anchored.body)
+    if (!parsedAnnotation || parsedAnnotation.type !== 'review') {
       console.error(chalk.red(`✗ Comment ${opts.reviewCommentId} is not a crosscheck review comment — nothing to act on`))
       process.exit(1)
     }
