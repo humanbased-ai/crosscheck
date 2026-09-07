@@ -40,6 +40,7 @@ export type NoVerdictCause =
   | 'ran_no_verdict'
   | 'skipped'
   | 'not_dispatched'
+  | 'fix_noop'
 
 /** Minimal shape of a workflow step — name and type are all this needs, so
  *  callers can pass WorkflowStep directly without a conversion. */
@@ -209,6 +210,18 @@ export function buildNoVerdictReport(input: NoVerdictInput): NoVerdictReport {
   // Precedence: a step that ran and produced nothing outranks one that skipped,
   // which outranks one that never ran. The most specific thing that happened is
   // the thing worth reporting.
+  // Fix steps by type: conflict-resolve records `applied_count: 0` too, and a
+  // branch with no conflicts to resolve says nothing about a review's findings.
+  const fixStepNames = new Set(workflowSteps.filter(s => s.type === 'fix').map(s => s.name))
+  const noopFixStep = (outcomes?.ran ?? []).find(step =>
+    fixStepNames.has(step) && outcomes?.ranDetail?.[step]?.appliedCount === 0)
+  // True when every step this run actually ran was a fix that changed nothing —
+  // i.e. the run's whole output was nothing at all.
+  const scopedFixDidNothing = noopFixStep !== undefined
+    && (outcomes?.ran ?? []).every(step => outcomes?.ranDetail?.[step]?.appliedCount === 0)
+    ? noopFixStep
+    : undefined
+
   const ranNoVerdict = verdictSteps.find(v => v.disposition === 'ran_no_verdict')
   const skippedStep = verdictSteps.find(v => v.disposition === 'skipped')
   const allNotConfigured = verdictSteps.every(v => v.disposition === 'not_configured')
@@ -239,6 +252,17 @@ export function buildNoVerdictReport(input: NoVerdictInput): NoVerdictReport {
     const advice = describeSkipReason(skippedStep.reason ?? 'unknown', skippedStep.step, prUrl)
     next = advice.next
     notes.push(...advice.notes)
+  } else if (scopedFixDidNothing) {
+    // `ck fix` asks for exactly one step, so a missing verdict is expected and the
+    // run would otherwise close green — the same green a fix that rewrote ten files
+    // prints. The absent verdict is indeed expected; the absent *change* is not,
+    // and it is the only thing the invocation was for.
+    cause = 'fix_noop'
+    expected = false
+    why.push(`This run was scoped to ${scopedFixDidNothing}, which ran and applied no changes.`)
+    why.push('Nothing was written to the PR — the review it read may carry no actionable findings, or they may already be resolved in HEAD.')
+    next = [{ text: `ck run ${prUrl} --steps review`, recommended: true }]
+    notes.push('A review that could not resolve the diff produces a findings-free body that no fix can act on — check the review comment the fix step read.')
   } else {
     cause = 'not_dispatched'
     // A run that asked for one step got what it asked for. An unscoped run that
@@ -268,13 +292,10 @@ export function buildNoVerdictReport(input: NoVerdictInput): NoVerdictReport {
   }
 
   // A fix that applied nothing is the strongest hint available that the findings
-  // are already resolved — which is precisely what a recheck confirms. Scoped to
-  // fix steps by type: conflict-resolve records `applied_count: 0` too, and a
-  // branch with no conflicts to resolve says nothing about the review's findings.
-  const fixStepNames = new Set(workflowSteps.filter(s => s.type === 'fix').map(s => s.name))
-  const noopFix = ran.find(r => fixStepNames.has(r.step) && outcomes?.ranDetail?.[r.step]?.appliedCount === 0)
-  if (!expected && noopFix && cause !== 'ran_no_verdict') {
-    why.push(`The ${noopFix.step} step applied no changes — the findings may already be resolved in HEAD.`)
+  // are already resolved — which is precisely what a recheck confirms. Not repeated
+  // under `fix_noop`, where it is already the headline.
+  if (!expected && noopFixStep && cause !== 'ran_no_verdict' && cause !== 'fix_noop') {
+    why.push(`The ${noopFixStep} step applied no changes — the findings may already be resolved in HEAD.`)
   }
 
   // Offer the other verdict step as an alternative: recheck judges against the

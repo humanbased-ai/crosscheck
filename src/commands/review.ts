@@ -13,8 +13,8 @@ import { resolveLinearAuth, withWorker, isLinearConfigError, type ResolvedLinear
 import { notifyLinear } from '../linear/notify.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
-import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
-import { clonePRForReview } from '../lib/clone.js'
+import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, detectInconclusiveReview } from '../lib/verdict.js'
+import { clonePRForReview, BaseRefUnavailableError } from '../lib/clone.js'
 import { linearWritePossible } from '../lib/workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
@@ -121,13 +121,21 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   let reviewSpinner: ReturnType<typeof ora> | undefined
 
   try {
-    await clonePRForReview({
-      owner, repo, prNumber: number, baseRef: pr.base.ref,
+    const { baseRefStatus } = await clonePRForReview({
+      owner, repo, prNumber: number, baseRef: pr.base.ref, baseSha: pr.base.sha,
       tmpDir, token, protocol: config.clone_protocol,
       onProgress: line => { spinner2.text = `Cloning repo for review... ${line}` },
       onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref }),
+      onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref, via: status }),
     })
     spinner2.succeed('Repo ready')
+    if (baseRefStatus === 'unavailable') {
+      fileLog({ level: 'error', event: 'base_ref_unavailable', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref, base_sha: pr.base.sha })
+      throw new BaseRefUnavailableError(pr.base.ref)
+    }
+    if (baseRefStatus !== 'fetched') {
+      console.log(chalk.yellow(`  base ref origin/${pr.base.ref} was missing — recovered ${baseRefStatus === 'recovered_by_sha' ? 'from the PR base commit' : "from the PR's merge ref"}`))
+    }
 
     let reviewText: string
     let tokensUsed: number | undefined
@@ -188,6 +196,16 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     if (parsed.verdict === null) {
       fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repo}`, pr: number, reviewer, output_length: reviewText.length })
     }
+    // Inconclusive gate, ahead of the severity gate for the reason spelled out in
+    // runner.ts: a findings-free non-review would otherwise be upgraded to APPROVE.
+    const inconclusive = detectInconclusiveReview(clean)
+    if (inconclusive.inconclusive) {
+      fileLog({ level: 'error', event: 'review_inconclusive', repo: `${owner}/${repo}`, pr: number, reviewer, model, reason: inconclusive.reason, raw_verdict: parsed.verdict ?? undefined, output_length: reviewText.length })
+      console.log(chalk.red(`\n✗ ${reviewer} did not review PR #${number} — ${inconclusive.reason}`))
+      console.log(chalk.dim(`\n--- unposted review ---\n${clean}\n--- end ---`))
+      throw new Error(`${reviewer} review inconclusive — ${inconclusive.reason}`)
+    }
+
     // Severity gate: a NEEDS WORK review with no blocking (Critical/High) finding is
     // approved-with-comments (matches the runner's gating so both paths converge).
     const gate = applySeverityGate(parsed.verdict, clean)

@@ -13,7 +13,10 @@ export interface PREvent {
     // `default_branch` lets the review strategy tell a hotfix aimed at the
     // trunk from one aimed at a release branch. Optional: it is absent from
     // hand-built events in tests and from some third-party redeliveries.
-    base: { ref: string; repo: { full_name: string; default_branch?: string } }
+    // `sha` is the base commit at the time of the event. Optional so older
+    // fixtures and hand-built events still typecheck; used to recover the base
+    // ref when the branch itself has since been deleted or renamed.
+    base: { ref: string; sha?: string; repo: { full_name: string; default_branch?: string } }
     html_url: string
     user: { login: string }
     // Present on real webhook deliveries; used by the strategy's risk class.
