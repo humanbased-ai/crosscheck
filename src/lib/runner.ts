@@ -39,6 +39,7 @@ import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession, type SkillActivationSession } from '../skills/broker.js'
 import { formatSkillAttribution } from '../skills/attribution.js'
+import { CompromisedCloneError, runGitWithoutHooks } from './clone.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
@@ -55,6 +56,7 @@ function vendorTimeoutMs(timeoutSec: number | null): number | undefined {
 // Auth and quota/credit failures are operator/vendor-capacity issues that won't
 // self-heal through an immediate retry. Transient subprocess failures can retry.
 export function isRetryableFixError(err: unknown): boolean {
+  if (err instanceof CompromisedCloneError) return false
   const msg = err instanceof Error ? err.message : String(err)
   return !/auth failure|not logged in|claude auth/i.test(msg) && !isSubscriptionLimitError(err)
 }
@@ -885,7 +887,7 @@ export async function pushWithNonFastForwardHandling(params: {
   const env = { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token }
   
   try {
-    execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { cwd: tmpDir, env })
+    runGitWithoutHooks(tmpDir, ['push', 'origin', `HEAD:${branch}`], env)
   } catch (pushErr: unknown) {
     const pushMsg = pushErr instanceof Error ? pushErr.message : String(pushErr)
     
@@ -905,7 +907,7 @@ export async function pushWithNonFastForwardHandling(params: {
       
       try {
         // Fetch the latest state of the branch
-        execFileSync('git', ['fetch', 'origin', branch], { cwd: tmpDir, env, stdio: 'pipe' })
+        runGitWithoutHooks(tmpDir, ['fetch', 'origin', branch], env)
         
         try {
           // Rebase our changes onto the latest branch state. Rebase onto FETCH_HEAD,
@@ -915,18 +917,18 @@ export async function pushWithNonFastForwardHandling(params: {
           // land-on-branch push falls back to opening a separate fix PR. The fetch on
           // the line above sets FETCH_HEAD to exactly the tip we just pulled, so that
           // is the correct (and always-present) rebase target.
-          execFileSync('git', ['rebase', 'FETCH_HEAD'], { cwd: tmpDir, env, stdio: 'pipe' })
+          runGitWithoutHooks(tmpDir, ['rebase', 'FETCH_HEAD'], env)
         } catch (rebaseConflictErr: unknown) {
           // If rebase fails (e.g., due to conflicts), abort it and restore the fix commit.
           // Otherwise the outer catch's fallback logic sees a repo in in-progress-rebase
           // state and incorrectly treats HEAD~1 as the fix commit.
-          execFileSync('git', ['rebase', '--abort'], { cwd: tmpDir, env, stdio: 'pipe' })
-          execFileSync('git', ['reset', '--hard', fixCommitSha], { cwd: tmpDir, env, stdio: 'pipe' })
+          runGitWithoutHooks(tmpDir, ['rebase', '--abort'], env)
+          runGitWithoutHooks(tmpDir, ['reset', '--hard', fixCommitSha], env)
           throw rebaseConflictErr
         }
         
         // Retry the push
-        execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { cwd: tmpDir, env })
+        runGitWithoutHooks(tmpDir, ['push', 'origin', `HEAD:${branch}`], env)
         fileLog({
           level: 'info',
           event: 'push_rebase_succeeded',
@@ -1584,6 +1586,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       try {
         ;({ appliedCount, changedFiles: fixChangedFiles, tokensUsed: fixTokensUsed, effort: fixEffort } = await runFix(vendor))
       } catch (err) {
+        if (err instanceof CompromisedCloneError) throw err
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor }, err)
         const fallbackVendor = resolveLimitFallbackVendor(vendor, effectiveType, config)
         if (isSubscriptionLimitError(err)) {
@@ -1597,6 +1600,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             ;({ appliedCount, changedFiles: fixChangedFiles, tokensUsed: fixTokensUsed, effort: fixEffort } = await runFix(fallbackVendor))
             activeVendor = fallbackVendor
           } catch (fallbackErr) {
+            if (fallbackErr instanceof CompromisedCloneError) throw fallbackErr
             logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor: fallbackVendor }, fallbackErr)
             activeVendor = fallbackVendor  // retry uses the fallback vendor since primary already failed
             fixErr = fallbackErr
@@ -1617,6 +1621,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           fileLog({ level: 'info', event: 'fix_retry_succeeded', repo: `${owner}/${repoName}`, pr: prNumber })
           fixErr = undefined
         } catch (retryErr) {
+          if (retryErr instanceof CompromisedCloneError) throw retryErr
           logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 2 }, retryErr)
           fixErr = retryErr
         }
@@ -1682,18 +1687,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       if (landing === 'branch') {
         const fixModel = activeVendor === 'codex' ? codexFixModel : claudeFixModel
-        execSync('git add -A', { cwd: tmpDir })
-        execFileSync(
-          'git',
-          [
-            'commit',
-            '-m',
-            fixCommitSubject(appliedCount, activeVendor),
-            '-m',
-            buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
-          ],
-          { cwd: tmpDir },
-        )
+        runGitWithoutHooks(tmpDir, ['add', '-A'])
+        runGitWithoutHooks(tmpDir, [
+          'commit',
+          '-m',
+          fixCommitSubject(appliedCount, activeVendor),
+          '-m',
+          buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
+        ])
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
         await pushWithNonFastForwardHandling({
           tmpDir,
@@ -1756,18 +1757,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         // original PR. Only when that push can't land — e.g. the PR was merged and
         // its branch deleted, or the branch is protected — do we fall back to opening
         // a separate follow-up PR that carries the very same commit.
-        execSync('git add -A', { cwd: tmpDir })
-        execFileSync(
-          'git',
-          [
-            'commit',
-            '-m',
-            fixPRCommitSubject(prNumber, activeVendor),
-            '-m',
-            buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
-          ],
-          { cwd: tmpDir },
-        )
+        runGitWithoutHooks(tmpDir, ['add', '-A'])
+        runGitWithoutHooks(tmpDir, [
+          'commit',
+          '-m',
+          fixPRCommitSubject(prNumber, activeVendor),
+          '-m',
+          buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
+        ])
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
 
         let landedOnBranch = false
@@ -1837,7 +1834,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           // either with a sha the repository cannot resolve — which verifyReviewedSha
           // refuses to post (#290) — or with one no open PR carries.
           const restorePRHeadInClone = () => {
-            execSync('git reset --hard HEAD~1', { cwd: tmpDir, stdio: 'pipe' })
+            runGitWithoutHooks(tmpDir, ['reset', '--hard', 'HEAD~1'])
           }
 
           // Deliver the fix as a diff on the original PR. Used wherever opening the
@@ -1950,7 +1947,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           }
 
           try {
-            execFileSync('git', forceWithLeaseArgs(fixBranch, remoteOid), { cwd: tmpDir, env: gitEnv, stdio: 'pipe' })
+            runGitWithoutHooks(tmpDir, forceWithLeaseArgs(fixBranch, remoteOid), gitEnv)
           } catch (pushErr: unknown) {
             const pushMsg = pushErr instanceof Error ? pushErr.message : String(pushErr)
             fileLog({
@@ -1972,7 +1969,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           const rollBackPushedFixBranch = () => {
             if (remoteOid !== null) return
             try {
-              execFileSync('git', ['push', 'origin', '--delete', fixBranch], { cwd: tmpDir, env: gitEnv, stdio: 'pipe' })
+              runGitWithoutHooks(tmpDir, ['push', 'origin', '--delete', fixBranch], gitEnv)
               fileLog({ level: 'info', event: 'fix_branch_rolled_back', repo: `${owner}/${repoName}`, pr: prNumber, branch: fixBranch, sha: newSha })
             } catch (deleteErr: unknown) {
               fileLog({ level: 'warn', event: 'fix_branch_rollback_failed', repo: `${owner}/${repoName}`, pr: prNumber, branch: fixBranch, error: deleteErr instanceof Error ? deleteErr.message.slice(0, 500) : String(deleteErr) })
@@ -2089,9 +2086,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // real conflict markers and UU entries that findConflictedFiles can detect.
       let hasMergeConflicts = false
       try {
-        execSync(`git merge --no-commit origin/${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
+        runGitWithoutHooks(tmpDir, ['merge', '--no-commit', `origin/${pr.base.ref}`])
         // Clean merge — undo the staged merge state and skip this step
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
       } catch {
         hasMergeConflicts = true
       }
@@ -2103,7 +2100,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const conflictedFiles = findConflictedFiles(tmpDir)
       if (conflictedFiles.length === 0) {
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         skipConflictResolve('no_conflicts')
         continue
       }
@@ -2117,8 +2114,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       } else if (substitutedOriginVendor && vendor) {
         fileLog({ level: 'info', event: 'conflict_resolve_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: substitutedOriginVendor, to: vendor, reason: 'unsupported_vendor' })
       }
-      if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
-      if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
+      if (!vendor) { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
+      if (vendor === 'codex') { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
       // Conflict-resolve is mechanical text surgery bounded by the markers —
       // measured at 37s against ~643s for a review — so it always runs fast.
       const conflictResolveModel = resolveClaudeModel(
@@ -2127,11 +2124,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       )
 
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
-      if (isFork) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
+      if (isFork) { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
 
       const crCommitCount = countCrosscheckCommitsForPRDetailed(tmpDir, pr.base.ref)
       if (crCommitCount.count >= MAX_CROSSCHECK_COMMITS) {
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         log(crCommitCount.scoped
           ? chalk.yellow(`⚠  PR #${prNumber}: ${crCommitCount.count}/${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping conflict-resolve`)
           : chalk.yellow(`⚠  PR #${prNumber}: cannot scope [crosscheck] commit count (origin/${pr.base.ref} missing) — stopping conflict-resolve`))
@@ -2155,7 +2152,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         skipConflictResolve(isSubscriptionLimitError(err) ? 'vendor_limit' : 'resolve_error')
         continue
       }
@@ -2165,7 +2162,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       else if (skillSession) logSkillsNoneActivated(skillSession, { step_type: 'conflict-resolve', step_name: step.name })
 
       if (appliedCount === 0) {
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: resolveTokensUsed })
         results[step.name] = { applied_count: 0, ...(resolveTokensUsed !== undefined && { tokens_used: resolveTokensUsed }), vendor }
         continue
@@ -2188,7 +2185,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         } catch { /* unreadable (deleted side of modify/delete) — caught by U-filter below */ }
       }
       if (filesWithMarkers.length > 0) {
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         log(chalk.yellow(`⚠  PR #${prNumber}: ${filesWithMarkers.length} file(s) still contain conflict markers — skipping commit`))
         fileLog({ level: 'warn', event: 'conflict_resolve_incomplete', repo: `${owner}/${repoName}`, pr: prNumber, paths: filesWithMarkers })
         skipConflictResolve('incomplete_resolution')
@@ -2204,7 +2201,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // resolvedPaths is derived from model output and PR-controlled filenames.
       for (const p of resolvedPaths) {
         try {
-          execFileSync('git', ['add', '--', p], { cwd: tmpDir, stdio: 'pipe' })
+          runGitWithoutHooks(tmpDir, ['add', '--', p])
         } catch { /* skip */ }
       }
 
@@ -2217,24 +2214,20 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         unmergedPaths = out.trim().split('\n').filter(Boolean)
       } catch { /* ignore */ }
       if (unmergedPaths.length > 0) {
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         log(chalk.yellow(`⚠  PR #${prNumber}: ${unmergedPaths.length} unmerged path(s) remain after resolve — skipping commit`))
         fileLog({ level: 'warn', event: 'conflict_resolve_unmerged_paths', repo: `${owner}/${repoName}`, pr: prNumber, paths: unmergedPaths })
         skipConflictResolve('unmerged_paths')
         continue
       }
 
-      execFileSync(
-        'git',
-        [
-          'commit',
-          '-m',
-          conflictResolveCommitSubject(conflictedFiles.length, vendor),
-          '-m',
-          buildCommitTrailers({ reviewer: vendor, model: conflictResolveModel, step: 'conflict-resolve', service: 'crosscheck' }),
-        ],
-        { cwd: tmpDir },
-      )
+      runGitWithoutHooks(tmpDir, [
+        'commit',
+        '-m',
+        conflictResolveCommitSubject(conflictedFiles.length, vendor),
+        '-m',
+        buildCommitTrailers({ reviewer: vendor, model: conflictResolveModel, step: 'conflict-resolve', service: 'crosscheck' }),
+      ])
       const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
       await pushWithNonFastForwardHandling({
         tmpDir,

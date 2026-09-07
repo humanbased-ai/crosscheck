@@ -14,6 +14,8 @@ describe('buildCodexEnv', () => {
     LC_ALL: 'en_US.UTF-8',
     HTTPS_PROXY: 'http://proxy:8080',
     OPENAI_API_KEY: 'sk-real',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
     // None of these may survive.
     GITHUB_TOKEN: 'ghp_secret',
     GH_TOKEN: 'gho_secret',
@@ -31,6 +33,8 @@ describe('buildCodexEnv', () => {
     expect(env.OPENAI_API_KEY).toBe('sk-real')
     expect(env.HTTPS_PROXY).toBe('http://proxy:8080')
     expect(env.LC_ALL).toBe('en_US.UTF-8')
+    expect(env.GIT_CONFIG_NOSYSTEM).toBe('1')
+    expect(env.GIT_CONFIG_GLOBAL).toBe('/dev/null')
   })
 
   it('drops every credential that is not codex\'s own', () => {

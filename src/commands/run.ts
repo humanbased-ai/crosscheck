@@ -1,4 +1,3 @@
-import { execFileSync } from 'child_process'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -24,7 +23,7 @@ import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { buildNoVerdictReport, renderNoVerdictReport, selectStandingVerdict, type JudgedRecordShape } from '../lib/no-verdict.js'
-import { clonePRForReview } from '../lib/clone.js'
+import { clonePRForReview, runGitWithoutHooks } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import type { PREvent } from '../github/webhook.js'
@@ -750,8 +749,8 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
             // next attempt starts from a clean state. vendor_limit never touches files.
             if (workflowResult.fixSkipReason === 'fix_error') {
               try {
-                execFileSync('git', ['reset', '--hard', 'HEAD'], { cwd: tmpDir, stdio: 'pipe' })
-                execFileSync('git', ['clean', '-fd'], { cwd: tmpDir, stdio: 'pipe' })
+                runGitWithoutHooks(tmpDir, ['reset', '--hard', 'HEAD'])
+                runGitWithoutHooks(tmpDir, ['clean', '-fd'])
               } catch {
                 fileLog({ level: 'warn', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'worktree_reset_failed', mode, round: loopRound })
                 console.log(chalk.red(`✗  could not reset worktree after fix_error — stopping`))
