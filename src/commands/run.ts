@@ -1,4 +1,3 @@
-import { execFileSync } from 'child_process'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -6,7 +5,7 @@ import chalk from 'chalk'
 import { execa } from 'execa'
 import { parseDuration } from '../lib/durations.js'
 import ora from 'ora'
-import { createGithubClient, fetchIssueComment, isFreshReviewComment } from '../github/client.js'
+import { createGithubClient, fetchIssueComment } from '../github/client.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { fetchStandingVerdictRecords, fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
@@ -25,7 +24,7 @@ import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { buildNoVerdictReport, renderNoVerdictReport, selectStandingVerdict, type JudgedRecordShape } from '../lib/no-verdict.js'
-import { clonePRForReview, BaseRefUnavailableError } from '../lib/clone.js'
+import { clonePRForReview, runGitWithoutHooks, BaseRefUnavailableError } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import type { PREvent } from '../github/webhook.js'
@@ -395,8 +394,12 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       console.error(chalk.red(`✗ Comment ${opts.reviewCommentId} not found on ${owner}/${repo}`))
       process.exit(1)
     }
+    // Compared case-insensitively: GitHub echoes the repository's canonical casing,
+    // so a URL typed with different case (github.com/HumanBased-AI/...) would fail an
+    // exact compare while naming the very same PR. The check still pins the comment
+    // to this owner/repo/number, which is the property that matters.
     const expectedIssueUrl = `https://api.github.com/repos/${owner}/${repo}/issues/${number}`
-    if (anchored.issue_url !== expectedIssueUrl) {
+    if (anchored.issue_url?.toLowerCase() !== expectedIssueUrl.toLowerCase()) {
       console.error(chalk.red(`✗ Comment ${opts.reviewCommentId} does not belong to ${owner}/${repo}#${number} — nothing to act on`))
       process.exit(1)
     }
@@ -792,8 +795,8 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
             // next attempt starts from a clean state. vendor_limit never touches files.
             if (workflowResult.fixSkipReason === 'fix_error') {
               try {
-                execFileSync('git', ['reset', '--hard', 'HEAD'], { cwd: tmpDir, stdio: 'pipe' })
-                execFileSync('git', ['clean', '-fd'], { cwd: tmpDir, stdio: 'pipe' })
+                runGitWithoutHooks(tmpDir, ['reset', '--hard', 'HEAD'])
+                runGitWithoutHooks(tmpDir, ['clean', '-fd'])
               } catch {
                 fileLog({ level: 'warn', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'worktree_reset_failed', mode, round: loopRound })
                 console.log(chalk.red(`✗  could not reset worktree after fix_error — stopping`))

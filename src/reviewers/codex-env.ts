@@ -20,6 +20,8 @@ const ALLOWED_KEYS: ReadonlyArray<string> = [
   'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'TMPDIR', 'TZ', 'LANG',
   // Codex's own configuration root.
   'CODEX_HOME',
+  // Keep Git commands launched by the agent on Crosscheck's isolated config view.
+  'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL',
   // API-key auth, for installs that use it instead of ~/.codex/auth.json.
   'OPENAI_API_KEY', 'OPENAI_BASE_URL',
   // XDG paths — codex resolves config/cache through them on Linux.

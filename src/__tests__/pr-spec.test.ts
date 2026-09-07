@@ -130,3 +130,14 @@ describe('#issuecomment anchors', () => {
     expect(refs[1].commentId).toBeUndefined()
   })
 })
+
+describe('anchor casing', () => {
+  it('parses an anchor from a URL typed with non-canonical repo casing', () => {
+    // The ownership check in run.ts compares the anchor's issue_url against one
+    // built from these fields, so a case difference must not survive to there as a
+    // mismatch — see the case-insensitive compare at the call site.
+    const refs = parsePRSpec('https://github.com/HumanBased-AI/Monorepo/pull/3649#issuecomment-42')
+    expect(refs[0].commentId).toBe(42)
+    expect(refs[0].owner).toBe('HumanBased-AI')
+  })
+})
