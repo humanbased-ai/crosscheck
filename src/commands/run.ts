@@ -403,6 +403,21 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       console.error(chalk.red(`✗ Comment ${opts.reviewCommentId} does not belong to ${owner}/${repo}#${number} — nothing to act on`))
       process.exit(1)
     }
+    // The annotation tag is plain HTML in a comment body — any PR commenter can post
+    // one. It only proves provenance when the comment also comes from the token's own
+    // account, the same check watch.ts's onComment handler makes against
+    // authenticatedLogin. Fail closed if the authenticated user can't be determined.
+    let authenticatedLogin: string | null = null
+    try {
+      const { data: me } = await createGithubClient(token).rest.users.getAuthenticated()
+      authenticatedLogin = me.login
+    } catch {
+      authenticatedLogin = null
+    }
+    if (authenticatedLogin === null || anchored.user.login !== authenticatedLogin) {
+      console.error(chalk.red(`✗ Comment ${opts.reviewCommentId} was not posted by crosscheck — nothing to act on`))
+      process.exit(1)
+    }
     // A comment ID is user-supplied and untrusted, so this mutation path requires the
     // stricter annotation-based check rather than isFreshReviewComment's legacy header
     // fallback — the header alone is too permissive to gate a fix dispatch on.
