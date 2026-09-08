@@ -184,6 +184,7 @@ Full walkthrough: **[docs/linear-identity.md](./docs/linear-identity.md)**.
 | `crosscheck review <pr>` | One-shot review, posts a comment |
 | `crosscheck run <pr>` | Full pipeline for a PR — review, fix, recheck |
 | `crosscheck recheck` / `fix` / `resolve` | Run one step in isolation |
+| `crosscheck merge <pr>` | Merge a PR once the verdict allows it — `--loose` / `--tight` / `--force` |
 | `crosscheck watch` | Listen for PR events and run the pipeline automatically |
 | `crosscheck scan` | Show open PRs with stale crosscheck state |
 | `crosscheck kickass` | Pick a stale PR and drive it to its next step |

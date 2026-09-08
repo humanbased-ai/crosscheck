@@ -130,6 +130,23 @@ function srcChurnFraction(files: string[]): { doc: number; config: number; sourc
  * fall back to backend — the conservative default, because the backend
  * preference list is `measured` while the frontend list is still a hypothesis.
  */
+/**
+ * Whether every changed file is prose documentation.
+ *
+ * Deliberately stricter than the `docs` PR class, which matches on a *fraction*
+ * of doc churn and so also covers a PR that edits a README alongside source. This
+ * is the all-or-nothing case, and it is the one that gates a verdict: a single
+ * source file in the diff means a finding could describe shipping code, so the
+ * verdict must be free to block.
+ *
+ * File-based rather than reading the resolved class id, because the class only
+ * exists in `smart` mode — a `fixed`-mode install and `crosscheck review` both
+ * need the same answer.
+ */
+export function isDocOnlyChange(files: string[]): boolean {
+  return files.length > 0 && files.every(f => DOC_EXT.test(f))
+}
+
 export function detectDomain(files: string[]): Domain {
   const fe = files.filter(f => FRONTEND_EXT.test(f)).length
   const be = files.filter(f => BACKEND_EXT.test(f)).length

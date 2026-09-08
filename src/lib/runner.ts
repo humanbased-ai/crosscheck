@@ -12,7 +12,7 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
-import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, detectInconclusiveReview, reviewHasNoFindings } from '../lib/verdict.js'
+import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, DOC_ONLY_GATE_NOTE, detectInconclusiveReview, reviewHasNoFindings } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
 import { fetchCommentsAfter, selectHumanFeedback, formatHumanFeedback } from '../lib/human-feedback.js'
 import { autoFixBranchName, autoFixPRIntro, sourcePRHasMerged } from '../github/superseded-fix-pr.js'
@@ -26,7 +26,7 @@ import { log as fileLog, logError, classifyError, type LogEntry } from '../lib/l
 import { buildCommitTrailers, parseAnnotation } from '../lib/annotation.js'
 import { shaCovers } from '../lib/pr-workflow-state.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
-import { resolveReviewStrategy, escalate, clampToLevels, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
+import { resolveReviewStrategy, escalate, clampToLevels, isDocOnlyChange, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { planAutoFixDelivery, forceWithLeaseArgs, parseLsRemoteOid, isLeaseRejection, assessFixBranchOwnership, isInvalidBaseError } from '../lib/auto-fix-branch.js'
@@ -40,7 +40,7 @@ import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession, type SkillActivationSession } from '../skills/broker.js'
 import { formatSkillAttribution } from '../skills/attribution.js'
-import { CompromisedCloneError, runGitWithoutHooks } from './clone.js'
+import { CompromisedCloneError, runGitWithoutHooks, changedFilesVsBase } from './clone.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
@@ -627,41 +627,17 @@ function diffBucket(totalLines: number): string {
  */
 export function buildPRContext(ctx: WorkflowContext): PRContext | null {
   const { tmpDir, pr } = ctx
-  try {
-    // execFileSync, not execSync: a git ref may legally contain `;`, `$( )` and
-    // backticks, and this value drives routing rather than best-effort logging.
-    const raw = execFileSync(
-      'git',
-      ['diff', '--numstat', `origin/${pr.base.ref}...HEAD`],
-      { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim()
-    if (!raw) return null
+  const changed = changedFilesVsBase(tmpDir, pr.base.ref)
+  if (!changed) return null
 
-    const files: string[] = []
-    let additions = 0
-    let deletions = 0
-    for (const line of raw.split('\n')) {
-      // numstat: <added>\t<deleted>\t<path>. Binary files report '-' for both.
-      const [add, del, ...rest] = line.split('\t')
-      const path = rest.join('\t').trim()
-      if (!path) continue
-      files.push(path)
-      additions += parseInt(add, 10) || 0
-      deletions += parseInt(del, 10) || 0
-    }
-    if (files.length === 0) return null
-
-    return {
-      files,
-      additions,
-      deletions,
-      labels: pr.labels?.map(l => l.name) ?? [],
-      title: pr.title,
-      baseRef: pr.base.ref,
-      ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
-    }
-  } catch {
-    return null
+  return {
+    files: changed.files,
+    additions: changed.additions,
+    deletions: changed.deletions,
+    labels: pr.labels?.map(l => l.name) ?? [],
+    title: pr.title,
+    baseRef: pr.base.ref,
+    ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
   }
 }
 
@@ -977,6 +953,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // legitimately classify differently. Each comment cites the class that
   // produced it, so the record stays accurate either way.
   const strategy = resolveStrategyForPR(ctx)
+  // Read from the diff rather than the resolved class: `docs` matches a *fraction*
+  // of doc churn and exists only in smart mode, whereas the verdict cap needs the
+  // all-or-nothing answer on every install. Independent of `strategy` for that
+  // reason, and cheap — buildPRContext is one `git diff --numstat`.
+  const docOnlyChange = isDocOnlyChange(buildPRContext(ctx)?.files ?? [])
   if (config.quality.mode === 'smart' && !strategy) {
     // A smart-mode install quietly behaving as fixed is otherwise invisible.
     fileLog({ level: 'warn', event: 'strategy_unresolved', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'pr_context_unavailable', fallback_tier: config.quality.tier })
@@ -1337,14 +1318,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // Severity gate: NEEDS WORK with only P3 nits is downgraded to APPROVE so
       // suggestion-only reviews don't drive the fix/recheck loop. P2 (correctness)
       // and above keep NEEDS WORK and require human attention before merge.
-      const gate = applySeverityGate(parsed.verdict, clean)
+      const gate = applySeverityGate(parsed.verdict, clean, { docOnly: docOnlyChange })
       const verdict = gate.verdict
       if (gate.downgraded) {
-        fileLog({ level: 'info', event: 'verdict_severity_gated', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, raw_verdict: parsed.verdict, gated_verdict: verdict })
+        fileLog({ level: 'info', event: 'verdict_severity_gated', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, raw_verdict: parsed.verdict, gated_verdict: verdict, reason: gate.reason })
       }
+      const gateNote = gate.reason === 'doc_only' ? DOC_ONLY_GATE_NOTE : SEVERITY_GATE_NOTE
       const baseBody = verdict === null
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
-        : prependVerdictToComment(gate.downgraded ? `${SEVERITY_GATE_NOTE}\n\n${clean}` : clean, verdict)
+        : prependVerdictToComment(gate.downgraded ? `${gateNote}\n\n${clean}` : clean, verdict)
       // Skills are not folded into the body — postReviewComment renders the
       // receipt beneath the attribution footer.
       const commentBody = retried

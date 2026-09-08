@@ -13,8 +13,9 @@ import { resolveLinearAuth, withWorker, isLinearConfigError, type ResolvedLinear
 import { notifyLinear } from '../linear/notify.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
-import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, detectInconclusiveReview } from '../lib/verdict.js'
-import { clonePRForReview, BaseRefUnavailableError } from '../lib/clone.js'
+import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, DOC_ONLY_GATE_NOTE, detectInconclusiveReview } from '../lib/verdict.js'
+import { clonePRForReview, BaseRefUnavailableError, changedFilesVsBase } from '../lib/clone.js'
+import { isDocOnlyChange } from '../lib/review-strategy.js'
 import { linearWritePossible } from '../lib/workflow.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
@@ -208,16 +209,20 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     // Severity gate: a NEEDS WORK review with no blocking (Critical/High) finding is
     // approved-with-comments (matches the runner's gating so both paths converge).
-    const gate = applySeverityGate(parsed.verdict, clean)
+    // Read from the clone, not the API: a truncated file list could turn a mixed
+    // PR into an apparently doc-only one, and that now caps the verdict.
+    const docOnly = isDocOnlyChange(changedFilesVsBase(tmpDir, pr.base.ref)?.files ?? [])
+    const gate = applySeverityGate(parsed.verdict, clean, { docOnly })
     const verdict = gate.verdict
     if (gate.downgraded) {
-      fileLog({ level: 'info', event: 'verdict_severity_gated', repo: `${owner}/${repo}`, pr: number, reviewer, raw_verdict: parsed.verdict, gated_verdict: verdict })
+      fileLog({ level: 'info', event: 'verdict_severity_gated', repo: `${owner}/${repo}`, pr: number, reviewer, raw_verdict: parsed.verdict, gated_verdict: verdict, reason: gate.reason })
     }
     fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, model, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed, skills_activated: activatedSkills.map(skill => skill.name) })
     console.log(`  ${formatVerdict(verdict)}`)
+    const gateNote = gate.reason === 'doc_only' ? DOC_ONLY_GATE_NOTE : SEVERITY_GATE_NOTE
     const reviewBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
-      : prependVerdictToComment(gate.downgraded ? `${SEVERITY_GATE_NOTE}\n\n${clean}` : clean, verdict)
+      : prependVerdictToComment(gate.downgraded ? `${gateNote}\n\n${clean}` : clean, verdict)
     await postReviewComment(octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
