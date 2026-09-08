@@ -8,7 +8,7 @@ Drafts for [#198](https://github.com/humanbased-ai/crosscheck/issues/198). Nothi
 | X / LinkedIn posts | [`posts.md`](./posts.md#x--twitter) | Draft, three X variants + one LinkedIn |
 | Show HN | [`posts.md`](./posts.md#hacker-news--show-hn) | Draft, two title options + first comment |
 | Reddit / community | [`posts.md`](./posts.md#reddit) | Draft, r/ExperiencedDevs, r/ClaudeAI, r/ClaudeCode, r/ChatGPTCoding |
-| README-linked demo clip | — | **Not produced.** Blocked on [#201](https://github.com/humanbased-ai/crosscheck/issues/201) |
+| README-linked demo clip | [`assets/demo-block-to-approve.mp4`](../../../assets/demo-block-to-approve.mp4) · [`.gif`](../../../assets/demo-block-to-approve.gif) | **Produced** ([#201](https://github.com/humanbased-ai/crosscheck/issues/201)). 85s full cut and a 34s README loop, recorded from [`crosscheck-proof-fixture#2`](https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/2) |
 
 ## The argument these assets make
 
@@ -24,7 +24,11 @@ Every asset leads with that and arrives at the product second. Sequencing it the
 2. **Whether to publish the 4-minute number at all.** It is the strongest hook in the essay and it is also a public admission that our own team merged past correct findings 62% of the time. That is a deliberate credibility trade: it makes the piece believable and it says something unflattering about our discipline. Worth an explicit yes.
 3. **Whether the gate has shipped by publish time.** The essay says "bound the loop, then gate" as the correct order without claiming the gate is done. If a merge-blocking status ships first, the essay should say so — otherwise a reader who installs it will find no gate and feel misled.
 4. ~~**Timing against [#200](https://github.com/humanbased-ai/crosscheck/issues/200)** (npm scope).~~ **Resolved.** `@humanbased/crosscheck` is published — `latest` is `1.3.0`, both the `crosscheck` and `ck` bins ship, and `@motivation-labs/crosscheck` is deprecated with a migration message pointing at the new scope. The install line every draft uses now works, so this no longer gates publishing.
-5. **Demo clip.** [#201](https://github.com/humanbased-ai/crosscheck/issues/201) is a 90-second AI-slop → merge-ready clip. The Show HN comment and the essay both have a natural slot for it; neither currently references one, so no placeholder needs removing if it isn't ready.
+5. ~~**Demo clip.**~~ **Produced** — but read this before linking it. The clip runs the real arc from [`crosscheck-proof-fixture#2`](https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/2), and that arc took **three rounds**: the first repair restored a dropped ownership filter and left a test asserting the old query shape, and the next review caught the regression its own fix step had introduced. The full cut shows all of it, deliberately.
+
+   That is an asset and a liability at once, and it is the same trade as decision 2. It is the most convincing thing in the recording — a loop that catches its own mistakes is a much stronger claim than one clean pass — and it also shows the fix step shipping a broken test, and a third round blocking on a concern the reviewer's own summary had already called resolved. Both of those are now filed as bugs ([#317](https://github.com/humanbased-ai/crosscheck/issues/317), [#318](https://github.com/humanbased-ai/crosscheck/issues/318)) and fixed, so the clip records behaviour that no longer ships. **Decide whether to re-record against the fixed pipeline before launch, or to lead with the three-round version as the honest artifact.** The drafts still reference no clip, so either choice needs an edit rather than a removal.
+
+   Note also that the Show HN comment and the essay both have a natural slot for it, and neither uses one yet.
 
 ## Fact-check trail
 
