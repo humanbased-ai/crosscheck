@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // The demo's whole claim is that what it shows happened. These guard the two ways
 // that claim rots silently: arc.json drifting away from a real captured run, and a
@@ -8,7 +9,7 @@ import { join } from 'node:path'
 //
 // `npm run demo:play -- --fast` in CI covers the rendering; this covers the data.
 
-const demoDir = join(import.meta.dirname, '..', '..', 'demo')
+const demoDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'demo')
 
 interface Arc {
   capturedFrom: { repo: string; pr: number; url: string }

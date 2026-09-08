@@ -13,7 +13,8 @@
 //   npm run demo:play -- --fast   # no waits, for checking the script renders
 
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import chalk from 'chalk'
 import { PRBoard } from '../src/lib/board.js'
 import type { Config } from '../src/config/schema.js'
@@ -36,12 +37,14 @@ const STEP_MAX_MS = FAST ? 0 : SHORT ? 900 : 2_400
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
+const demoDir = dirname(fileURLToPath(import.meta.url))
+
 function loadArc(): Arc {
-  return JSON.parse(readFileSync(join(import.meta.dirname, 'arc.json'), 'utf8')) as Arc
+  return JSON.parse(readFileSync(join(demoDir, 'arc.json'), 'utf8')) as Arc
 }
 
 function scene(name: string): string {
-  return readFileSync(join(import.meta.dirname, 'scenes', name), 'utf8').replace(/\n+$/, '')
+  return readFileSync(join(demoDir, 'scenes', name), 'utf8').replace(/\n+$/, '')
 }
 
 // Renders a shell prompt and the command "typed" into it, so the recording reads as

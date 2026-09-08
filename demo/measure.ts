@@ -10,12 +10,13 @@
 // seconds of headroom.
 
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 async function timeCut(label: string, args: string[]): Promise<number> {
   const started = Date.now()
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('npx', ['tsx', join(import.meta.dirname, 'replay.ts'), ...args], {
+    const child = spawn('npx', ['tsx', join(dirname(fileURLToPath(import.meta.url)), 'replay.ts'), ...args], {
       stdio: 'ignore',
       env: { ...process.env, FORCE_COLOR: '1' },
     })

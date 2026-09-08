@@ -14,9 +14,10 @@
 // demo/README.md's provenance note false.
 
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 const REPO = 'humanbased-ai/crosscheck-proof-fixture'
 const PR = 2
@@ -76,18 +77,34 @@ function logDir(): string {
 
 // A long-running `watch` pins its log file at startup, so this run's events can sit
 // in a file named for an earlier date. Scan every log rather than guessing today's.
+//
+// `workflow_complete` fires exactly once per runWorkflow invocation, so it marks a
+// run's end. Scope to the most recent one — everything after the previous
+// completion — so re-capturing after another crosscheck run against this fixture
+// doesn't blend two separate executions into one timeline.
 function readRunLines(): LogLine[] {
   const dir = logDir()
-  const out: LogLine[] = []
+  const all: LogLine[] = []
   for (const name of readdirSync(dir).filter(f => f.endsWith('.ndjson'))) {
     for (const raw of readFileSync(join(dir, name), 'utf8').split('\n')) {
       if (!raw.trim()) continue
       let line: LogLine
       try { line = JSON.parse(raw) as LogLine } catch { continue }
-      if (line.repo === REPO && line.pr === PR) out.push(line)
+      if (line.repo === REPO && line.pr === PR) all.push(line)
     }
   }
-  return out.sort((a, b) => a.ts.localeCompare(b.ts))
+  all.sort((a, b) => a.ts.localeCompare(b.ts))
+
+  const completions = all.reduce<number[]>((acc, l, i) => {
+    if (l.event === 'workflow_complete') acc.push(i)
+    return acc
+  }, [])
+  if (completions.length === 0) {
+    throw new Error(`no workflow_complete event found for ${REPO}#${PR} in ${dir} — the run is still in progress or its logs were rotated away`)
+  }
+  const lastComplete = completions[completions.length - 1]!
+  const prevComplete = completions.length > 1 ? completions[completions.length - 2]! : -1
+  return all.slice(prevComplete + 1, lastComplete + 1)
 }
 
 const KEPT_EVENTS = new Set([
@@ -165,7 +182,7 @@ function main(): void {
     comments: rawComments.map(c => ({ id: c.id, ...classifyComment(c.body), body: c.body })),
   }
 
-  const out = join(import.meta.dirname, 'arc.json')
+  const out = join(dirname(fileURLToPath(import.meta.url)), 'arc.json')
   writeFileSync(out, `${JSON.stringify(arc, null, 2)}\n`)
   console.log(`captured ${steps.length} steps and ${arc.comments.length} comments -> ${out}`)
   for (const c of arc.comments) console.log(`  ${c.kind.padEnd(8)} ${c.verdict ?? '—'}  id=${c.id}`)
