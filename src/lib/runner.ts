@@ -323,6 +323,10 @@ export interface WorkflowContext {
   overrideTimeoutMs?: number
   // How this workflow was triggered — logged in step events for analysis segmentation.
   trigger?: WorkflowTrigger
+  // True when the caller named specific steps (--steps, or a kickass dispatch),
+  // as opposed to steps narrowed by resume or the repo's default pipeline. An
+  // explicit ask outranks class-level narrowing AND class-level skips.
+  stepsExplicitlyScoped?: boolean
   // Linked tracker issue rendered as a prompt block (see issues/enrich.ts).
   // Injected into review/recheck prompts so the reviewer judges against the
   // stated goal; undefined when enrichment is off or the issue didn't resolve.
@@ -1077,7 +1081,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   }
   const steps = stepPlan.steps
 
-  if (strategy && strategy.tier === null) {
+  if (strategy && strategy.tier === null && !ctx.stepsExplicitlyScoped) {
     log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → skipped (${strategy.reason})`))
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'strategy_class_skip', pr_class: strategy.classId, strategy_version: strategy.version })
     return { verdict: null, strategySkipped: strategy.classId }
