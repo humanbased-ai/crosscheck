@@ -207,7 +207,6 @@ addStepRunOptions(
 program
   .command('merge <pr-url>')
   .description('Merge a PR once crosscheck\'s verdict allows it. Default requires an APPROVE covering HEAD')
-  .option('-c, --config <path>', 'config file path')
   .option('--loose', 'merge unless the standing verdict is BLOCK (accepts NEEDS WORK)')
   .option('--tight', 'also require every check green and no unresolved blocking finding')
   .option('--force', 'merge without a verdict gate (still refuses a conflicted PR)')

@@ -1,6 +1,6 @@
 import chalk from 'chalk'
 import ora from 'ora'
-import { createGithubClient } from '../github/client.js'
+import { createGithubClient, fetchIssueComment } from '../github/client.js'
 import { getGithubToken } from '../config/loader.js'
 import { getPRMergeSummary, getRepoMergeConfig, mergePullRequest, type MergeMethod } from '../github/merge.js'
 import { fetchStandingVerdictRecords } from '../lib/pr-workflow-state.js'
@@ -10,7 +10,6 @@ import { parsePRSpec } from '../lib/pr-spec.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 
 export interface MergeOpts {
-  config?: string
   loose?: boolean
   tight?: boolean
   force?: boolean
@@ -42,8 +41,8 @@ async function readChecks(
   const failing: string[] = []
   const pending: string[] = []
 
-  const { data: runs } = await octokit.rest.checks.listForRef({ owner, repo, ref: sha, per_page: 100 })
-  for (const run of runs.check_runs) {
+  const runs = await octokit.paginate(octokit.rest.checks.listForRef, { owner, repo, ref: sha, per_page: 100 })
+  for (const run of runs) {
     if (run.status !== 'completed') { pending.push(run.name); continue }
     // neutral and skipped are not failures; a skipped job is a job that decided
     // it had nothing to do.
@@ -52,14 +51,17 @@ async function readChecks(
     }
   }
 
-  const { data: combined } = await octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref: sha, per_page: 100 })
-  // Latest state per context: the statuses API keeps every post, so an early
-  // failure followed by a success would otherwise read as still failing.
-  const latest = new Map<string, string>()
-  for (const status of [...combined.statuses].reverse()) latest.set(status.context, status.state)
-  for (const [context, state] of latest) {
-    if (state === 'pending') pending.push(context)
-    else if (state === 'failure' || state === 'error') failing.push(context)
+  // listCommitStatusesForRef, not the combined-status API: the combined endpoint
+  // caps at 100 statuses with no pagination, so a repo with more than 100 status
+  // posts would silently miss the rest. This list is paginated and returns
+  // newest-first, so the first entry seen per context is the latest.
+  const statuses = await octokit.paginate(octokit.rest.repos.listCommitStatusesForRef, { owner, repo, ref: sha, per_page: 100 })
+  const seen = new Set<string>()
+  for (const status of statuses) {
+    if (seen.has(status.context)) continue
+    seen.add(status.context)
+    if (status.state === 'pending') pending.push(status.context)
+    else if (status.state === 'failure' || status.state === 'error') failing.push(status.context)
   }
 
   return { failing, pending }
@@ -117,11 +119,22 @@ export async function runMerge(prUrl: string, opts: MergeOpts = {}): Promise<voi
     }
 
     const headSha: string = pr.head.sha
-    const [mergeSummary, repoMerge, records] = await Promise.all([
+    const [mergeSummary, repoMerge, rawRecords, me] = await Promise.all([
       getPRMergeSummary(octokit, owner, repo, number, pr.base.ref),
       getRepoMergeConfig(octokit, owner, repo),
       fetchStandingVerdictRecords(owner, repo, number, token).catch(() => []),
+      octokit.rest.users.getAuthenticated(),
     ])
+
+    // A `crosscheck` annotation is just comment text on the PR — anything can post
+    // one, including the PR author. Only a comment authored by the token that is
+    // about to merge can be trusted as a real verdict; an unverifiable read
+    // (deleted comment, API failure) or a mismatched author fails closed to no
+    // standing verdict rather than trusting a possibly-forged one.
+    const records = rawRecords.length > 0
+      ? await fetchIssueComment(owner, repo, rawRecords[0].commentId, token)
+          .then(c => (c && c.user.login === me.data.login ? rawRecords : []))
+      : rawRecords
 
     const standing = selectStandingVerdict(records)
     // Only consulted at --tight, so it is not fetched for the cheaper gates.
@@ -144,6 +157,7 @@ export async function runMerge(prUrl: string, opts: MergeOpts = {}): Promise<voi
       failingChecks: checks.failing,
       pendingChecks: checks.pending,
       hasBlockingFindings: standingHasBlockingFindings(records),
+      // `records` above is already the author-verified set.
       strictness,
     })
 
@@ -177,6 +191,11 @@ export async function runMerge(prUrl: string, opts: MergeOpts = {}): Promise<voi
     // the head moved between the gate reading it and this call, so an approval
     // can never be applied to a commit that arrived after it.
     const result = await mergePullRequest(octokit, owner, repo, number, { method, expectedHeadSha: headSha })
+    if (!result.merged) {
+      mergeSpinner.fail('GitHub accepted the request but did not merge the PR')
+      fileLog({ level: 'error', event: 'merge_not_merged', repo: `${owner}/${repo}`, pr: number, sha: headSha, merge_sha: result.sha, strictness, method, verdict: standing?.verdict })
+      process.exit(2)
+    }
     mergeSpinner.succeed(`Merged as ${result.sha.slice(0, 9)}`)
     fileLog({ level: 'info', event: 'merge_completed', repo: `${owner}/${repo}`, pr: number, sha: headSha, merge_sha: result.sha, strictness, method, verdict: standing?.verdict })
     console.log(chalk.green(`\n✓ Merged — ${url}\n`))
