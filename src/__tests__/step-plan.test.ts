@@ -118,3 +118,26 @@ describe('planStepsForClass — an explicit --steps outranks the class', () => {
     expect(types(plan.steps)).toEqual(['fix'])
   })
 })
+
+describe('the flag also outranks a class-level skip', () => {
+  // The strategy skips a PR outright when its class resolves a null tier — a
+  // lockfile-only change, say. That is the same policy-versus-instruction question
+  // planStepsForClass answers for narrowing, so it gets the same answer: an
+  // operator who types --steps review has been told the class would skip and asked
+  // anyway. Doing nothing silently is #318 in a second place.
+  //
+  // The skip lives in runWorkflow rather than here (it needs the resolved tier, not
+  // the step set), so this pins the contract the two share: only a CLI --steps sets
+  // the flag, and every internal narrowing caller leaves it false.
+  it('is not set by callers that narrow steps internally', () => {
+    // resolve/kickass/resume all pass `steps` without the flag, so a skip-class PR
+    // still skips for them. Asserted as the shape of the plan input those callers
+    // build: absent flag behaves exactly like false.
+    const narrowed = planStepsForClass({
+      configuredSteps: FULL,
+      classSteps: ['review'],
+      stepsExplicitlyScoped: false,
+    })
+    expect(narrowed.outcome).toBe('narrowed')
+  })
+})

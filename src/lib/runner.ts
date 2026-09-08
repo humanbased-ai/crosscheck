@@ -293,7 +293,13 @@ export interface WorkflowContext {
   // Distinguishes a person asking for one step right now from the several
   // internal callers that also narrow `steps` (resume, kickass dispatch, the
   // crazy/halfcrazy fix→recheck loop), and from standing policy like repo config
-  // or `crosscheck alter`. Class narrowing yields to it — see the step block.
+  // or `crosscheck alter`.
+  //
+  // Two class decisions yield to it, for the same reason: narrowing the step set
+  // (see planStepsForClass) and skipping the PR outright on a null tier. A person
+  // who types `--steps review` on a lockfile PR has already been told the class
+  // would skip it and asked anyway; silently doing nothing is the #318 failure in
+  // a second place.
   stepsExplicitlyScoped?: boolean
   // When smart-switch is active, route to this vendor if the step's configured
   // reviewer resolves to a disabled vendor rather than skipping the step.
@@ -323,10 +329,6 @@ export interface WorkflowContext {
   overrideTimeoutMs?: number
   // How this workflow was triggered — logged in step events for analysis segmentation.
   trigger?: WorkflowTrigger
-  // True when the caller named specific steps (--steps, or a kickass dispatch),
-  // as opposed to steps narrowed by resume or the repo's default pipeline. An
-  // explicit ask outranks class-level narrowing AND class-level skips.
-  stepsExplicitlyScoped?: boolean
   // Linked tracker issue rendered as a prompt block (see issues/enrich.ts).
   // Injected into review/recheck prompts so the reviewer judges against the
   // stated goal; undefined when enrichment is off or the issue didn't resolve.
@@ -1081,6 +1083,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   }
   const steps = stepPlan.steps
 
+  // A null tier means the class skips this PR outright. An explicit `--steps`
+  // overrides that for the same reason it overrides narrowing — but say so, or the
+  // run looks like the class simply did not match.
+  if (strategy && strategy.tier === null && ctx.stepsExplicitlyScoped) {
+    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} would skip this PR (${strategy.reason}) — honouring --steps as given`))
+    fileLog({ level: 'info', event: 'strategy_class_skip_bypassed', repo: `${owner}/${repoName}`, pr: prNumber, pr_class: strategy.classId, strategy_version: strategy.version })
+  }
   if (strategy && strategy.tier === null && !ctx.stepsExplicitlyScoped) {
     log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → skipped (${strategy.reason})`))
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'strategy_class_skip', pr_class: strategy.classId, strategy_version: strategy.version })
