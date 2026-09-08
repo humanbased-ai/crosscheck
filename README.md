@@ -20,6 +20,17 @@
   <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
 </p>
 
+<p align="center">
+  <strong>See it catch a real one</strong> — a public fixture PR, start to finish, nothing staged after the fact:<br />
+  <a href="https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1#issuecomment-4633226342">🚫 BLOCK</a> &nbsp;·&nbsp;
+  <a href="https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1#issuecomment-4645868229">🔧 fix applied</a> &nbsp;·&nbsp;
+  <a href="https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1#issuecomment-4645880849">✅ APPROVE</a>
+</p>
+
+<p align="center">
+  <sub>A pagination change that passed CI and dropped authenticated-user scoping from transaction reads — a tenant-isolation regression. Reviewed by Codex, repaired by Claude, rechecked to merge-ready.</sub>
+</p>
+
 ---
 
 ## The problem
