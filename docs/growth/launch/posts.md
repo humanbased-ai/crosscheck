@@ -109,7 +109,7 @@ Prefer the first for a Show HN — it says what the thing is. Use the second as 
 >
 > Honest limits: it never merges anything (no code path from verdict to merge), it doesn't replace human review, and your diff reaches Anthropic/OpenAI through their own CLIs under their terms — crosscheck adds no separate upload path. The census is one team, one week, our conventions; I'd be interested in whether the 4-minute number reproduces elsewhere or whether we're just undisciplined.
 >
-> No-GitHub-mutation first run: `crosscheck run <pr-url> --dry-run` clones locally, sends the diff to the configured vendor CLI, prints the comment it would post, and exits without posting or applying a fix.
+> First run with Crosscheck's GitHub writes suppressed: `crosscheck run <pr-url> --dry-run`. It still clones locally and invokes the configured vendor CLI under that CLI's permissions.
 >
 > MIT: [repo link]. The census, including two analytical approaches we abandoned, is in docs/dynamic-thoroughness.md.
 
