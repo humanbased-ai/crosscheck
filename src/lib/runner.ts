@@ -33,7 +33,7 @@ import { planAutoFixDelivery, forceWithLeaseArgs, parseLsRemoteOid, isLeaseRejec
 import type { FixBranchPR } from '../lib/auto-fix-branch.js'
 import { prOpenToVerdictMs } from '../lib/adoption.js'
 import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
-import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
+import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult, type WorkflowStep } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
@@ -289,6 +289,18 @@ export interface WorkflowContext {
   // Override the steps to execute instead of loading from workflow.yml.
   // Used by `crosscheck run --steps` to run only a subset of the pipeline.
   steps?: import('./workflow.js').WorkflowStep[]
+  // True only when `steps` came from an explicit `--steps` on the command line.
+  // Distinguishes a person asking for one step right now from the several
+  // internal callers that also narrow `steps` (resume, kickass dispatch, the
+  // crazy/halfcrazy fix→recheck loop), and from standing policy like repo config
+  // or `crosscheck alter`.
+  //
+  // Two class decisions yield to it, for the same reason: narrowing the step set
+  // (see planStepsForClass) and skipping the PR outright on a null tier. A person
+  // who types `--steps review` on a lockfile PR has already been told the class
+  // would skip it and asked anyway; silently doing nothing is the #318 failure in
+  // a second place.
+  stepsExplicitlyScoped?: boolean
   // When smart-switch is active, route to this vendor if the step's configured
   // reviewer resolves to a disabled vendor rather than skipping the step.
   smartSwitchFallback?: 'claude' | 'codex'
@@ -377,6 +389,61 @@ export interface RanStepDetail {
    *  verdict field. `null` means it ran and produced no parseable verdict,
    *  which is not the same as a step that produces no verdicts at all. */
   verdict?: string | null
+}
+
+/**
+ * How a PR class's step set composes with the pipeline the run was given.
+ *
+ * `narrowed` is the normal path: the class trims the configured pipeline and never
+ * widens it, so a repo set to review-only stays review-only whatever the class
+ * says — the same way per-repo `crosscheck alter` overrides compose.
+ *
+ * `bypassed` is the exception a `--steps` flag earns. Narrowing exists to stop a
+ * class escalating past standing *policy*, and repo config and `alter` are both
+ * policy. A `--steps` flag is not: it is a person naming the step they want on
+ * this PR. Treating it as one more ceiling made the specific instruction lose to
+ * the general one, so `ck run --steps recheck` on a `trivial` PR ran nothing and
+ * exited 0 — indistinguishable from success to anything shelling out.
+ *
+ * Pure, so the composition rules are testable without a WorkflowContext.
+ */
+export type StepPlanOutcome = 'unchanged' | 'narrowed' | 'bypassed'
+
+export interface StepPlan {
+  steps: WorkflowStep[]
+  outcome: StepPlanOutcome
+  /** Step types the class permits, after dropping anything off the depth ladder. */
+  classTypes: RepoWorkflowStep[]
+  /** How many steps narrowing removed. Zero unless `outcome` is 'narrowed'. */
+  dropped: number
+  /** How many narrowing would have removed. Zero unless `outcome` is 'bypassed'. */
+  wouldDrop: number
+}
+
+export function planStepsForClass(input: {
+  configuredSteps: WorkflowStep[]
+  classSteps: string[] | undefined
+  stepsExplicitlyScoped: boolean
+}): StepPlan {
+  const { configuredSteps, classSteps, stepsExplicitlyScoped } = input
+  const none = { steps: configuredSteps, outcome: 'unchanged' as const, classTypes: [], dropped: 0, wouldDrop: 0 }
+  if (!classSteps || classSteps.length === 0) return none
+
+  // Only the three depth-ladder types narrow. conflict-resolve is orthogonal to
+  // depth and is handled by filterStepsByTypes, which keeps it whenever the depth
+  // permits code modification — so it must not be treated as a class step here.
+  const classTypes = classSteps.filter(
+    (t): t is RepoWorkflowStep => t === 'review' || t === 'fix' || t === 'recheck',
+  )
+  if (classTypes.length === 0) return none
+
+  const narrowed = filterStepsByTypes(configuredSteps, classTypes)
+  const delta = configuredSteps.length - narrowed.length
+
+  if (stepsExplicitlyScoped) {
+    return { steps: configuredSteps, outcome: delta > 0 ? 'bypassed' : 'unchanged', classTypes, dropped: 0, wouldDrop: delta }
+  }
+  return { steps: narrowed, outcome: delta > 0 ? 'narrowed' : 'unchanged', classTypes, dropped: delta, wouldDrop: 0 }
 }
 
 // stepsRun holds every step the runner dispatched, skips included; results holds
@@ -982,26 +1049,29 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
   // The class's step set NARROWS the configured pipeline; it never widens it.
   // A repo set to review-only stays review-only whatever the class says, which
-  // matches how per-repo `crosscheck alter` overrides compose. Reuses
-  // filterStepsByTypes so the conflict-resolve rule (orthogonal to the depth
-  // ladder, kept only when the depth permits code modification) stays in one
-  // place rather than being re-derived here.
-  const steps = ((): typeof configuredSteps => {
-    if (!strategy || strategy.steps.length === 0) return configuredSteps
-    const classTypes = strategy.steps.filter(
-      (t): t is RepoWorkflowStep => t === 'review' || t === 'fix' || t === 'recheck',
-    )
-    if (classTypes.length === 0) return configuredSteps
-    const narrowed = filterStepsByTypes(configuredSteps, classTypes)
-    const dropped = configuredSteps.length - narrowed.length
-    if (dropped > 0) {
-      log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${classTypes.join(', ')} (${dropped} step${dropped === 1 ? '' : 's'} dropped)`))
-      fileLog({ level: 'info', event: 'strategy_steps_narrowed', repo: `${owner}/${repoName}`, pr: prNumber, pr_class: strategy.classId, configured: configuredSteps.map((x: { type: string }) => x.type), applied: narrowed.map((x: { type: string }) => x.type), strategy_version: strategy.version })
-    }
-    return narrowed
-  })()
+  // matches how per-repo `crosscheck alter` overrides compose.
+  const stepPlan = planStepsForClass({
+    configuredSteps,
+    classSteps: strategy?.steps,
+    stepsExplicitlyScoped: ctx.stepsExplicitlyScoped === true,
+  })
+  if (stepPlan.outcome === 'bypassed') {
+    log(chalk.dim(`  strategy v${strategy!.version}: ${strategy!.classId} would drop ${stepPlan.wouldDrop} step${stepPlan.wouldDrop === 1 ? '' : 's'} — honouring --steps as given`))
+    fileLog({ level: 'info', event: 'strategy_narrowing_bypassed', repo: `${owner}/${repoName}`, pr: prNumber, pr_class: strategy!.classId, requested: configuredSteps.map((x: { type: string }) => x.type), class_steps: stepPlan.classTypes, strategy_version: strategy!.version })
+  } else if (stepPlan.outcome === 'narrowed') {
+    log(chalk.dim(`  strategy v${strategy!.version}: ${strategy!.classId} → ${stepPlan.classTypes.join(', ')} (${stepPlan.dropped} step${stepPlan.dropped === 1 ? '' : 's'} dropped)`))
+    fileLog({ level: 'info', event: 'strategy_steps_narrowed', repo: `${owner}/${repoName}`, pr: prNumber, pr_class: strategy!.classId, configured: configuredSteps.map((x: { type: string }) => x.type), applied: stepPlan.steps.map((x: { type: string }) => x.type), strategy_version: strategy!.version })
+  }
+  const steps = stepPlan.steps
 
-  if (strategy && strategy.tier === null) {
+  // A null tier means the class skips this PR outright. An explicit `--steps`
+  // overrides that for the same reason it overrides narrowing — but say so, or the
+  // run looks like the class simply did not match.
+  if (strategy && strategy.tier === null && ctx.stepsExplicitlyScoped) {
+    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} would skip this PR (${strategy.reason}) — honouring --steps as given`))
+    fileLog({ level: 'info', event: 'strategy_class_skip_bypassed', repo: `${owner}/${repoName}`, pr: prNumber, pr_class: strategy.classId, strategy_version: strategy.version })
+  }
+  if (strategy && strategy.tier === null && !ctx.stepsExplicitlyScoped) {
     log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → skipped (${strategy.reason})`))
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'strategy_class_skip', pr_class: strategy.classId, strategy_version: strategy.version })
     return { verdict: null, strategySkipped: strategy.classId }

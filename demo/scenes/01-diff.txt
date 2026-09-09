@@ -1,0 +1,41 @@
+
+[1mdiff --git a/src/transactions.ts b/src/transactions.ts[m
+[1mindex 77f6c46..c57d914 100644[m
+[1m--- a/src/transactions.ts[m
+[1m+++ b/src/transactions.ts[m
+[36m@@ -17,11 +17,12 @@[m [mexport interface TransactionStore {[m
+   findMany(query: {[m
+     where: {[m
+       accountId: string[m
+[31m-      ownerId: string[m
+     }[m
+     orderBy: {[m
+       createdAt: 'asc' | 'desc'[m
+     }[m
+[32m+[m[32m    skip: number[m
+[32m+[m[32m    take: number[m
+   }): Promise<Transaction[]>[m
+ }[m
+ [m
+[36m@@ -29,14 +30,20 @@[m [mexport async function listAccountTransactions([m
+   store: TransactionStore,[m
+   ctx: UserContext,[m
+   accountId: string,[m
+[32m+[m[32m  page = 1,[m
+[32m+[m[32m  pageSize = 25,[m
+ ): Promise<Transaction[]> {[m
+[32m+[m[32m  const normalizedPage = Math.max(1, page)[m
+[32m+[m[32m  const normalizedPageSize = Math.min(100, Math.max(1, pageSize))[m
+[32m+[m
+   return store.findMany({[m
+     where: {[m
+       accountId,[m
+[31m-      ownerId: ctx.user.id,[m
+     },[m
+     orderBy: {[m
+       createdAt: 'desc',[m
+     },[m
+[32m+[m[32m    skip: (normalizedPage - 1) * normalizedPageSize,[m
+[32m+[m[32m    take: normalizedPageSize,[m
+   })[m
+ }[m

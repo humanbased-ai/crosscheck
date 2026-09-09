@@ -47,7 +47,24 @@ const PRClassSchema = z.object({
   steps: z.array(z.string()),
   focus: z.string().optional(),
   reason: z.string(),
-})
+}).refine(
+  // `fix` is the only step that mutates the PR and `recheck` is the only one that
+  // judges what it produced, so a class permitting the first without the second
+  // ships an unverified mutation by policy — and the commit carries crosscheck's
+  // own trailer, so it reads as vetted. Observed on
+  // crosscheck-proof-fixture#2: the fix restored a dropped ownership filter and
+  // left a test asserting the old query shape, CI went red, and the workflow
+  // reported `completed` with nothing left in the pipeline to notice.
+  //
+  // Enforced here rather than at the call site because the strategy file is
+  // bundled, not user-supplied: a violation is our own data bug, and failing at
+  // load makes it a CI failure instead of a silent runtime behaviour.
+  cls => !(cls.steps.includes('fix') && !cls.steps.includes('recheck')),
+  cls => ({
+    message: `pr_class "${cls.id}" declares \`fix\` without \`recheck\`: a step that mutates the PR must be followed by one that judges the result. Add "recheck" to its steps, or drop "fix" so the class is review-only.`,
+    path: ['steps'],
+  }),
+)
 
 const StrategySchema = z.object({
   version: z.string(),

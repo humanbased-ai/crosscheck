@@ -1,0 +1,67 @@
+# Regenerates the README demo assets from demo/arc.json.
+#
+# Manual only. The recording is deterministic — `demo:play` reads the committed
+# arc.json and makes no network calls — so this produces the same frames as a
+# local `npm run demo:record`, without needing vhs installed locally.
+#
+# It uploads the assets as artifacts rather than committing them: a binary that
+# lands in the repo should be one a human looked at first.
+name: Demo assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      check_only:
+        description: 'Only verify the replay script renders; skip recording'
+        type: boolean
+        default: false
+
+jobs:
+  record:
+    name: Record BLOCK → fix → APPROVE
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # --fast skips every pause, so this fails fast on a broken script instead of
+      # burning 90 seconds of runner time to find out.
+      - name: Verify the replay renders
+        run: npm run demo:play -- --fast
+
+      - name: Install vhs
+        if: ${{ !inputs.check_only }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          go install github.com/charmbracelet/vhs@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Install ttyd
+        if: ${{ !inputs.check_only }}
+        run: |
+          curl -sSL -o /tmp/ttyd https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64
+          chmod +x /tmp/ttyd
+          sudo mv /tmp/ttyd /usr/local/bin/ttyd
+
+      - name: Record
+        if: ${{ !inputs.check_only }}
+        run: npm run demo:record
+
+      - name: Report asset sizes
+        if: ${{ !inputs.check_only }}
+        run: ls -lh assets/demo-block-to-approve.*
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.check_only }}
+        with:
+          name: demo-assets
+          path: assets/demo-block-to-approve.*
+          if-no-files-found: error
