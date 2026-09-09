@@ -13,19 +13,19 @@ The through-line in all of them: **the reviewer being correct was not the bottle
 
 **Version A — the finding (recommended)**
 
-> We built a code reviewer for agent-authored PRs. Hand-checked 40 of its BLOCK findings against the source: 0 false positives.
+> We built an AI code reviewer. Of 40 BLOCK findings sampled, 39 were verifiable; none were false.
 >
-> Then: 62% of PRs merged past those findings anyway. Median gap from review to merge — 4 minutes.
+> Yet 62% of PRs merged past its findings. Median review-to-merge gap: 4 minutes.
 >
-> Being right isn't a gate. What we did about it: [link]
+> Being right isn't a gate. [link]
 
 **Version B — the failure mode**
 
-> Ask the agent that wrote the patch to review it and it'll tell you the patch is good. The reasoning that produced the bug is the one judging it.
+> Ask the agent that wrote a patch to review it and it'll say it's good. The reasoning that produced the bug is now judging it.
 >
-> Not a prompt problem. The blind spot and the reviewer share a context window.
+> Not a prompt problem: blind spot and reviewer share a context window.
 >
-> So: Claude-authored PRs go to Codex, and back. [link]
+> So Claude PRs go to Codex, and back. [link]
 
 **Version C — one concrete defect**
 
@@ -49,7 +49,7 @@ Thread continuation for A or B, if you want one:
 >
 > 5/ MIT, runs on the claude and codex CLIs you already pay for. No hosted service, no per-review API bill.
 >
-> Try it read-only on one PR: `crosscheck run <pr-url> --dry-run`
+> Try it without GitHub mutations: `crosscheck run <pr-url> --dry-run`
 >
 > [repo link]
 
@@ -67,7 +67,7 @@ Thread continuation for A or B, if you want one:
 >
 > Then we ran a census: 400 merged PRs over one week, 199 of them reviewed by the system. We sampled 40 of its blocking findings and hand-read each against the file it cited.
 >
-> Zero false positives. ~85% were genuine defects. Reviews landed before merge 94% of the time.
+> Of 40 sampled findings, 39 were verifiable and none were false; one was unverifiable. ~85% of the verifiable findings were genuine defects. Reviews landed before merge 94% of the time.
 >
 > And 62% of PRs merged straight past them. Median gap from last review to merge: four minutes.
 >
@@ -101,7 +101,7 @@ Prefer the first for a Show HN — it says what the thing is. Use the second as 
 >
 > The motivating failure isn't broken builds. It's patches that pass CI, read as complete, and carry a regression or a fix that addresses the symptom rather than the cause. Asking the authoring agent to review its own work doesn't catch those — the reasoning that produced the bug is the one judging it.
 >
-> The part I'd actually like feedback on is what happened when we measured it. We censused 400 merged PRs over a week (199 crosscheck-engaged), sampled 40 BLOCK findings, and hand-read each against the file it cited at the reviewed sha: 0 false positives, ~85% genuine defects, 94% landing before merge.
+> The part I'd actually like feedback on is what happened when we measured it. We censused 400 merged PRs over a week (199 crosscheck-engaged), sampled 40 BLOCK findings, and hand-read each against the file it cited at the reviewed sha: 39 were verifiable and none were false; one was unverifiable. ~85% of the verifiable findings were genuine defects, and 94% of reviews landed before merge.
 >
 > And 62% of PRs merged past them anyway, median four minutes after the last review. The cause was structural and ours: crosscheck created a lifecycle status while a run was in flight, but the verdict lived only in a comment and `crosscheck/review` wasn't required by branch protection. GitHub merged as soon as CI went green.
 >
@@ -127,11 +127,11 @@ Community rules on self-promotion differ, several ban it outright, and moderator
 
 ### r/ExperiencedDevs — discussion framing, no product lead
 
-**Title:** `We hand-checked our AI code reviewer's findings. 0 false positives — and 62% of PRs merged past them anyway.`
+**Title:** `39 verifiable AI code-review findings, 0 false — and 62% of PRs merged past them anyway.`
 
 > We ship a lot of agent-authored PRs and built an independent reviewer for them (a different model than the one that wrote the patch). Before trusting it we ran a census: 400 merged PRs over a week, sampled 40 of its blocking findings, and hand-read each one against the file it cited at the sha it was reviewed at.
 >
-> 0 false. ~85% genuine defects. 94% of reviews landed before the merge.
+> Of the 40 sampled findings, 39 were verifiable and none were false; one was unverifiable. ~85% of the verifiable findings were genuine defects. 94% of reviews landed before the merge.
 >
 > Then the uncomfortable number: only 38% of PRs reached an approving verdict, and the median gap between the last review and the merge was 4 minutes. Most PRs merged straight past correct findings.
 >
@@ -149,7 +149,7 @@ Community rules on self-promotion differ, several ban it outright, and moderator
 >
 > So I wired up cross-vendor review: Claude-authored PRs go to Codex, Codex-authored PRs go to Claude, findings return to the original author agent to fix, then a recheck.
 >
-> Sampled 40 of the blocking findings and hand-checked them against the source. Zero false positives. The good ones weren't lint-grade — they read the repo's own convention docs and traced call paths across services. One caught a function that accepted an `expected_mode` param for dual-control confirmation and never put it in the request body. Two lines apart, tests green.
+> Sampled 40 of the blocking findings and hand-checked them against the source. Of 39 verifiable findings, none were false; one was unverifiable. The good ones weren't lint-grade — they read the repo's own convention docs and traced call paths across services. One caught a function that accepted an `expected_mode` param for dual-control confirmation and never put it in the request body. Two lines apart, tests green.
 >
 > It runs through the `claude` and `codex` CLIs you're already logged into, so no API bill on top of your subscription. MIT.
 >

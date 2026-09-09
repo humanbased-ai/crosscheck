@@ -37,7 +37,7 @@ Every number in these drafts comes from [`docs/dynamic-thoroughness.md`](../../d
 | Claim | Source |
 |---|---|
 | 400 merged PRs, 199 crosscheck-engaged | Corpus line |
-| 0 false positives of 40 sampled findings | §2 label table |
+| 40 sampled findings: 39 verifiable, 0 false; 1 unverifiable | §2 label table |
 | 33 of 39 verifiable were defect-grade (~85%) | §2 label table + calibration note |
 | 6 true but severity-inflated | §2 label table |
 | 94% of reviews land before merge | §0 measured table |

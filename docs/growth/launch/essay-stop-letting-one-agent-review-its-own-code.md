@@ -51,7 +51,7 @@ We took a census of 400 merged PRs, 199 of them crosscheck-engaged. Then we samp
 | True but severity-inflated | 6 |
 | Unverifiable (file since deleted) | 1 |
 
-Zero false positives. The reviews were also doing work no linter does — reading the repo's own convention docs, cross-referencing design records, tracing call paths across services. One finding flagged a migration timestamp by citing the exact line of an internal conventions doc that says *never hand-write a round-number timestamp*, and referenced the prior incident that rule exists because of.
+None of the 39 verifiable findings were false; one finding could not be verified because its file had since been deleted. The reviews were also doing work no linter does — reading the repo's own convention docs, cross-referencing design records, tracing call paths across services. One finding flagged a migration timestamp by citing the exact line of an internal conventions doc that says *never hand-write a round-number timestamp*, and referenced the prior incident that rule exists because of.
 
 For calibration: CR-Bench reports 3.6–5.1% precision for review agents. That is not an apples-to-apples comparison — CR-Bench scores against a fixed ground-truth defect list and penalizes anything outside it, while we asked "is this claim true and worth fixing." Different questions. We're naming the gap rather than quoting the flattering number without it.
 
