@@ -25,7 +25,7 @@ The through-line in all of them: **the reviewer being correct was not the bottle
 >
 > Not a prompt problem: blind spot and reviewer share a context window.
 >
-> So Claude PRs go to Codex, and back. [link]
+> Our Claude PRs go to Codex, and back. [link]
 
 **Version C — one concrete defect**
 
@@ -47,9 +47,9 @@ Thread continuation for A or B, if you want one:
 >
 > Bound the loop, then gate, then optimize latency. In that order.
 >
-> 5/ MIT, runs on the claude and codex CLIs you already pay for. No hosted service, no per-review API bill.
+> 5/ MIT, shells out to configured vendor CLIs. With subscription-authenticated Claude and Codex, there's no separate hosted service or per-review API bill; API-key auth is also supported.
 >
-> Try it without GitHub mutations: `crosscheck run <pr-url> --dry-run`
+> Try it with Crosscheck's own writes suppressed: `crosscheck run <pr-url> --dry-run` (the vendor CLI still runs under its configured permissions).
 >
 > [repo link]
 
@@ -63,7 +63,7 @@ Thread continuation for A or B, if you want one:
 >
 > Asking the agent that wrote the patch to review it doesn't help. The reasoning that produced the bug is the reasoning now judging it.
 >
-> So we routed each PR to a *different* agent — Claude-authored PRs to Codex, and back — with findings returning to the author agent for repair and a recheck before merge.
+> In our two-vendor setup, we routed each PR to a *different* agent — Claude-authored PRs to Codex, and back — with findings returning to the author agent for repair and a recheck before merge.
 >
 > Then we ran a census: 400 merged PRs over one week, 199 of them reviewed by the system. We sampled 40 of its blocking findings and hand-read each against the file it cited.
 >
@@ -80,7 +80,7 @@ Thread continuation for A or B, if you want one:
 > → Don't let the author review its own work. Treat it as an architectural constraint, not a prompt preference.
 > → Measure whether your review changes the merge decision — the share of real defects fixed inside the merge window. Not findings per PR.
 >
-> Crosscheck is MIT and runs on the CLIs you already pay for. Full census, including the two analytical approaches we abandoned, is in the repo.
+> Crosscheck is MIT and shells out to configured vendor CLIs. With subscription authentication, there is no separate per-review API bill; API-key authentication is also supported. Full census, including the two analytical approaches we abandoned, is in the repo.
 >
 > [repo link]
 
@@ -97,7 +97,7 @@ Prefer the first for a Show HN — it says what the thing is. Use the second as 
 
 **First comment** (post immediately after submitting)
 
-> Author here. Crosscheck routes each agent-authored PR to a *different* agent than the one that wrote it — Claude-authored PRs to Codex and vice versa — then sends findings back to the author agent to fix and rechecks before the PR is merge-ready. It shells out to the `claude` and `codex` CLIs you're already authenticated to, so there's no hosted service and no per-review API bill.
+> Author here. When both vendors are configured, Crosscheck routes each agent-authored PR to a *different* agent than the one that wrote it — Claude-authored PRs to Codex and vice versa — then sends findings back to the author agent to fix and rechecks before the PR is merge-ready. It shells out to the configured CLIs rather than adding a hosted service. With subscription authentication, there is no separate per-review API bill; API-key authentication is also supported.
 >
 > The motivating failure isn't broken builds. It's patches that pass CI, read as complete, and carry a regression or a fix that addresses the symptom rather than the cause. Asking the authoring agent to review its own work doesn't catch those — the reasoning that produced the bug is the one judging it.
 >
@@ -147,13 +147,13 @@ Community rules on self-promotion differ, several ban it outright, and moderator
 
 > I use Claude Code as my main author. Asking it to review its own patch was consistently useless — not wrong exactly, just agreeable. The reasoning that wrote the bug is the reasoning judging it, and it already convinced itself once.
 >
-> So I wired up cross-vendor review: Claude-authored PRs go to Codex, Codex-authored PRs go to Claude, findings return to the original author agent to fix, then a recheck.
+> So I wired up both vendors: Claude-authored PRs go to Codex, Codex-authored PRs go to Claude, findings return to the original author agent to fix, then a recheck.
 >
 > Sampled 40 of the blocking findings and hand-checked them against the source. Of 39 verifiable findings, none were false; one was unverifiable. The good ones weren't lint-grade — they read the repo's own convention docs and traced call paths across services. One caught a function that accepted an `expected_mode` param for dual-control confirmation and never put it in the request body. Two lines apart, tests green.
 >
-> It runs through the `claude` and `codex` CLIs you're already logged into, so no API bill on top of your subscription. MIT.
+> It shells out to the configured `claude` and `codex` CLIs. With subscription authentication, there is no separate per-review API bill; API-key authentication is also supported. MIT.
 >
-> No GitHub mutations if you want to see it on one PR first: `crosscheck run <pr-url> --dry-run` still clones locally and sends the diff to the configured vendor CLI.
+> To suppress Crosscheck's own GitHub writes on a first run: `crosscheck run <pr-url> --dry-run`. It still clones locally and invokes the vendor CLI under that CLI's configured permissions.
 >
 > [repo link]
 

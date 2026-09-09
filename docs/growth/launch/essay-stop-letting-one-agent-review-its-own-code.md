@@ -29,14 +29,14 @@ None of these look like mistakes. They look like finished work. That is the whol
 
 ## So we pointed a second agent at it
 
-The fix is structural and boring: **the agent that writes the patch does not review it.** A Claude-authored PR routes to Codex. A Codex-authored PR routes to Claude. Findings go back to the original author agent to repair, and a recheck runs before the PR is merge-ready.
+The fix is structural and boring: **the agent that writes the patch does not review it.** When both vendors are configured, a Claude-authored PR routes to Codex and a Codex-authored PR routes to Claude. Findings go back to the original author agent to repair, and a recheck runs before the PR is merge-ready.
 
 ```
 PR  →  review  →  fix  →  recheck  →  merge-ready
        (codex)   (claude) (codex)
 ```
 
-That is crosscheck. It runs through the `claude` and `codex` CLIs you already pay for — no hosted service, no per-review API bill, no new vendor holding your source.
+That is crosscheck. It shells out to the configured vendor CLIs rather than adding a hosted review service. In our setup, both CLIs use subscription authentication, so there is no separate per-review API bill; API-key authentication is also supported and billed by the vendor.
 
 Then we measured it, and the measurement did not say what we expected.
 
@@ -102,7 +102,7 @@ And the census above is ours: one team, 400 PRs, one week, our conventions. Run 
 
 ## Try it on one PR
 
-No GitHub mutations. It clones locally, sends the diff to the configured vendor CLI for review, prints the comment it would post, and exits without posting or applying a fix:
+`--dry-run` suppresses Crosscheck's own GitHub writes and fix step. It still clones locally and invokes the configured vendor CLI, whose permissions, network access, and ambient credentials are outside that guarantee:
 
 ```bash
 npm install -g @humanbased/crosscheck
