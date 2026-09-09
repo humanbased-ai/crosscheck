@@ -41,7 +41,7 @@ Thread continuation for A or B, if you want one:
 >
 > Reviews landed before merge 94% of the time. 38% of PRs reached APPROVE. 56% of the rest merged within five minutes of the review — or before it landed.
 >
-> 3/ The reason was ours: crosscheck read commit statuses but never created one. Its whole output was a comment, and it wasn't in any branch protection list. GitHub merged the second CI went green.
+> 3/ The reason was ours: crosscheck created a lifecycle status while a run was in flight, but the verdict lived only in a comment. `crosscheck/review` wasn't required by branch protection, so GitHub merged the second CI went green.
 >
 > 4/ The trap: gating first would have made it worse. Findings never stopped arriving, so an enforced unbounded loop turns "merged in 4 minutes" into "blocked for two days."
 >
@@ -71,7 +71,7 @@ Thread continuation for A or B, if you want one:
 >
 > And 62% of PRs merged straight past them. Median gap from last review to merge: four minutes.
 >
-> The problem was never review quality. The reviewer produced a comment, and a comment is not part of a merge decision. It appeared in no branch protection rule, so GitHub merged the moment CI went green.
+> The problem was never review quality. The verdict lived in a comment, and `crosscheck/review` wasn't required by branch protection, so GitHub merged the moment CI went green.
 >
 > The counter-intuitive part: adding the gate first would have made things worse. Findings never stopped arriving across rounds, and enforcing an unbounded loop converts "merged past findings in four minutes" into "blocked for two days." Bound the loop, then gate, then optimize latency.
 >
@@ -103,13 +103,13 @@ Prefer the first for a Show HN — it says what the thing is. Use the second as 
 >
 > The part I'd actually like feedback on is what happened when we measured it. We censused 400 merged PRs over a week (199 crosscheck-engaged), sampled 40 BLOCK findings, and hand-read each against the file it cited at the reviewed sha: 0 false positives, ~85% genuine defects, 94% landing before merge.
 >
-> And 62% of PRs merged past them anyway, median four minutes after the last review. The cause was structural and ours: crosscheck read commit statuses but never created one, so it appeared in no branch protection rule and GitHub merged as soon as CI went green. Its entire output was a comment.
+> And 62% of PRs merged past them anyway, median four minutes after the last review. The cause was structural and ours: crosscheck created a lifecycle status while a run was in flight, but the verdict lived only in a comment and `crosscheck/review` wasn't required by branch protection. GitHub merged as soon as CI went green.
 >
 > What surprised me is that fixing that first would have been harmful. Findings kept arriving across rounds, so enforcing an unbounded loop turns "merged past findings in four minutes" into "blocked for two days." The order has to be: bound the loop, then gate, then reduce latency.
 >
 > Honest limits: it never merges anything (no code path from verdict to merge), it doesn't replace human review, and your diff reaches Anthropic/OpenAI through their own CLIs under their terms — crosscheck adds no separate upload path. The census is one team, one week, our conventions; I'd be interested in whether the 4-minute number reproduces elsewhere or whether we're just undisciplined.
 >
-> Read-only first run: `crosscheck run <pr-url> --dry-run` clones, reviews, prints the comment it would post, and exits without touching the PR.
+> No-GitHub-mutation first run: `crosscheck run <pr-url> --dry-run` clones locally, sends the diff to the configured vendor CLI, prints the comment it would post, and exits without posting or applying a fix.
 >
 > MIT: [repo link]. The census, including two analytical approaches we abandoned, is in docs/dynamic-thoroughness.md.
 
@@ -153,7 +153,7 @@ Community rules on self-promotion differ, several ban it outright, and moderator
 >
 > It runs through the `claude` and `codex` CLIs you're already logged into, so no API bill on top of your subscription. MIT.
 >
-> Read-only if you want to see it on one PR without it touching anything: `crosscheck run <pr-url> --dry-run`
+> No GitHub mutations if you want to see it on one PR first: `crosscheck run <pr-url> --dry-run` still clones locally and sends the diff to the configured vendor CLI.
 >
 > [repo link]
 

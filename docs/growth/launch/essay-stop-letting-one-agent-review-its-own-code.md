@@ -70,7 +70,7 @@ We had built a reviewer that was fast and correct, and it was being merged strai
 
 ## Being right is not a gate
 
-The reason was structural, and it was ours. Crosscheck read commit statuses and check-runs but never *created* a merge-blocking one. Its entire output was a comment. Branch protection required a size check and a CI gate; crosscheck was in neither list. GitHub merged the moment CI went green, and nothing on earth stopped a merge at minute four.
+The reason was structural, and it was ours. Crosscheck created a lifecycle status while a run was in flight, but it never published the review verdict as a merge-blocking status. The verdict lived only in a comment, and `crosscheck/review` was not required by branch protection. GitHub merged the moment CI went green, and nothing on earth stopped a merge at minute four.
 
 Two different failure modes hide in that number, and they need opposite fixes:
 
@@ -102,7 +102,7 @@ And the census above is ours: one team, 400 PRs, one week, our conventions. Run 
 
 ## Try it on one PR
 
-Fully read-only. Clones, reviews, prints the comment it would post, exits without touching anything:
+No GitHub mutations. It clones locally, sends the diff to the configured vendor CLI for review, prints the comment it would post, and exits without posting or applying a fix:
 
 ```bash
 npm install -g @humanbased/crosscheck

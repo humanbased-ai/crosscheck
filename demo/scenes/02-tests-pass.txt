@@ -1,0 +1,12 @@
+> vitest run
+
+
+ RUN  v3.2.7 /private/tmp/ccfix
+
+ ✓ test/transactions.test.ts (2 tests) 1ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  08:55:54
+   Duration  298ms (transform 43ms, setup 0ms, collect 41ms, tests 1ms, environment 0ms, prepare 30ms)
+

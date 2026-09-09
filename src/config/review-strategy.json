@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "version": "1.1.0",
-  "_version_note": "1.1.0 — deletion_only gained a floor on deletions; `additions_max` alone also matched a small edit, so a +2/-2 typo fix was routed to a review-only class. Routing changed, so the version changes with it: a comment citing 1.0.0 has to stay explicable by 1.0.0.",
-  "updated": "2026-08-07",
+  "version": "1.2.0",
+  "_version_note": "1.2.0 — trivial and test_only gained `recheck`. They declared `fix` without it, so the fix step pushed a commit that nothing then judged: on crosscheck-proof-fixture#2 the fix restored a dropped ownership filter and left a test asserting the old query shape, CI went red, and the workflow reported `completed`. `fix` is the only step that mutates the PR and `recheck` is the only one that judges the result, so the pair is now a schema invariant in review-strategy.ts rather than a convention. Routing changed, so the version changes with it: a comment citing 1.1.0 has to stay explicable by 1.1.0.",
+  "updated": "2026-09-08",
   "generated_at": "2026-08-07T05:00:00Z",
   "review_interval_days": 60,
   "report": "docs/dynamic-thoroughness.md",
@@ -136,7 +136,7 @@
     {
       "id": "test_only", "label": "Test-only",
       "match": { "all_files_match": ["((^|/)(__tests__|tests?|e2e|fixtures?)(/|$)|\\.(test|spec)\\.)"] },
-      "tier": "fast", "effort": "medium", "steps": ["review", "fix"],
+      "tier": "fast", "effort": "medium", "steps": ["review", "fix", "recheck"],
       "focus": "assertions that cannot fail, over-mocking that voids the test, coverage claimed but not exercised",
       "reason": "tests only - no production code path changes"
     },
@@ -150,7 +150,7 @@
     {
       "id": "trivial", "label": "Trivial",
       "match": { "files_max": 3, "src_churn_max": 150 },
-      "tier": "fast", "effort": "medium", "steps": ["review", "fix"],
+      "tier": "fast", "effort": "medium", "steps": ["review", "fix", "recheck"],
       "reason": "small and low-risk, and PRs this size merge in minutes - latency matters more than depth"
     },
     {
