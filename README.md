@@ -17,18 +17,17 @@
 </p>
 
 <p align="center">
-  <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
+  <img src="./assets/demo-block-to-approve.gif" alt="crosscheck reviewing a PR: a BLOCK on a dropped ownership filter, an auto-fix, and the verdict on the repair" width="900" />
 </p>
 
 <p align="center">
-  <strong>See it catch a real one</strong> — a public fixture PR, start to finish, nothing staged after the fact:<br />
-  <a href="https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1#issuecomment-4633226342">🚫 BLOCK</a> &nbsp;·&nbsp;
-  <a href="https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1#issuecomment-4645868229">🔧 fix applied</a> &nbsp;·&nbsp;
-  <a href="https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1#issuecomment-4645880849">✅ APPROVE</a>
+  <strong>The run above is real</strong> — a public fixture PR, every comment permanently linked:<br />
+  <a href="https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/2">the whole thread</a>
+  &nbsp;·&nbsp; <a href="./demo/README.md">how the recording was made</a>
 </p>
 
 <p align="center">
-  <sub>A pagination change that passed CI and dropped authenticated-user scoping from transaction reads — a tenant-isolation regression. Reviewed by Codex, repaired by Claude, rechecked to merge-ready.</sub>
+  <sub>A pagination change that passed CI and dropped <code>ownerId</code> from the transaction query — any caller could read another user's transactions. Reviewed by Codex, repaired by Claude, and re-judged against the repair.</sub>
 </p>
 
 ---
@@ -314,6 +313,10 @@ Every option, annotated: **[crosscheck.config.example.yml](./crosscheck.config.e
 ```bash
 crosscheck onboard && crosscheck watch
 ```
+
+<p align="center">
+  <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
+</p>
 
 **On a server** — one always-on watcher for a team, with per-repo depth where it matters.
 
