@@ -688,6 +688,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         overrideTimeoutMs: reviewerTimeoutMs,
         trigger: opts.trigger ?? 'run',
         issueContext,
+        // Only the CLI flag counts. Resume also narrows `filteredSteps`, but it
+        // starts mid-workflow and still runs to the end, so it is not the operator
+        // scoping this run to a subset.
+        stepsExplicitlyScoped: opts.steps !== undefined,
       }
 
       let workflowResult = await runWorkflow({
