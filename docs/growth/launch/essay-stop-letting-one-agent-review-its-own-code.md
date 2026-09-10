@@ -92,7 +92,7 @@ Three things we'd now say to anyone shipping agent-authored code:
 
 ## Where crosscheck is honest about its limits
 
-It never merges anything. There is no code path from a verdict to a merge — that decision stays with you.
+It never merges on its own. No verdict, webhook, or scheduled run reaches a merge. The explicit `crosscheck merge <pr-url>` command is the sole exception: a person must run it, and by default it requires an approving verdict that covers the exact head commit plus GitHub's own mergeability check.
 
 It doesn't replace human review. It makes agent output reviewable, which is a smaller and more achievable claim.
 

@@ -107,7 +107,7 @@ Prefer the first for a Show HN — it says what the thing is. Use the second as 
 >
 > What surprised me is that fixing that first would have been harmful. Findings kept arriving across rounds, so enforcing an unbounded loop turns "merged past findings in four minutes" into "blocked for two days." The order has to be: bound the loop, then gate, then reduce latency.
 >
-> Honest limits: it never merges anything (no code path from verdict to merge), it doesn't replace human review, and your diff reaches Anthropic/OpenAI through their own CLIs under their terms — crosscheck adds no separate upload path. The census is one team, one week, our conventions; I'd be interested in whether the 4-minute number reproduces elsewhere or whether we're just undisciplined.
+> Honest limits: it never merges on its own — only a person running `crosscheck merge` can reach the gated merge path. It doesn't replace human review, and your diff reaches Anthropic/OpenAI through their own CLIs under their terms — crosscheck adds no separate upload path. The census is one team, one week, our conventions; I'd be interested in whether the 4-minute number reproduces elsewhere or whether we're just undisciplined.
 >
 > First run with Crosscheck's GitHub writes suppressed: `crosscheck run <pr-url> --dry-run`. It still clones locally and invokes the configured vendor CLI under that CLI's permissions.
 >
@@ -135,7 +135,7 @@ Community rules on self-promotion differ, several ban it outright, and moderator
 >
 > Then the uncomfortable number: only 38% of PRs reached an approving verdict, and the median gap between the last review and the merge was 4 minutes. Most PRs merged straight past correct findings.
 >
-> The cause turned out to be structural rather than about review quality: the reviewer's entire output was a PR comment. It created no commit status, appeared in no branch protection rule, so nothing stopped a merge the moment CI went green.
+> The cause turned out to be structural rather than about review quality: the verdict lived only in a PR comment. Crosscheck created a lifecycle status while the run was in flight, but that status did not represent the verdict and appeared in no branch protection rule, so nothing stopped a merge the moment CI went green.
 >
 > What I didn't expect: adding the required check first would have made it worse. Findings kept arriving in later rounds, so enforcing an unbounded review loop converts "merged in 4 minutes" into "blocked for two days." We had to bound the loop before gating it.
 >

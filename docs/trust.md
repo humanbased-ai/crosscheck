@@ -79,10 +79,25 @@ The workflow is a sequence of steps, and each step's mutations are listed below.
 | **recheck** | Same as review — a second comment, and release of the pending status. **No code.** |
 | **fix** | Code. Commits to the PR's own branch and pushes there, plus a "fix applied" comment. If that push cannot land (protected branch, deleted branch, fork), it pushes the same commit to `fix/cr-<pr>-review-issues`, opens a follow-up PR targeting the original branch, and labels it `cr-autofix`. In `delivery.mode: comment` it pushes nothing and posts the diff as a suggestion instead. |
 | **conflict-resolve** | Code. Merges the base branch into the PR branch, resolves conflicts, and pushes the merge commit to the PR branch, plus a comment. Skipped for fork PRs. |
+| **`crosscheck merge`** (never automatic) | Merges the pull request. Not a workflow step — no verdict, webhook, or scheduled run reaches it; it happens only when a person types the command. See below. |
 
 Boundaries that hold across every step:
 
-- **Never merges.** No command merges a pull request — there is no code path from any verdict to a merge. `crosscheck scan` will tell you a PR looks merge-ready; a human or your own automation acts on that.
+- **Never merges on its own.** No verdict, webhook, or scheduled run reaches a merge — there is no code path from a review to one. The single exception is explicit: `crosscheck merge <pr-url>`, which merges only when a person runs it, and only when the gate below is satisfied. `watch`, `run`, `kickass` and `scan` cannot merge anything.
+
+  This boundary used to be absolute, and the change is worth stating plainly rather than leaving for you to notice: earlier versions had no merge code at all. If you relied on "crosscheck cannot merge, whatever it is told to do", the guarantee is now "crosscheck cannot merge unless a human invokes one specific command", which is a weaker promise. Nothing else in this document changed.
+
+  | Invocation | Merges when |
+  |---|---|
+  | `crosscheck merge <pr>` | an `APPROVE` verdict covers the exact commit being merged, and GitHub reports the PR mergeable |
+  | `--loose` | the standing verdict covers HEAD and is not `BLOCK` (so `NEEDS WORK` merges) |
+  | `--tight` | the default, plus every check green and no unresolved blocking finding |
+  | `--force` | no verdict gate at all. Logged as `merge_completed` with the verdict it overrode |
+  | `--dry-run` | never — evaluates the gate and reports |
+
+  Three things hold at every level, `--force` included. A conflicted PR is refused, because `--force` overrides crosscheck's opinion and not git's. The merge is submitted with the head SHA the gate evaluated, so GitHub rejects it if the branch moved in between — an approval can never be applied to a commit that arrived after it. And branch protection is GitHub's to enforce: crosscheck asks, and a protected branch can still say no.
+
+  To keep the old absolute guarantee, do not grant the token `contents: write`, or simply do not run the command — nothing else invokes it.
 - **Never touches your base branch.** Pushes go to the PR's head branch or to a new `fix/cr-*` branch. `main` and `staging` are only ever read.
 - **Never force-pushes over your work.** A rejected non-fast-forward push is retried by rebasing onto the remote branch; if that fails it gives up and falls back to the follow-up PR.
 - **Never edits outside the clone.** All work happens in a `mkdtemp` directory that is deleted when the step finishes, pass or fail.

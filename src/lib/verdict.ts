@@ -44,6 +44,12 @@ export const NULL_VERDICT_WARNING =
 export const SEVERITY_GATE_NOTE =
   '> ℹ️ No blocking (Critical/High/Medium) findings — approving with comments. The notes below are non-blocking; address at your discretion.'
 
+// Posted when a verdict is capped because the PR changes documentation and nothing
+// else. Wording is deliberate: the findings are not dismissed, they are reclassified
+// as advisory, because they cannot describe shipping code.
+export const DOC_ONLY_GATE_NOTE =
+  '> ℹ️ Documentation-only change — approving with comments. Prose findings cannot break a build or a caller, so they are advisory here; the notes below are worth reading and none of them blocks merge.'
+
 // A list of "no findings" phrasings, reduced to letters-only (punctuation, bullets,
 // and whitespace stripped) so "- None.", "N/A", and "None found" all compare equal.
 const EMPTY_SECTION_PHRASES = new Set([
@@ -104,17 +110,39 @@ export function hasBlockingFindings(reviewText: string): boolean {
 
 export interface SeverityGateResult {
   verdict: Verdict | null
-  // True when the gate changed the verdict (NEEDS WORK → APPROVE).
+  // True when the gate changed the verdict.
   downgraded: boolean
+  /** Which rule changed it, so the caller picks the matching note. */
+  reason?: 'no_blocking_findings' | 'doc_only'
+}
+
+export interface SeverityGateOptions {
+  /**
+   * Every changed file is prose documentation. A doc-only PR is never blocked:
+   * a finding about a sentence cannot break a build or a caller, and the `docs`
+   * class runs `review` with no fix or recheck step, so a BLOCK there had no path
+   * to ever clear — it just sat on the PR forever.
+   */
+  docOnly?: boolean
 }
 
 // Severity gate: only P3-only (nit/style) reviews are downgraded from NEEDS WORK to
 // APPROVE, preventing review-loop churn on trivial suggestions. P2 (medium/correctness)
 // findings keep the NEEDS WORK verdict and require human attention before merge.
 // BLOCK and APPROVE are never altered.
-export function applySeverityGate(verdict: Verdict | null, reviewText: string): SeverityGateResult {
+export function applySeverityGate(
+  verdict: Verdict | null,
+  reviewText: string,
+  options: SeverityGateOptions = {},
+): SeverityGateResult {
+  // Checked before the severity rule and applied to BLOCK as well as NEEDS WORK:
+  // the point is that no doc-only verdict blocks, and a BLOCK is the one the
+  // severity rule deliberately never touches.
+  if (options.docOnly && (verdict === 'BLOCK' || verdict === 'NEEDS WORK')) {
+    return { verdict: 'APPROVE', downgraded: true, reason: 'doc_only' }
+  }
   if (verdict === 'NEEDS WORK' && !hasBlockingFindings(reviewText)) {
-    return { verdict: 'APPROVE', downgraded: true }
+    return { verdict: 'APPROVE', downgraded: true, reason: 'no_blocking_findings' }
   }
   return { verdict, downgraded: false }
 }
