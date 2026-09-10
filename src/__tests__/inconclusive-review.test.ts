@@ -90,7 +90,7 @@ describe('inconclusive outranks the severity gate', () => {
     // with hedged empties recognised, the body carries no blocking finding, so the
     // severity gate reads it as nits-only and clears the PR to merge — on a review
     // that never ran. The inconclusive check must come first.
-    expect(applySeverityGate('NEEDS WORK', INCIDENT_BODY)).toEqual({ verdict: 'APPROVE', downgraded: true })
+    expect(applySeverityGate('NEEDS WORK', INCIDENT_BODY)).toEqual({ verdict: 'APPROVE', downgraded: true, reason: 'no_blocking_findings' })
     expect(detectInconclusiveReview(INCIDENT_BODY).inconclusive).toBe(true)
   })
 })

@@ -338,6 +338,51 @@ function resolvedGitConfig(repoDir: string): Buffer {
   return execFileSync('git', ['config', '--null', '--list', '--show-origin'], { cwd: repoDir, stdio: 'pipe' })
 }
 
+export interface ChangedFiles {
+  files: string[]
+  additions: number
+  deletions: number
+}
+
+/**
+ * The PR's own changes, read from the clone rather than the API.
+ *
+ * The API's file list paginates and truncates on large PRs, and a truncated list
+ * can turn a mixed PR into an apparently doc-only one — which now caps a verdict,
+ * so a wrong answer suppresses a real BLOCK. The clone has the whole diff.
+ *
+ * Returns null when the diff cannot be read (no base ref, empty diff), so callers
+ * fall back rather than treating "unknown" as "no files".
+ */
+export function changedFilesVsBase(tmpDir: string, baseRef: string): ChangedFiles | null {
+  try {
+    // execFileSync, not execSync: a git ref may legally contain `;`, `$( )` and
+    // backticks, and this value drives routing rather than best-effort logging.
+    const raw = execFileSync(
+      'git',
+      ['diff', '--numstat', `origin/${baseRef}...HEAD`],
+      { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim()
+    if (!raw) return null
+
+    const files: string[] = []
+    let additions = 0
+    let deletions = 0
+    for (const line of raw.split('\n')) {
+      // numstat: <added>\t<deleted>\t<path>. Binary files report '-' for both.
+      const [add, del, ...rest] = line.split('\t')
+      const path = rest.join('\t').trim()
+      if (!path) continue
+      files.push(path)
+      additions += parseInt(add, 10) || 0
+      deletions += parseInt(del, 10) || 0
+    }
+    return files.length === 0 ? null : { files, additions, deletions }
+  } catch {
+    return null
+  }
+}
+
 // Runs `fn` with the clone's `origin` URL stripped of its embedded credentials.
 //
 // An HTTPS clone stores `https://x-access-token:<token>@github.com/...` in
