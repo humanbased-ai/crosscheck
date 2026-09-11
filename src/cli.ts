@@ -18,6 +18,7 @@ import { runAdoption } from './commands/adoption.js'
 import { runIssue } from './commands/issue.js'
 import { runRunSpec, runRecheckSpec, runFixSpec, runResolveSpec, type RunSpecOpts } from './commands/run.js'
 import { runDetectStep } from './commands/detect-step.js'
+import { runMerge, type MergeOpts } from './commands/merge.js'
 import { runLinearTest } from './commands/linear-test.js'
 import { isLinearConfigError } from './linear/identity.js'
 import { runScan } from './commands/scan.js'
@@ -202,6 +203,18 @@ addStepRunOptions(
     .command('resolve <pr-urls...>')
     .description('Force the conflict-resolve step against one or more PRs (resolve merge conflicts). Accepts comma-separated URLs, bare numbers, and ranges'),
 ).action((prUrls: string[], opts: StepRunFlags) => void runResolveSpec(prUrls.join(','), buildRunSpecOpts(opts)))
+
+program
+  .command('merge <pr-url>')
+  .description('Merge a PR once crosscheck\'s verdict allows it. Default requires an APPROVE covering HEAD')
+  .option('--loose', 'merge unless the standing verdict is BLOCK (accepts NEEDS WORK)')
+  .option('--tight', 'also require every check green and no unresolved blocking finding')
+  .option('--force', 'merge without a verdict gate (still refuses a conflicted PR)')
+  .option('--squash', 'squash merge, if the repository allows it')
+  .option('--rebase', 'rebase merge, if the repository allows it')
+  .option('--merge', 'merge commit, if the repository allows it')
+  .option('--dry-run', 'evaluate the gate and report, but do not merge')
+  .action((prUrl: string, opts: MergeOpts) => void runMerge(prUrl, opts))
 
 program
   .command('detect-step <pr-url>')

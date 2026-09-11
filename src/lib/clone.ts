@@ -1,7 +1,11 @@
 import { setTimeout as sleep } from 'node:timers/promises'
+import { randomUUID } from 'crypto'
 import { execFileSync } from 'child_process'
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+import { isAbsolute, resolve } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
+import { getGitIdentityFromEnv } from '../config/loader.js'
 
 const GIT_RESILIENCE_ARGS = [
   '-c', 'http.postBuffer=524288000',
@@ -10,6 +14,36 @@ const GIT_RESILIENCE_ARGS = [
   '-c', 'http.keepAlive=true',
   '-c', 'http.connectTimeout=30',
 ]
+
+const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null'
+
+// Agents share the operator's HOME, so a full-access run can edit global Git
+// config. Preserve only the identity needed for commits, then make every Git
+// child in this process ignore global and system config.
+export function isolateGitConfig(): void {
+  const configValue = (key: string): string | undefined => {
+    for (const scope of ['--global', '--system']) {
+      try {
+        const value = execFileSync('git', ['config', scope, '--get', key], { encoding: 'utf8', stdio: 'pipe' }).trim()
+        if (value) return value
+      } catch { /* try the next scope */ }
+    }
+    return undefined
+  }
+  const envIdentity = getGitIdentityFromEnv()
+  const name = envIdentity.name ?? configValue('user.name')
+  const email = envIdentity.email ?? configValue('user.email')
+  if (name) {
+    process.env.GIT_AUTHOR_NAME ??= name
+    process.env.GIT_COMMITTER_NAME ??= name
+  }
+  if (email) {
+    process.env.GIT_AUTHOR_EMAIL ??= email
+    process.env.GIT_COMMITTER_EMAIL ??= email
+  }
+  process.env.GIT_CONFIG_NOSYSTEM = '1'
+  process.env.GIT_CONFIG_GLOBAL = NULL_DEVICE
+}
 
 // Bypass `gh repo clone` so gh's keyring auth (which may bridge to VS Code's
 // GitHub extension) is never invoked. HTTPS embeds the token in the URL.
@@ -36,6 +70,7 @@ const MAX_GIT_RETRIES = 3
 const GIT_RETRY_DELAY_MS = 2000
 
 async function runGit(args: string[], cwd?: string, retryable = false, onProgress?: (line: string) => void): Promise<void> {
+  isolateGitConfig()
   let lastErr: Error | undefined
   for (let attempt = 1; attempt <= (retryable ? MAX_GIT_RETRIES : 1); attempt++) {
     try {
@@ -78,6 +113,44 @@ async function runGit(args: string[], cwd?: string, retryable = false, onProgres
   if (lastErr) throw lastErr
 }
 
+/**
+ * How `refs/remotes/origin/<base>` came to exist — or that it does not.
+ *
+ * `unavailable` is the one that matters: without the base ref there is no PR diff,
+ * and every downstream step degrades silently rather than failing. The review
+ * vendor answers "could not be performed", the commit counter falls back to whole
+ * history and skips the fix step, and `git diff origin/<base>...HEAD` in the fixer
+ * falls through to `HEAD~1` — a diff of the wrong thing.
+ */
+export type BaseRefStatus = 'fetched' | 'recovered_by_sha' | 'recovered_by_merge_ref' | 'unavailable'
+
+export interface CloneResult {
+  baseRefStatus: BaseRefStatus
+}
+
+export class BaseRefUnavailableError extends Error {
+  constructor(public readonly baseRef: string) {
+    super(
+      `base ref origin/${baseRef} could not be resolved — the branch is deleted or renamed, `
+      + 'so the PR diff cannot be computed. Retarget the PR to a live base branch and re-run.',
+    )
+    this.name = 'BaseRefUnavailableError'
+  }
+}
+
+export function isBaseRefUnavailableError(err: unknown): err is BaseRefUnavailableError {
+  return err instanceof BaseRefUnavailableError
+}
+
+function refExists(tmpDir: string, ref: string): boolean {
+  try {
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: tmpDir, stdio: ['ignore', 'pipe', 'ignore'] })
+    return true
+  } catch {
+    return false
+  }
+}
+
 // Clone the repo, fetch & checkout the PR head, and fetch the base ref into
 // refs/remotes/origin/<base>. onBaseFetchFailed lets callers log a warning;
 // other failures bubble up.
@@ -86,13 +159,24 @@ export async function clonePRForReview(params: {
   repo: string
   prNumber: number
   baseRef: string
+  /**
+   * The base commit from the PR payload. A branch that was deleted or renamed after
+   * the PR opened no longer resolves by name, but GitHub still serves the commit
+   * itself — so this is what turns an unreviewable PR back into a reviewable one.
+   */
+  baseSha?: string
   tmpDir: string
   token: string
   protocol: Config['clone_protocol']
   onBaseFetchFailed?: () => void
+  onBaseRefRecovered?: (status: BaseRefStatus) => void
   onProgress?: (line: string) => void
-}): Promise<void> {
-  const { owner, repo, prNumber, baseRef, tmpDir, token, protocol, onBaseFetchFailed, onProgress } = params
+}): Promise<CloneResult> {
+  // Isolation is scoped here, not globally in cli.ts, so commands like `skill install`
+  // that don't execute agents keep using the operator's normal Git config (credential
+  // helpers, url.*.insteadOf, CA/proxy settings).
+  isolateGitConfig()
+  const { owner, repo, prNumber, baseRef, baseSha, tmpDir, token, protocol, onBaseFetchFailed, onBaseRefRecovered, onProgress } = params
   const cloneUrl = buildCloneUrl(owner, repo, token, protocol)
   // Clone is retryable — transient network issues (curl 16/18, framing errors) are common.
   // GIT_RESILIENCE_ARGS inline (-c flags) apply HTTP buffer/timeout settings without
@@ -112,10 +196,190 @@ export async function clonePRForReview(params: {
   // origin/<base>, countCrosscheckCommitsForPR cannot scope its range and falls
   // back to counting the whole history — which trips the auto-fix commit cap on
   // any repo with prior [crosscheck] commits and silently disables fixing.
+  const baseRefStatus = await resolveBaseRef({
+    tmpDir, baseRef, prNumber,
+    ...(baseSha !== undefined && { baseSha }),
+    ...(onBaseFetchFailed !== undefined && { onBaseFetchFailed }),
+    ...(onBaseRefRecovered !== undefined && { onBaseRefRecovered }),
+  })
+  return { baseRefStatus }
+}
+
+/**
+ * Puts `refs/remotes/origin/<baseRef>` in place, or reports that it cannot be.
+ *
+ * Split out of clonePRForReview so it is testable against a local origin: the
+ * clone itself is hard-wired to github.com, and the part worth testing is the
+ * recovery chain, not the URL building.
+ *
+ * Assumes `tmpDir` is a git repo with an `origin` remote and the PR head checked
+ * out — never the base branch, since git refuses to update a checked-out ref.
+ */
+export async function resolveBaseRef(params: {
+  tmpDir: string
+  baseRef: string
+  prNumber: number
+  baseSha?: string
+  onBaseFetchFailed?: () => void
+  onBaseRefRecovered?: (status: BaseRefStatus) => void
+}): Promise<BaseRefStatus> {
+  // Called at this entry point too, not just in clonePRForReview: this is exported
+  // and reachable on its own, and every public git entry point in this module
+  // isolates for itself rather than trusting its caller to have done it.
+  isolateGitConfig()
+  const { tmpDir, baseRef, prNumber, baseSha, onBaseFetchFailed, onBaseRefRecovered } = params
+  let baseRefStatus: BaseRefStatus = 'fetched'
   try {
     await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir, true)
   } catch {
     onBaseFetchFailed?.()
+    baseRefStatus = 'unavailable'
+  }
+
+  // Fetching by name reports success in cases where the ref did not actually land,
+  // so trust the ref, not the exit code.
+  if (baseRefStatus === 'fetched' && !refExists(tmpDir, `refs/remotes/origin/${baseRef}`)) {
+    onBaseFetchFailed?.()
+    baseRefStatus = 'unavailable'
+  }
+
+  // Recovery 1 — by commit. A deleted or renamed base branch has no name to fetch,
+  // but the commit stays reachable and GitHub still serves it. Depth matches the
+  // clone so the recovered ref carries the same history a by-name fetch would.
+  if (baseRefStatus === 'unavailable' && baseSha) {
+    try {
+      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', '--depth=50', 'origin', baseSha], tmpDir, true)
+      execFileSync('git', ['update-ref', `refs/remotes/origin/${baseRef}`, 'FETCH_HEAD'], { cwd: tmpDir, stdio: 'ignore' })
+      if (refExists(tmpDir, `refs/remotes/origin/${baseRef}`)) baseRefStatus = 'recovered_by_sha'
+    } catch { /* fall through to the merge-ref recovery */ }
+  }
+
+  // Recovery 2 — via the PR's merge ref. GitHub keeps refs/pull/<n>/merge for an
+  // open, mergeable PR; its first parent is the base tip. This survives even when
+  // the base commit itself is no longer directly fetchable.
+  if (baseRefStatus === 'unavailable') {
+    try {
+      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', '--depth=50', 'origin', `pull/${prNumber}/merge:refs/crosscheck/pr-${prNumber}-merge`], tmpDir, true)
+      const parent = execFileSync('git', ['rev-parse', `refs/crosscheck/pr-${prNumber}-merge^1`], { cwd: tmpDir, encoding: 'utf8' }).trim()
+      execFileSync('git', ['update-ref', `refs/remotes/origin/${baseRef}`, parent], { cwd: tmpDir, stdio: 'ignore' })
+      if (refExists(tmpDir, `refs/remotes/origin/${baseRef}`)) baseRefStatus = 'recovered_by_merge_ref'
+    } catch { /* base ref is genuinely unavailable */ }
+  }
+
+  if (baseRefStatus === 'recovered_by_sha' || baseRefStatus === 'recovered_by_merge_ref') {
+    onBaseRefRecovered?.(baseRefStatus)
+  }
+  return baseRefStatus
+}
+
+const HOOKS_DISABLED = NULL_DEVICE
+
+export function runGitWithoutHooks(repoDir: string, args: string[], env?: NodeJS.ProcessEnv): void {
+  isolateGitConfig()
+  execFileSync('git', ['-c', `core.hooksPath=${HOOKS_DISABLED}`, ...args], {
+    cwd: repoDir,
+    env: { ...process.env, ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: NULL_DEVICE },
+    stdio: 'pipe',
+  })
+}
+
+export class CompromisedCloneError extends Error {
+  constructor() {
+    super('Review clone is compromised: its Git configuration could not be restored after the agent exited. This clone must be discarded before another Git operation runs.')
+    this.name = 'CompromisedCloneError'
+  }
+}
+
+function isGitRepository(repoDir: string): boolean {
+  try {
+    execFileSync('git', ['rev-parse', '--git-dir'], { cwd: repoDir, stdio: 'pipe' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function disableHooks(repoDir: string): void {
+  execFileSync('git', ['config', 'core.hooksPath', HOOKS_DISABLED], { cwd: repoDir })
+}
+
+interface FileSnapshot {
+  path: string
+  contents?: Buffer
+  mode?: number
+}
+
+function gitPath(repoDir: string, name: string): string {
+  const path = execFileSync('git', ['rev-parse', '--git-path', name], { cwd: repoDir, encoding: 'utf8' }).trim()
+  return isAbsolute(path) ? path : resolve(repoDir, path)
+}
+
+function snapshotFile(path: string): FileSnapshot {
+  if (!existsSync(path)) return { path }
+  return { path, contents: readFileSync(path), mode: statSync(path).mode }
+}
+
+function restoreFile(snapshot: FileSnapshot): void {
+  if (snapshot.contents === undefined) {
+    rmSync(snapshot.path, { force: true })
+    return
+  }
+
+  const tmpPath = `${snapshot.path}.crosscheck-restore-${randomUUID()}`
+  try {
+    writeFileSync(tmpPath, snapshot.contents, { mode: snapshot.mode })
+    renameSync(tmpPath, snapshot.path)
+  } finally {
+    rmSync(tmpPath, { force: true })
+  }
+}
+
+function resolvedGitConfig(repoDir: string): Buffer {
+  return execFileSync('git', ['config', '--null', '--list', '--show-origin'], { cwd: repoDir, stdio: 'pipe' })
+}
+
+export interface ChangedFiles {
+  files: string[]
+  additions: number
+  deletions: number
+}
+
+/**
+ * The PR's own changes, read from the clone rather than the API.
+ *
+ * The API's file list paginates and truncates on large PRs, and a truncated list
+ * can turn a mixed PR into an apparently doc-only one — which now caps a verdict,
+ * so a wrong answer suppresses a real BLOCK. The clone has the whole diff.
+ *
+ * Returns null when the diff cannot be read (no base ref, empty diff), so callers
+ * fall back rather than treating "unknown" as "no files".
+ */
+export function changedFilesVsBase(tmpDir: string, baseRef: string): ChangedFiles | null {
+  try {
+    // execFileSync, not execSync: a git ref may legally contain `;`, `$( )` and
+    // backticks, and this value drives routing rather than best-effort logging.
+    const raw = execFileSync(
+      'git',
+      ['diff', '--numstat', `origin/${baseRef}...HEAD`],
+      { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim()
+    if (!raw) return null
+
+    const files: string[] = []
+    let additions = 0
+    let deletions = 0
+    for (const line of raw.split('\n')) {
+      // numstat: <added>\t<deleted>\t<path>. Binary files report '-' for both.
+      const [add, del, ...rest] = line.split('\t')
+      const path = rest.join('\t').trim()
+      if (!path) continue
+      files.push(path)
+      additions += parseInt(add, 10) || 0
+      deletions += parseInt(del, 10) || 0
+    }
+    return files.length === 0 ? null : { files, additions, deletions }
+  } catch {
+    return null
   }
 }
 
@@ -129,28 +393,53 @@ export async function clonePRForReview(params: {
 //
 // The token is not needed while an agent runs: reviews only read, and the fix
 // step's push happens back in the runner after the agent has exited. So it is
-// removed for the duration and restored in `finally`, whether `fn` returned or
-// threw. A crash hard enough to skip the finally loses only the throwaway clone.
+// removed for the duration and restored afterwards, whether `fn` returned or
+// threw. A crash hard enough to skip that loses only the throwaway clone.
 //
-// SSH remotes carry no credential and are left untouched.
+// Git config is the second half of the same hole: hooks, fsmonitor, filters, and
+// other settings can execute programs during the runner's later Git commands.
+// Snapshotting and restoring the trusted config closes those paths together;
+// comparing Git's resolved view also detects changes hidden in pre-existing
+// includes. The clone is disposable, so a failed restore fails shut.
 export async function withCredentialFreeOrigin<T>(repoDir: string, fn: () => Promise<T>): Promise<T> {
+  isolateGitConfig()
+  if (!isGitRepository(repoDir)) return fn()
+
+  disableHooks(repoDir)
+
   let original: string | undefined
   try {
-    original = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repoDir, encoding: 'utf8' }).trim()
+    original = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repoDir, encoding: 'utf8', stdio: 'pipe' }).trim()
   } catch {
-    // No origin (or no repo) — nothing to strip, and nothing to restore.
-    return fn()
+    // No origin — nothing to strip.
   }
 
-  const scrubbed = original.replace(/^https:\/\/[^@/]*@github\.com\//, 'https://github.com/')
-  if (scrubbed === original) return fn()
+  const scrubbed = original?.replace(/^https:\/\/[^@/]*@github\.com\//, 'https://github.com/')
+  const stripped = original !== undefined && scrubbed !== original
+  if (stripped) execFileSync('git', ['remote', 'set-url', 'origin', scrubbed as string], { cwd: repoDir })
+  const configSnapshots = [...new Set(['config', 'config.worktree'].map(name => gitPath(repoDir, name)))]
+    .map(snapshotFile)
+  const trustedConfig = resolvedGitConfig(repoDir)
 
-  execFileSync('git', ['remote', 'set-url', 'origin', scrubbed], { cwd: repoDir })
+  let result: T | undefined
+  let bodyError: unknown
+  let bodyFailed = false
   try {
-    return await fn()
-  } finally {
-    try {
-      execFileSync('git', ['remote', 'set-url', 'origin', original], { cwd: repoDir })
-    } catch { /* clone is disposable; a failed restore must not mask fn's result */ }
+    result = await fn()
+  } catch (err) {
+    bodyError = err
+    bodyFailed = true
   }
+
+  try {
+    for (const snapshot of configSnapshots) restoreFile(snapshot)
+    if (!resolvedGitConfig(repoDir).equals(trustedConfig)) throw new Error('resolved Git config changed')
+    if (stripped) execFileSync('git', ['remote', 'set-url', 'origin', original as string], { cwd: repoDir })
+  } catch {
+    // Deliberately avoids the words the vendor-login classifier keys on.
+    throw new CompromisedCloneError()
+  }
+
+  if (bodyFailed) throw bodyError
+  return result as T
 }

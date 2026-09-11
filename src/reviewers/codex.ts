@@ -11,7 +11,7 @@ import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { buildCodexEnv } from './codex-env.js'
-import { withCredentialFreeOrigin } from '../lib/clone.js'
+import { CompromisedCloneError, withCredentialFreeOrigin } from '../lib/clone.js'
 import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
 
 // Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
@@ -255,6 +255,7 @@ export async function runCodexReview(
         rmSync(lastMessagePath, { force: true })
       }
     } catch (err: unknown) {
+      if (err instanceof CompromisedCloneError) throw err
       const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
       const rawStderr = execa.stderr ?? ''
       const fullMessage = rawStderr || execa.message || ''

@@ -33,6 +33,13 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
 
+      # npm 10 (bundled with Node 20/22) cannot do OIDC trusted publishing —
+      # support landed in npm 11.5.1. Upgrading here lets `npm publish` mint a
+      # short-lived credential from this job's id-token once a Trusted Publisher
+      # is configured for the package on npmjs.com, and it still falls back to
+      # NODE_AUTH_TOKEN when no trusted publisher matches.
+      - run: npm install -g npm@11.5.1
+
       - run: npm ci
       - run: npm run build
 
@@ -104,6 +111,13 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
           cache: npm
+
+      # npm 10 (bundled with Node 20/22) cannot do OIDC trusted publishing —
+      # support landed in npm 11.5.1. Upgrading here lets `npm publish` mint a
+      # short-lived credential from this job's id-token once a Trusted Publisher
+      # is configured for the package on npmjs.com, and it still falls back to
+      # NODE_AUTH_TOKEN when no trusted publisher matches.
+      - run: npm install -g npm@11.5.1
 
       - run: npm ci
       - run: npm run build

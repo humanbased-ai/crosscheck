@@ -17,7 +17,17 @@
 </p>
 
 <p align="center">
-  <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
+  <img src="./assets/demo-block-to-approve.gif" alt="crosscheck reviewing a PR: a BLOCK on a dropped ownership filter, an auto-fix, and the verdict on the repair" width="900" />
+</p>
+
+<p align="center">
+  <strong>The run above is real</strong> — a public fixture PR, every comment permanently linked:<br />
+  <a href="https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/2">the whole thread</a>
+  &nbsp;·&nbsp; <a href="./demo/README.md">how the recording was made</a>
+</p>
+
+<p align="center">
+  <sub>A pagination change that passed CI and dropped <code>ownerId</code> from the transaction query — any caller could read another user's transactions. Reviewed by Codex, repaired by Claude, and re-judged against the repair.</sub>
 </p>
 
 ---
@@ -173,6 +183,7 @@ Full walkthrough: **[docs/linear-identity.md](./docs/linear-identity.md)**.
 | `crosscheck review <pr>` | One-shot review, posts a comment |
 | `crosscheck run <pr>` | Full pipeline for a PR — review, fix, recheck |
 | `crosscheck recheck` / `fix` / `resolve` | Run one step in isolation |
+| `crosscheck merge <pr>` | Merge a PR once the verdict allows it — `--loose` / `--tight` / `--force` |
 | `crosscheck watch` | Listen for PR events and run the pipeline automatically |
 | `crosscheck scan` | Show open PRs with stale crosscheck state |
 | `crosscheck kickass` | Pick a stale PR and drive it to its next step |
@@ -303,6 +314,10 @@ Every option, annotated: **[crosscheck.config.example.yml](./crosscheck.config.e
 ```bash
 crosscheck onboard && crosscheck watch
 ```
+
+<p align="center">
+  <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
+</p>
 
 **On a server** — one always-on watcher for a team, with per-repo depth where it matters.
 

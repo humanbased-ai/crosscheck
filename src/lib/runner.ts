@@ -12,7 +12,7 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
-import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
+import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, DOC_ONLY_GATE_NOTE, detectInconclusiveReview, reviewHasNoFindings } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
 import { fetchCommentsAfter, selectHumanFeedback, formatHumanFeedback } from '../lib/human-feedback.js'
 import { autoFixBranchName, autoFixPRIntro, sourcePRHasMerged } from '../github/superseded-fix-pr.js'
@@ -23,22 +23,24 @@ import { shouldPostToLinear } from '../linear/comment.js'
 import { getLinearCredentials } from '../config/loader.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError, classifyError, type LogEntry } from '../lib/logger.js'
-import { buildCommitTrailers } from '../lib/annotation.js'
+import { buildCommitTrailers, parseAnnotation } from '../lib/annotation.js'
+import { shaCovers } from '../lib/pr-workflow-state.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
-import { resolveReviewStrategy, escalate, clampToLevels, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
+import { resolveReviewStrategy, escalate, clampToLevels, isDocOnlyChange, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { planAutoFixDelivery, forceWithLeaseArgs, parseLsRemoteOid, isLeaseRejection, assessFixBranchOwnership, isInvalidBaseError } from '../lib/auto-fix-branch.js'
 import type { FixBranchPR } from '../lib/auto-fix-branch.js'
 import { prOpenToVerdictMs } from '../lib/adoption.js'
 import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
-import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult } from '../lib/workflow.js'
+import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult, type WorkflowStep } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession, type SkillActivationSession } from '../skills/broker.js'
 import { formatSkillAttribution } from '../skills/attribution.js'
+import { CompromisedCloneError, runGitWithoutHooks, changedFilesVsBase } from './clone.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
@@ -55,6 +57,7 @@ function vendorTimeoutMs(timeoutSec: number | null): number | undefined {
 // Auth and quota/credit failures are operator/vendor-capacity issues that won't
 // self-heal through an immediate retry. Transient subprocess failures can retry.
 export function isRetryableFixError(err: unknown): boolean {
+  if (err instanceof CompromisedCloneError) return false
   const msg = err instanceof Error ? err.message : String(err)
   return !/auth failure|not logged in|claude auth/i.test(msg) && !isSubscriptionLimitError(err)
 }
@@ -286,6 +289,18 @@ export interface WorkflowContext {
   // Override the steps to execute instead of loading from workflow.yml.
   // Used by `crosscheck run --steps` to run only a subset of the pipeline.
   steps?: import('./workflow.js').WorkflowStep[]
+  // True only when `steps` came from an explicit `--steps` on the command line.
+  // Distinguishes a person asking for one step right now from the several
+  // internal callers that also narrow `steps` (resume, kickass dispatch, the
+  // crazy/halfcrazy fix→recheck loop), and from standing policy like repo config
+  // or `crosscheck alter`.
+  //
+  // Two class decisions yield to it, for the same reason: narrowing the step set
+  // (see planStepsForClass) and skipping the PR outright on a null tier. A person
+  // who types `--steps review` on a lockfile PR has already been told the class
+  // would skip it and asked anyway; silently doing nothing is the #318 failure in
+  // a second place.
+  stepsExplicitlyScoped?: boolean
   // When smart-switch is active, route to this vendor if the step's configured
   // reviewer resolves to a disabled vendor rather than skipping the step.
   smartSwitchFallback?: 'claude' | 'codex'
@@ -374,6 +389,61 @@ export interface RanStepDetail {
    *  verdict field. `null` means it ran and produced no parseable verdict,
    *  which is not the same as a step that produces no verdicts at all. */
   verdict?: string | null
+}
+
+/**
+ * How a PR class's step set composes with the pipeline the run was given.
+ *
+ * `narrowed` is the normal path: the class trims the configured pipeline and never
+ * widens it, so a repo set to review-only stays review-only whatever the class
+ * says — the same way per-repo `crosscheck alter` overrides compose.
+ *
+ * `bypassed` is the exception a `--steps` flag earns. Narrowing exists to stop a
+ * class escalating past standing *policy*, and repo config and `alter` are both
+ * policy. A `--steps` flag is not: it is a person naming the step they want on
+ * this PR. Treating it as one more ceiling made the specific instruction lose to
+ * the general one, so `ck run --steps recheck` on a `trivial` PR ran nothing and
+ * exited 0 — indistinguishable from success to anything shelling out.
+ *
+ * Pure, so the composition rules are testable without a WorkflowContext.
+ */
+export type StepPlanOutcome = 'unchanged' | 'narrowed' | 'bypassed'
+
+export interface StepPlan {
+  steps: WorkflowStep[]
+  outcome: StepPlanOutcome
+  /** Step types the class permits, after dropping anything off the depth ladder. */
+  classTypes: RepoWorkflowStep[]
+  /** How many steps narrowing removed. Zero unless `outcome` is 'narrowed'. */
+  dropped: number
+  /** How many narrowing would have removed. Zero unless `outcome` is 'bypassed'. */
+  wouldDrop: number
+}
+
+export function planStepsForClass(input: {
+  configuredSteps: WorkflowStep[]
+  classSteps: string[] | undefined
+  stepsExplicitlyScoped: boolean
+}): StepPlan {
+  const { configuredSteps, classSteps, stepsExplicitlyScoped } = input
+  const none = { steps: configuredSteps, outcome: 'unchanged' as const, classTypes: [], dropped: 0, wouldDrop: 0 }
+  if (!classSteps || classSteps.length === 0) return none
+
+  // Only the three depth-ladder types narrow. conflict-resolve is orthogonal to
+  // depth and is handled by filterStepsByTypes, which keeps it whenever the depth
+  // permits code modification — so it must not be treated as a class step here.
+  const classTypes = classSteps.filter(
+    (t): t is RepoWorkflowStep => t === 'review' || t === 'fix' || t === 'recheck',
+  )
+  if (classTypes.length === 0) return none
+
+  const narrowed = filterStepsByTypes(configuredSteps, classTypes)
+  const delta = configuredSteps.length - narrowed.length
+
+  if (stepsExplicitlyScoped) {
+    return { steps: configuredSteps, outcome: delta > 0 ? 'bypassed' : 'unchanged', classTypes, dropped: 0, wouldDrop: delta }
+  }
+  return { steps: narrowed, outcome: delta > 0 ? 'narrowed' : 'unchanged', classTypes, dropped: delta, wouldDrop: 0 }
 }
 
 // stepsRun holds every step the runner dispatched, skips included; results holds
@@ -624,41 +694,17 @@ function diffBucket(totalLines: number): string {
  */
 export function buildPRContext(ctx: WorkflowContext): PRContext | null {
   const { tmpDir, pr } = ctx
-  try {
-    // execFileSync, not execSync: a git ref may legally contain `;`, `$( )` and
-    // backticks, and this value drives routing rather than best-effort logging.
-    const raw = execFileSync(
-      'git',
-      ['diff', '--numstat', `origin/${pr.base.ref}...HEAD`],
-      { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim()
-    if (!raw) return null
+  const changed = changedFilesVsBase(tmpDir, pr.base.ref)
+  if (!changed) return null
 
-    const files: string[] = []
-    let additions = 0
-    let deletions = 0
-    for (const line of raw.split('\n')) {
-      // numstat: <added>\t<deleted>\t<path>. Binary files report '-' for both.
-      const [add, del, ...rest] = line.split('\t')
-      const path = rest.join('\t').trim()
-      if (!path) continue
-      files.push(path)
-      additions += parseInt(add, 10) || 0
-      deletions += parseInt(del, 10) || 0
-    }
-    if (files.length === 0) return null
-
-    return {
-      files,
-      additions,
-      deletions,
-      labels: pr.labels?.map(l => l.name) ?? [],
-      title: pr.title,
-      baseRef: pr.base.ref,
-      ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
-    }
-  } catch {
-    return null
+  return {
+    files: changed.files,
+    additions: changed.additions,
+    deletions: changed.deletions,
+    labels: pr.labels?.map(l => l.name) ?? [],
+    title: pr.title,
+    baseRef: pr.base.ref,
+    ...(pr.base.repo.default_branch !== undefined && { defaultBranch: pr.base.repo.default_branch }),
   }
 }
 
@@ -885,7 +931,7 @@ export async function pushWithNonFastForwardHandling(params: {
   const env = { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token }
   
   try {
-    execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { cwd: tmpDir, env })
+    runGitWithoutHooks(tmpDir, ['push', 'origin', `HEAD:${branch}`], env)
   } catch (pushErr: unknown) {
     const pushMsg = pushErr instanceof Error ? pushErr.message : String(pushErr)
     
@@ -905,7 +951,7 @@ export async function pushWithNonFastForwardHandling(params: {
       
       try {
         // Fetch the latest state of the branch
-        execFileSync('git', ['fetch', 'origin', branch], { cwd: tmpDir, env, stdio: 'pipe' })
+        runGitWithoutHooks(tmpDir, ['fetch', 'origin', branch], env)
         
         try {
           // Rebase our changes onto the latest branch state. Rebase onto FETCH_HEAD,
@@ -915,18 +961,18 @@ export async function pushWithNonFastForwardHandling(params: {
           // land-on-branch push falls back to opening a separate fix PR. The fetch on
           // the line above sets FETCH_HEAD to exactly the tip we just pulled, so that
           // is the correct (and always-present) rebase target.
-          execFileSync('git', ['rebase', 'FETCH_HEAD'], { cwd: tmpDir, env, stdio: 'pipe' })
+          runGitWithoutHooks(tmpDir, ['rebase', 'FETCH_HEAD'], env)
         } catch (rebaseConflictErr: unknown) {
           // If rebase fails (e.g., due to conflicts), abort it and restore the fix commit.
           // Otherwise the outer catch's fallback logic sees a repo in in-progress-rebase
           // state and incorrectly treats HEAD~1 as the fix commit.
-          execFileSync('git', ['rebase', '--abort'], { cwd: tmpDir, env, stdio: 'pipe' })
-          execFileSync('git', ['reset', '--hard', fixCommitSha], { cwd: tmpDir, env, stdio: 'pipe' })
+          runGitWithoutHooks(tmpDir, ['rebase', '--abort'], env)
+          runGitWithoutHooks(tmpDir, ['reset', '--hard', fixCommitSha], env)
           throw rebaseConflictErr
         }
         
         // Retry the push
-        execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { cwd: tmpDir, env })
+        runGitWithoutHooks(tmpDir, ['push', 'origin', `HEAD:${branch}`], env)
         fileLog({
           level: 'info',
           event: 'push_rebase_succeeded',
@@ -974,6 +1020,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // legitimately classify differently. Each comment cites the class that
   // produced it, so the record stays accurate either way.
   const strategy = resolveStrategyForPR(ctx)
+  // Read from the diff rather than the resolved class: `docs` matches a *fraction*
+  // of doc churn and exists only in smart mode, whereas the verdict cap needs the
+  // all-or-nothing answer on every install. Independent of `strategy` for that
+  // reason, and cheap — buildPRContext is one `git diff --numstat`.
+  const docOnlyChange = isDocOnlyChange(buildPRContext(ctx)?.files ?? [])
   if (config.quality.mode === 'smart' && !strategy) {
     // A smart-mode install quietly behaving as fixed is otherwise invisible.
     fileLog({ level: 'warn', event: 'strategy_unresolved', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'pr_context_unavailable', fallback_tier: config.quality.tier })
@@ -998,26 +1049,29 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
   // The class's step set NARROWS the configured pipeline; it never widens it.
   // A repo set to review-only stays review-only whatever the class says, which
-  // matches how per-repo `crosscheck alter` overrides compose. Reuses
-  // filterStepsByTypes so the conflict-resolve rule (orthogonal to the depth
-  // ladder, kept only when the depth permits code modification) stays in one
-  // place rather than being re-derived here.
-  const steps = ((): typeof configuredSteps => {
-    if (!strategy || strategy.steps.length === 0) return configuredSteps
-    const classTypes = strategy.steps.filter(
-      (t): t is RepoWorkflowStep => t === 'review' || t === 'fix' || t === 'recheck',
-    )
-    if (classTypes.length === 0) return configuredSteps
-    const narrowed = filterStepsByTypes(configuredSteps, classTypes)
-    const dropped = configuredSteps.length - narrowed.length
-    if (dropped > 0) {
-      log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${classTypes.join(', ')} (${dropped} step${dropped === 1 ? '' : 's'} dropped)`))
-      fileLog({ level: 'info', event: 'strategy_steps_narrowed', repo: `${owner}/${repoName}`, pr: prNumber, pr_class: strategy.classId, configured: configuredSteps.map((x: { type: string }) => x.type), applied: narrowed.map((x: { type: string }) => x.type), strategy_version: strategy.version })
-    }
-    return narrowed
-  })()
+  // matches how per-repo `crosscheck alter` overrides compose.
+  const stepPlan = planStepsForClass({
+    configuredSteps,
+    classSteps: strategy?.steps,
+    stepsExplicitlyScoped: ctx.stepsExplicitlyScoped === true,
+  })
+  if (stepPlan.outcome === 'bypassed') {
+    log(chalk.dim(`  strategy v${strategy!.version}: ${strategy!.classId} would drop ${stepPlan.wouldDrop} step${stepPlan.wouldDrop === 1 ? '' : 's'} — honouring --steps as given`))
+    fileLog({ level: 'info', event: 'strategy_narrowing_bypassed', repo: `${owner}/${repoName}`, pr: prNumber, pr_class: strategy!.classId, requested: configuredSteps.map((x: { type: string }) => x.type), class_steps: stepPlan.classTypes, strategy_version: strategy!.version })
+  } else if (stepPlan.outcome === 'narrowed') {
+    log(chalk.dim(`  strategy v${strategy!.version}: ${strategy!.classId} → ${stepPlan.classTypes.join(', ')} (${stepPlan.dropped} step${stepPlan.dropped === 1 ? '' : 's'} dropped)`))
+    fileLog({ level: 'info', event: 'strategy_steps_narrowed', repo: `${owner}/${repoName}`, pr: prNumber, pr_class: strategy!.classId, configured: configuredSteps.map((x: { type: string }) => x.type), applied: stepPlan.steps.map((x: { type: string }) => x.type), strategy_version: strategy!.version })
+  }
+  const steps = stepPlan.steps
 
-  if (strategy && strategy.tier === null) {
+  // A null tier means the class skips this PR outright. An explicit `--steps`
+  // overrides that for the same reason it overrides narrowing — but say so, or the
+  // run looks like the class simply did not match.
+  if (strategy && strategy.tier === null && ctx.stepsExplicitlyScoped) {
+    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} would skip this PR (${strategy.reason}) — honouring --steps as given`))
+    fileLog({ level: 'info', event: 'strategy_class_skip_bypassed', repo: `${owner}/${repoName}`, pr: prNumber, pr_class: strategy.classId, strategy_version: strategy.version })
+  }
+  if (strategy && strategy.tier === null && !ctx.stepsExplicitlyScoped) {
     log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → skipped (${strategy.reason})`))
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'strategy_class_skip', pr_class: strategy.classId, strategy_version: strategy.version })
     return { verdict: null, strategySkipped: strategy.classId }
@@ -1317,17 +1371,32 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (parsed.verdict === null) {
         fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, output_length: rawReview.length })
       }
+      // Inconclusive gate — must run BEFORE the severity gate. A reviewer that
+      // reports it could not review produces a findings-free body, which the
+      // severity gate reads as "nits only" and upgrades to APPROVE: a PR cleared
+      // to merge on the strength of a review that never ran. Refuse to post at
+      // all instead, the same way an unverifiable sha is refused below.
+      const inconclusive = detectInconclusiveReview(clean)
+      if (inconclusive.inconclusive) {
+        fileLog({ level: 'error', event: 'review_inconclusive', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, reason: inconclusive.reason, raw_verdict: parsed.verdict, output_length: rawReview.length, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+        log(chalk.red(`✗ ${reviewer} did not review PR #${prNumber} — ${inconclusive.reason}`))
+        // The review cost vendor tokens — surface it rather than lose it silently.
+        log(chalk.dim(`\n--- unposted review ---\n${clean}\n--- end ---`))
+        throw new Error(`${reviewer} review inconclusive — ${inconclusive.reason}`)
+      }
+
       // Severity gate: NEEDS WORK with only P3 nits is downgraded to APPROVE so
       // suggestion-only reviews don't drive the fix/recheck loop. P2 (correctness)
       // and above keep NEEDS WORK and require human attention before merge.
-      const gate = applySeverityGate(parsed.verdict, clean)
+      const gate = applySeverityGate(parsed.verdict, clean, { docOnly: docOnlyChange })
       const verdict = gate.verdict
       if (gate.downgraded) {
-        fileLog({ level: 'info', event: 'verdict_severity_gated', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, raw_verdict: parsed.verdict, gated_verdict: verdict })
+        fileLog({ level: 'info', event: 'verdict_severity_gated', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, raw_verdict: parsed.verdict, gated_verdict: verdict, reason: gate.reason })
       }
+      const gateNote = gate.reason === 'doc_only' ? DOC_ONLY_GATE_NOTE : SEVERITY_GATE_NOTE
       const baseBody = verdict === null
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
-        : prependVerdictToComment(gate.downgraded ? `${SEVERITY_GATE_NOTE}\n\n${clean}` : clean, verdict)
+        : prependVerdictToComment(gate.downgraded ? `${gateNote}\n\n${clean}` : clean, verdict)
       // Skills are not folded into the body — postReviewComment renders the
       // receipt beneath the attribution footer.
       const commentBody = retried
@@ -1501,6 +1570,26 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
       if (!reviewCommentBody) { skipFix('no_review_comment'); continue }
 
+      // A review with nothing actionable in it cannot produce a fix. Dispatching one
+      // anyway spends a full vendor call to be told NO_CHANGES — the outcome that
+      // made `ck fix` look like it had worked when its review was a non-review.
+      if (reviewHasNoFindings(reviewCommentBody)) {
+        log(chalk.dim(`  review has no actionable findings — nothing for the fix step to apply`))
+        skipFix('review_has_no_findings')
+        continue
+      }
+
+      // Findings raised against a different commit still usually apply, so this
+      // warns rather than skips — but silently fixing against a stale review is how
+      // a round gets spent re-fixing something the author already pushed.
+      // shaCovers, not ===: annotations carry the short or full form interchangeably,
+      // and a raw compare would call every short-form annotation stale.
+      const reviewSha = parseAnnotation(reviewCommentBody)?.sha
+      if (reviewSha && !shaCovers(reviewSha, pr.head.sha)) {
+        log(chalk.yellow(`⚠  review was written against ${reviewSha.slice(0, 7)}, PR head is ${pr.head.sha.slice(0, 7)} — fixing against a stale review`))
+        fileLog({ level: 'warn', event: 'fix_review_stale', repo: `${owner}/${repoName}`, pr: prNumber, review_sha: reviewSha, head_sha: pr.head.sha, ...triggerField })
+      }
+
       // Replies the PR author (or their agent) posted since that review — e.g.
       // "already fixed in the last commit" or "not applicable here" — so the
       // fixer doesn't blindly redo work the thread already settled.
@@ -1584,6 +1673,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       try {
         ;({ appliedCount, changedFiles: fixChangedFiles, tokensUsed: fixTokensUsed, effort: fixEffort } = await runFix(vendor))
       } catch (err) {
+        if (err instanceof CompromisedCloneError) throw err
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor }, err)
         const fallbackVendor = resolveLimitFallbackVendor(vendor, effectiveType, config)
         if (isSubscriptionLimitError(err)) {
@@ -1597,6 +1687,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             ;({ appliedCount, changedFiles: fixChangedFiles, tokensUsed: fixTokensUsed, effort: fixEffort } = await runFix(fallbackVendor))
             activeVendor = fallbackVendor
           } catch (fallbackErr) {
+            if (fallbackErr instanceof CompromisedCloneError) throw fallbackErr
             logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor: fallbackVendor }, fallbackErr)
             activeVendor = fallbackVendor  // retry uses the fallback vendor since primary already failed
             fixErr = fallbackErr
@@ -1617,6 +1708,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           fileLog({ level: 'info', event: 'fix_retry_succeeded', repo: `${owner}/${repoName}`, pr: prNumber })
           fixErr = undefined
         } catch (retryErr) {
+          if (retryErr instanceof CompromisedCloneError) throw retryErr
           logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 2 }, retryErr)
           fixErr = retryErr
         }
@@ -1682,18 +1774,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       if (landing === 'branch') {
         const fixModel = activeVendor === 'codex' ? codexFixModel : claudeFixModel
-        execSync('git add -A', { cwd: tmpDir })
-        execFileSync(
-          'git',
-          [
-            'commit',
-            '-m',
-            fixCommitSubject(appliedCount, activeVendor),
-            '-m',
-            buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
-          ],
-          { cwd: tmpDir },
-        )
+        runGitWithoutHooks(tmpDir, ['add', '-A'])
+        runGitWithoutHooks(tmpDir, [
+          'commit',
+          '-m',
+          fixCommitSubject(appliedCount, activeVendor),
+          '-m',
+          buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
+        ])
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
         await pushWithNonFastForwardHandling({
           tmpDir,
@@ -1756,18 +1844,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         // original PR. Only when that push can't land — e.g. the PR was merged and
         // its branch deleted, or the branch is protected — do we fall back to opening
         // a separate follow-up PR that carries the very same commit.
-        execSync('git add -A', { cwd: tmpDir })
-        execFileSync(
-          'git',
-          [
-            'commit',
-            '-m',
-            fixPRCommitSubject(prNumber, activeVendor),
-            '-m',
-            buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
-          ],
-          { cwd: tmpDir },
-        )
+        runGitWithoutHooks(tmpDir, ['add', '-A'])
+        runGitWithoutHooks(tmpDir, [
+          'commit',
+          '-m',
+          fixPRCommitSubject(prNumber, activeVendor),
+          '-m',
+          buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
+        ])
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
 
         let landedOnBranch = false
@@ -1837,7 +1921,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           // either with a sha the repository cannot resolve — which verifyReviewedSha
           // refuses to post (#290) — or with one no open PR carries.
           const restorePRHeadInClone = () => {
-            execSync('git reset --hard HEAD~1', { cwd: tmpDir, stdio: 'pipe' })
+            runGitWithoutHooks(tmpDir, ['reset', '--hard', 'HEAD~1'])
           }
 
           // Deliver the fix as a diff on the original PR. Used wherever opening the
@@ -1950,7 +2034,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           }
 
           try {
-            execFileSync('git', forceWithLeaseArgs(fixBranch, remoteOid), { cwd: tmpDir, env: gitEnv, stdio: 'pipe' })
+            runGitWithoutHooks(tmpDir, forceWithLeaseArgs(fixBranch, remoteOid), gitEnv)
           } catch (pushErr: unknown) {
             const pushMsg = pushErr instanceof Error ? pushErr.message : String(pushErr)
             fileLog({
@@ -1972,7 +2056,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           const rollBackPushedFixBranch = () => {
             if (remoteOid !== null) return
             try {
-              execFileSync('git', ['push', 'origin', '--delete', fixBranch], { cwd: tmpDir, env: gitEnv, stdio: 'pipe' })
+              runGitWithoutHooks(tmpDir, ['push', 'origin', '--delete', fixBranch], gitEnv)
               fileLog({ level: 'info', event: 'fix_branch_rolled_back', repo: `${owner}/${repoName}`, pr: prNumber, branch: fixBranch, sha: newSha })
             } catch (deleteErr: unknown) {
               fileLog({ level: 'warn', event: 'fix_branch_rollback_failed', repo: `${owner}/${repoName}`, pr: prNumber, branch: fixBranch, error: deleteErr instanceof Error ? deleteErr.message.slice(0, 500) : String(deleteErr) })
@@ -2089,9 +2173,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // real conflict markers and UU entries that findConflictedFiles can detect.
       let hasMergeConflicts = false
       try {
-        execSync(`git merge --no-commit origin/${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
+        runGitWithoutHooks(tmpDir, ['merge', '--no-commit', `origin/${pr.base.ref}`])
         // Clean merge — undo the staged merge state and skip this step
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
       } catch {
         hasMergeConflicts = true
       }
@@ -2103,7 +2187,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const conflictedFiles = findConflictedFiles(tmpDir)
       if (conflictedFiles.length === 0) {
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         skipConflictResolve('no_conflicts')
         continue
       }
@@ -2117,8 +2201,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       } else if (substitutedOriginVendor && vendor) {
         fileLog({ level: 'info', event: 'conflict_resolve_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: substitutedOriginVendor, to: vendor, reason: 'unsupported_vendor' })
       }
-      if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
-      if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
+      if (!vendor) { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
+      if (vendor === 'codex') { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
       // Conflict-resolve is mechanical text surgery bounded by the markers —
       // measured at 37s against ~643s for a review — so it always runs fast.
       const conflictResolveModel = resolveClaudeModel(
@@ -2127,11 +2211,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       )
 
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
-      if (isFork) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
+      if (isFork) { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
 
       const crCommitCount = countCrosscheckCommitsForPRDetailed(tmpDir, pr.base.ref)
       if (crCommitCount.count >= MAX_CROSSCHECK_COMMITS) {
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         log(crCommitCount.scoped
           ? chalk.yellow(`⚠  PR #${prNumber}: ${crCommitCount.count}/${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping conflict-resolve`)
           : chalk.yellow(`⚠  PR #${prNumber}: cannot scope [crosscheck] commit count (origin/${pr.base.ref} missing) — stopping conflict-resolve`))
@@ -2155,7 +2239,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         skipConflictResolve(isSubscriptionLimitError(err) ? 'vendor_limit' : 'resolve_error')
         continue
       }
@@ -2165,7 +2249,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       else if (skillSession) logSkillsNoneActivated(skillSession, { step_type: 'conflict-resolve', step_name: step.name })
 
       if (appliedCount === 0) {
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: resolveTokensUsed })
         results[step.name] = { applied_count: 0, ...(resolveTokensUsed !== undefined && { tokens_used: resolveTokensUsed }), vendor }
         continue
@@ -2188,7 +2272,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         } catch { /* unreadable (deleted side of modify/delete) — caught by U-filter below */ }
       }
       if (filesWithMarkers.length > 0) {
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         log(chalk.yellow(`⚠  PR #${prNumber}: ${filesWithMarkers.length} file(s) still contain conflict markers — skipping commit`))
         fileLog({ level: 'warn', event: 'conflict_resolve_incomplete', repo: `${owner}/${repoName}`, pr: prNumber, paths: filesWithMarkers })
         skipConflictResolve('incomplete_resolution')
@@ -2204,7 +2288,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // resolvedPaths is derived from model output and PR-controlled filenames.
       for (const p of resolvedPaths) {
         try {
-          execFileSync('git', ['add', '--', p], { cwd: tmpDir, stdio: 'pipe' })
+          runGitWithoutHooks(tmpDir, ['add', '--', p])
         } catch { /* skip */ }
       }
 
@@ -2217,24 +2301,20 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         unmergedPaths = out.trim().split('\n').filter(Boolean)
       } catch { /* ignore */ }
       if (unmergedPaths.length > 0) {
-        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }
         log(chalk.yellow(`⚠  PR #${prNumber}: ${unmergedPaths.length} unmerged path(s) remain after resolve — skipping commit`))
         fileLog({ level: 'warn', event: 'conflict_resolve_unmerged_paths', repo: `${owner}/${repoName}`, pr: prNumber, paths: unmergedPaths })
         skipConflictResolve('unmerged_paths')
         continue
       }
 
-      execFileSync(
-        'git',
-        [
-          'commit',
-          '-m',
-          conflictResolveCommitSubject(conflictedFiles.length, vendor),
-          '-m',
-          buildCommitTrailers({ reviewer: vendor, model: conflictResolveModel, step: 'conflict-resolve', service: 'crosscheck' }),
-        ],
-        { cwd: tmpDir },
-      )
+      runGitWithoutHooks(tmpDir, [
+        'commit',
+        '-m',
+        conflictResolveCommitSubject(conflictedFiles.length, vendor),
+        '-m',
+        buildCommitTrailers({ reviewer: vendor, model: conflictResolveModel, step: 'conflict-resolve', service: 'crosscheck' }),
+      ])
       const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
       await pushWithNonFastForwardHandling({
         tmpDir,

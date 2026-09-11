@@ -44,6 +44,12 @@ export const NULL_VERDICT_WARNING =
 export const SEVERITY_GATE_NOTE =
   '> ℹ️ No blocking (Critical/High/Medium) findings — approving with comments. The notes below are non-blocking; address at your discretion.'
 
+// Posted when a verdict is capped because the PR changes documentation and nothing
+// else. Wording is deliberate: the findings are not dismissed, they are reclassified
+// as advisory, because they cannot describe shipping code.
+export const DOC_ONLY_GATE_NOTE =
+  '> ℹ️ Documentation-only change — approving with comments. Prose findings cannot break a build or a caller, so they are advisory here; the notes below are worth reading and none of them blocks merge.'
+
 // A list of "no findings" phrasings, reduced to letters-only (punctuation, bullets,
 // and whitespace stripped) so "- None.", "N/A", and "None found" all compare equal.
 const EMPTY_SECTION_PHRASES = new Set([
@@ -52,19 +58,45 @@ const EMPTY_SECTION_PHRASES = new Set([
   'noblockingissues', 'noissues', 'noissuesfound',
 ])
 
-// Whether the review's "Critical Issues" section (Claude's mandated format) lists a
-// real finding rather than an explicit "None". Returns false when the section is
-// absent — a NEEDS WORK without an explicit Critical section is, by the reviewer's
-// own definition, non-blocking.
-function criticalSectionHasContent(text: string): boolean {
-  const heading = text.match(/^#{1,6}\s*Critical(?:\s+Issues?)?\b.*$/im)
+// Hedged empties: a reviewer that could not do the work writes "None assessed."
+// or "Not evaluated" rather than a bare "None". Enumerating every phrasing in the
+// set above never converges — a negation paired with an assessment verb is the
+// stable shape, so match that instead. Anchored, so "None assessed as critical,
+// but see below" keeps its content and stays blocking.
+// Verb stems carry an explicit optional `ed` rather than a trailing `d?`: `assessed?`
+// reads as "assesse" plus an optional d, which silently fails to match the bare
+// "assess" in "Could not assess".
+const HEDGED_EMPTY_RE =
+  /^(?:none|not|no|nothing|unableto|couldnot|cannot|didnot|wasnot|werenot)(?:been)?(?:assess(?:ed)?|evaluat(?:e|ed)|determin(?:e|ed)|review(?:ed)?|analy[sz](?:e|ed)|examin(?:e|ed)|check(?:ed)?|inspect(?:ed)?|perform(?:ed)?|applicable|available|possible)$/
+
+// Whether a section body, reduced to letters, states "no findings" — either as one
+// of the fixed phrasings or as a hedged empty.
+function isEmptySectionPhrase(letters: string): boolean {
+  return EMPTY_SECTION_PHRASES.has(letters) || HEDGED_EMPTY_RE.test(letters)
+}
+
+// Whether the named section lists a real finding rather than an explicit "None".
+// Returns false when the section is absent entirely.
+function findSection(text: string, headingPattern: string): RegExpMatchArray | null {
+  return text.match(new RegExp(`^#{1,6}\\s*${headingPattern}\\b.*$`, 'im'))
+}
+
+function sectionHasContent(text: string, headingPattern: string): boolean {
+  const heading = findSection(text, headingPattern)
   if (!heading) return false
   const rest = text.slice((heading.index ?? 0) + heading[0].length)
   const next = rest.match(/^#{1,6}\s+\S/m)
   const body = (next ? rest.slice(0, next.index) : rest)
   const letters = body.replace(/[^a-z]/gi, '').toLowerCase()
   if (letters === '') return false
-  return !EMPTY_SECTION_PHRASES.has(letters)
+  return !isEmptySectionPhrase(letters)
+}
+
+// The review's "Critical Issues" section (Claude's mandated format). Absent section
+// means non-blocking: a NEEDS WORK without an explicit Critical section is, by the
+// reviewer's own definition, not a blocker.
+function criticalSectionHasContent(text: string): boolean {
+  return sectionHasContent(text, 'Critical(?:\\s+Issues?)?')
 }
 
 // A review blocks merge when it contains a P0/P1 (critical/high) or P2 (medium/correctness)
@@ -78,19 +110,101 @@ export function hasBlockingFindings(reviewText: string): boolean {
 
 export interface SeverityGateResult {
   verdict: Verdict | null
-  // True when the gate changed the verdict (NEEDS WORK → APPROVE).
+  // True when the gate changed the verdict.
   downgraded: boolean
+  /** Which rule changed it, so the caller picks the matching note. */
+  reason?: 'no_blocking_findings' | 'doc_only'
+}
+
+export interface SeverityGateOptions {
+  /**
+   * Every changed file is prose documentation. A doc-only PR is never blocked:
+   * a finding about a sentence cannot break a build or a caller, and the `docs`
+   * class runs `review` with no fix or recheck step, so a BLOCK there had no path
+   * to ever clear — it just sat on the PR forever.
+   */
+  docOnly?: boolean
 }
 
 // Severity gate: only P3-only (nit/style) reviews are downgraded from NEEDS WORK to
 // APPROVE, preventing review-loop churn on trivial suggestions. P2 (medium/correctness)
 // findings keep the NEEDS WORK verdict and require human attention before merge.
 // BLOCK and APPROVE are never altered.
-export function applySeverityGate(verdict: Verdict | null, reviewText: string): SeverityGateResult {
+export function applySeverityGate(
+  verdict: Verdict | null,
+  reviewText: string,
+  options: SeverityGateOptions = {},
+): SeverityGateResult {
+  // Checked before the severity rule and applied to BLOCK as well as NEEDS WORK:
+  // the point is that no doc-only verdict blocks, and a BLOCK is the one the
+  // severity rule deliberately never touches.
+  if (options.docOnly && (verdict === 'BLOCK' || verdict === 'NEEDS WORK')) {
+    return { verdict: 'APPROVE', downgraded: true, reason: 'doc_only' }
+  }
   if (verdict === 'NEEDS WORK' && !hasBlockingFindings(reviewText)) {
-    return { verdict: 'APPROVE', downgraded: true }
+    return { verdict: 'APPROVE', downgraded: true, reason: 'no_blocking_findings' }
   }
   return { verdict, downgraded: false }
+}
+
+// Phrases a reviewer uses to say it never actually reviewed the diff. The one that
+// started this: a deleted base branch left `origin/<base>` absent from the checkout,
+// codex answered "Review could not be performed", and crosscheck posted it as a
+// NEEDS WORK that then drove a fix step with nothing to fix.
+const INCONCLUSIVE_MARKERS: ReadonlyArray<{ re: RegExp; reason: string }> = [
+  { re: /\breview\s+(?:could\s+not|cannot|can'?t|was\s+not\s+able\s+to)\s+be\s+(?:performed|completed|carried\s+out|done)/i, reason: 'reviewer reported it could not perform the review' },
+  { re: /\b(?:unable|failed)\s+to\s+(?:review|resolve\s+the\s+diff|compute\s+the\s+diff|obtain\s+the\s+diff)/i, reason: 'reviewer could not resolve the diff' },
+  { re: /\b(?:diff|changes?)\s+(?:could\s+not|cannot|can'?t)\s+be\s+(?:resolved|determined|computed|produced)/i, reason: 'reviewer could not resolve the diff' },
+  { re: /\babsent\s+from\s+(?:this|the)\s+checkout\b/i, reason: 'a required ref was absent from the checkout' },
+  { re: /\b(?:base|target)\s+(?:ref|branch|commit)\b[^.\n]{0,60}?\b(?:is|was|are|were)?\s*(?:missing|absent|unavailable|not\s+(?:found|available|present))\b/i, reason: 'the base ref was missing from the checkout' },
+  { re: /\bno\s+diff\s+(?:is\s+|was\s+)?available\b/i, reason: 'no diff was available to review' },
+  { re: /\bempty\s+diff\b[^.\n]{0,40}\bnothing\s+to\s+review\b/i, reason: 'the diff was empty' },
+]
+
+export interface InconclusiveReview {
+  inconclusive: boolean
+  /** Human-readable cause, for the log line and the operator-facing message. */
+  reason?: string
+}
+
+// Whether a review body is a self-reported non-review rather than a verdict.
+//
+// Gated on the review carrying no blocking finding: a reviewer that found a real
+// P0 while also grumbling that some ref was missing did do work, and that verdict
+// must still be posted. Only a body with nothing actionable in it is discarded.
+// This deliberately outranks the severity gate — a P3-only non-review would
+// otherwise be *upgraded* to APPROVE, which is the worst available outcome.
+export function detectInconclusiveReview(reviewText: string): InconclusiveReview {
+  if (hasBlockingFindings(reviewText)) return { inconclusive: false }
+  for (const { re, reason } of INCONCLUSIVE_MARKERS) {
+    if (re.test(reviewText)) return { inconclusive: true, reason }
+  }
+  return { inconclusive: false }
+}
+
+// The headings reviewers put findings under. Nits and suggestions are included:
+// they are not blocking, but they are actionable, and `ck fix` is how a user opts
+// into applying them.
+const FINDING_SECTIONS = [
+  'Critical(?:\\s+Issues?)?', 'Blocking(?:\\s+Issues?)?', 'Warnings?', 'Suggestions?',
+  'Nits?', 'Minor(?:\\s+Issues?)?', 'Recommendations?', 'Issues?', 'Findings?',
+]
+
+/**
+ * Whether a review demonstrably contains nothing a fix step could act on.
+ *
+ * Deliberately asymmetric: this must never claim emptiness it cannot prove, because
+ * the caller skips the fix on a true answer and a false positive silently drops a
+ * legitimate fix. So a body in an unrecognised format — no priority markers and no
+ * known heading — returns false and the fix runs, at worst costing the vendor call
+ * it would have cost anyway. Only a body whose every recognised section is an
+ * explicit "None" is reported empty.
+ */
+export function reviewHasNoFindings(reviewText: string): boolean {
+  if (/\[P[0-3]\]/i.test(reviewText)) return false
+  const present = FINDING_SECTIONS.filter(name => findSection(reviewText, name) !== null)
+  if (present.length === 0) return false
+  return present.every(name => !sectionHasContent(reviewText, name))
 }
 
 export function formatVerdict(verdict: Verdict | null): string {
