@@ -202,7 +202,7 @@ describe('banned models', () => {
 
 describe('model resolution honours the strategy', () => {
   const quality = (over: Partial<QualityConfig> = {}): QualityConfig =>
-    ({ tier: 'balanced', mode: 'smart', focus: [], ...over }) as QualityConfig
+    ({ tier: 'balanced', mode: 'smart', review_memory: true, focus: [], ...over }) as QualityConfig
 
   it('uses the strategy tier in smart mode', () => {
     expect(resolveClaudeModel(quality(), undefined, { tier: 'thorough' })).toBe('claude-opus-5')
@@ -452,7 +452,7 @@ describe('rounds escalate on measured non-convergence', () => {
 describe('codex under subscription auth', () => {
   const codex = (over: Partial<CodexVendorConfig> = {}): CodexVendorConfig =>
     ({ enabled: true, model: null, auth: 'subscription', effort: 'medium', quality: 'medium', timeout_sec: null, ...over }) as CodexVendorConfig
-  const q = (tier: QualityConfig['tier']): QualityConfig => ({ tier, mode: 'smart', focus: [] }) as QualityConfig
+  const q = (tier: QualityConfig['tier']): QualityConfig => ({ tier, mode: 'smart', review_memory: true, focus: [] }) as QualityConfig
 
   // Without model_tiers every tier collapses to the CLI's own default, so the
   // strategy's tier had no effect and must not be cited.

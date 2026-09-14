@@ -1165,8 +1165,8 @@ mode: cross-vendor
 # Pick https if you have multi-account SSH setup or your default SSH key
 # cannot access target repos. Independent of `gh config get git_protocol`.
 clone_protocol: ssh
-# Opt-in: reuse fetched Git objects in independent, non-shared checkouts.
-repository_cache: false
+# Reuse fetched Git objects; set false to always clone from scratch.
+repository_cache: true
 
 # ── Vendors ───────────────────────────────────────────────────────────────────
 vendors:
@@ -1185,8 +1185,8 @@ vendors:
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:
-  # Opt-in: structured findings + published review memory for incremental follow-ups.
-  review_memory: false
+  # Structured findings and incremental follow-ups; set false for legacy prose reviews.
+  review_memory: true
   mode: smart               # smart (default) | fixed — see Review thoroughness
   tier: balanced            # fast | balanced | thorough (fallback under smart)
   focus:                    # narrows review scope (optional)
@@ -1773,10 +1773,11 @@ The authoring agent has the most context about its own code — the same style, 
 No — `crosscheck optimize` is always user-triggered. You run it when you want to improve instructions. There is no background daemon or scheduled job. A future version may add an optional `--schedule` mode, but the default will always be manual to keep you in control of what gets written to `~/.crosscheck/workflow.yml`.
 
 
-### Review efficiency (opt-in)
+### Review efficiency (enabled by default)
 
-Enable `repository_cache: true` and `quality.review_memory: true` to reuse Git
-objects and retain structured findings across reviews. Both default to off and
+`repository_cache` and `quality.review_memory` default to `true`, including
+existing configs that omit them. They reuse Git objects and retain structured
+findings across reviews. Set either option to `false` to disable it. Both
 work with `review`, `run`/`recheck`, and `watch`; no CLI flags change.
 
 The repository cache lives in `~/.crosscheck/repository-cache`. It fetches the

@@ -5,6 +5,7 @@ import type { CodexVendorConfig, QualityConfig, VendorConfig } from '../config/s
 const quality = (tier: QualityConfig['tier']): QualityConfig => ({
   tier,
   mode: 'fixed',
+  review_memory: true,
   focus: [],
 })
 
