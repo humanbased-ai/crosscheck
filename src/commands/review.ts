@@ -1,3 +1,5 @@
+import { prepareReviewPlan, finishReview, savePublishedReview, assertReviewFresh } from '../lib/review-memory.js'
+import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -124,7 +126,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   try {
     const { baseRefStatus } = await clonePRForReview({
       owner, repo, prNumber: number, baseRef: pr.base.ref, baseSha: pr.base.sha,
-      tmpDir, token, protocol: config.clone_protocol,
+      tmpDir, token, protocol: config.clone_protocol, repositoryCache: config.repository_cache,
       onProgress: line => { spinner2.text = `Cloning repo for review... ${line}` },
       onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref }),
       onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref, via: status }),
@@ -138,6 +140,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       console.log(chalk.yellow(`  base ref origin/${pr.base.ref} was missing — recovered ${baseRefStatus === 'recovered_by_sha' ? 'from the PR base commit' : "from the PR's merge ref"}`))
     }
 
+    const memoryPlan = config.quality.review_memory ? prepareReviewPlan({
+      repoDir: tmpDir, repository: `${owner}/${repo}#${number}`, baseBranch: pr.base.ref,
+      instructions: DEFAULT_REVIEW_INSTRUCTIONS, policy: JSON.stringify(config.quality),
+    }) : undefined
     let reviewText: string
     let tokensUsed: number | undefined
     let model = 'default'
@@ -160,7 +166,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           pr.title,
           config.quality,
           config.vendors.codex,
-          undefined,
+          memoryPlan?.instructions,
           msg => { reviewSpinner!.text = msg },
           codexTimeoutMs,
           undefined,
@@ -176,7 +182,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           config.quality,
           config.vendors.claude,
           config.budget.per_review_usd,
-          undefined,
+          memoryPlan?.instructions,
           msg => { reviewSpinner!.text = msg },
           claudeTimeoutMs,
           undefined,
@@ -192,6 +198,8 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     reviewSpinner.succeed(`Review complete (${elapsed}s)`)
     const activatedSkills = skillSession?.activations() ?? []
     if (activatedSkills.length > 0) console.log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
+    const structured = memoryPlan ? finishReview(memoryPlan, reviewText) : undefined
+    if (structured) reviewText = structured.text
     const parsed = parseVerdict(reviewText)
     const { clean } = parsed
     if (parsed.verdict === null) {
@@ -223,7 +231,12 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     const reviewBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
       : prependVerdictToComment(gate.downgraded ? `${gateNote}\n\n${clean}` : clean, verdict)
+    if (memoryPlan) {
+      const { data: current } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
+      assertReviewFresh(memoryPlan, current, pr.head.sha)
+    }
     await postReviewComment(octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort)
+    if (memoryPlan && structured) savePublishedReview(memoryPlan, structured.snapshot)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 

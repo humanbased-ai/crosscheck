@@ -1,3 +1,4 @@
+import { cloneFromCache } from './repository-cache.js'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { randomUUID } from 'crypto'
 import { execFileSync } from 'child_process'
@@ -165,6 +166,7 @@ export async function clonePRForReview(params: {
    * itself — so this is what turns an unreviewable PR back into a reviewable one.
    */
   baseSha?: string
+  repositoryCache?: boolean
   tmpDir: string
   token: string
   protocol: Config['clone_protocol']
@@ -183,7 +185,15 @@ export async function clonePRForReview(params: {
   // requiring a local repo to already exist.
   // --progress forces git to emit stderr progress even when piped; without a
   // progress consumer, stay --quiet so error output remains clean.
-  await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress)
+  if (params.repositoryCache) {
+    try {
+      await cloneFromCache({ source: cloneUrl, repository: `${owner}/${repo}`, prNumber, destination: tmpDir })
+    } catch (err) {
+      throw new Error(redactCloneSecrets(err instanceof Error ? err.message : String(err)))
+    }
+  } else {
+    await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress)
+  }
   await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir, true, onProgress)
   await runGit(['checkout', `pr-${prNumber}`], tmpDir)
 

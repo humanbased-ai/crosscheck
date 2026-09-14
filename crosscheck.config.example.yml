@@ -21,6 +21,8 @@ mode: cross-vendor
 # Pick https if you have a multi-account SSH setup or your default SSH key
 # cannot access target repos. Independent of `gh config get git_protocol`.
 clone_protocol: ssh
+# Opt-in: reuse fetched Git objects in independent, non-shared checkouts.
+repository_cache: false
 
 # ─── Vendors ─────────────────────────────────────────────────────────────────
 vendors:
@@ -39,6 +41,8 @@ vendors:
 
 # ─── Quality & Focus ─────────────────────────────────────────────────────────
 quality:
+  # Opt-in: structured findings + published review memory for incremental follow-ups.
+  review_memory: false
   mode: smart               # smart (default) | fixed
   #
   # smart  - dynamically adjust model + effort based on task type. The PR is

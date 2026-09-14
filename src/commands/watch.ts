@@ -610,7 +610,7 @@ export async function runWatch(opts: WatchOpts = {}) {
 
         const { baseRefStatus } = await clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef, baseSha: params.baseSha,
-          tmpDir, token, protocol: config.clone_protocol,
+          tmpDir, token, protocol: config.clone_protocol, repositoryCache: config.repository_cache,
           onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef }),
           onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef, via: status }),
         })
