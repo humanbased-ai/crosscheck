@@ -225,6 +225,14 @@ export const BacktraceConfigSchema = z.object({
   // Scan for open PRs without a [crosscheck] comment on startup.
   // Off by default — pass --backtrace (watch/serve) or set enabled: true in config to opt in.
   enabled: z.boolean().default(false),
+  // Re-run the scan every N minutes while watch is up. 0 = startup only.
+  // Webhook delivery is best-effort: a PR opened while watch was down, a smee
+  // reconnect gap, or an org-hook registration failure all leave a PR that no
+  // event will ever mention again. The recurring sweep is the safety net.
+  interval_min: z.number().int().min(0).default(0),
+  // Max reviews the sweep starts at once. Unbounded fan-out is what exhausts a
+  // reviewer subscription and drives the 600s diff timeouts.
+  concurrency: z.number().int().min(1).default(2),
 })
 
 export const WatchIdleIssueSchema = z.object({

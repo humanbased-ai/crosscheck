@@ -41,6 +41,15 @@ const portParser = (raw: string): number => {
   }
 }
 
+// Commander arg parser for --backtrace-interval: minutes, 0 meaning startup-only.
+const intervalParser = (raw: string): number => {
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 0) {
+    throw new InvalidArgumentError(`--backtrace-interval must be a non-negative integer (minutes), got: ${raw}`)
+  }
+  return n
+}
+
 const program = new Command()
 
 program
@@ -148,7 +157,11 @@ program
   .option('--port <number>', 'force the webhook server port for this session (overrides config; does not save)', portParser)
   .option('--backtrace', 'enable startup scan for unreviewed open PRs this session (overrides backtrace.enabled: false)')
   .option('--no-backtrace', 'skip startup scan for unreviewed open PRs this session (overrides backtrace.enabled: true)')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; port?: number; backtrace?: boolean }) => void runWatch(opts))
+  .option('--backtrace-interval <min>', 'minutes between backtrace re-scans this session (overrides backtrace.interval_min; 0 = startup only)', intervalParser)
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; port?: number; backtrace?: boolean; backtraceInterval?: number }) => void runWatch({
+    ...opts,
+    ...(opts.backtraceInterval !== undefined && { backtraceIntervalMin: opts.backtraceInterval }),
+  }))
 
 program
   .command('review <pr-urls...>')
