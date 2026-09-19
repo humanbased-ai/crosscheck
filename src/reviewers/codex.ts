@@ -247,7 +247,7 @@ export async function runCodexReview(
         // Safety net for a run that ignored the verdict rule. `codex exec` follows
         // it (unlike `codex review`, whose own format emits [P0]-[P3] markers and
         // never a VERDICT line), so this should now be the rare path.
-        const review = rawReview.includes('VERDICT:')
+        const review = quality.review_memory || rawReview.includes('VERDICT:')
           ? rawReview
           : `${rawReview}\n\nVERDICT: ${inferVerdictFromCodexOutput(rawReview)}`
         return { review, tokensUsed, model, effort: reasoningEffort, retried }
