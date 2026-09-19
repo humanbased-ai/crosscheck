@@ -38,7 +38,7 @@ import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type W
 import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly, type StepRecord } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
-import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
+import { PRBoard, fmtTime, FMT_TIME_WIDTH, isNoticeLine } from '../lib/board.js'
 import { clonePRForReview, BaseRefUnavailableError } from '../lib/clone.js'
 import { resolveLinearAuth, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import {
@@ -276,6 +276,14 @@ export async function runWatch(opts: WatchOpts = {}) {
     fileLog({ level: 'info', event: 'message', message: line2 ? `${line1} ${line2}` : line1 })
   }
 
+  // Routine per-PR narration (event received, routing decision, strategy pick)
+  // goes to the file log only. The board's paginated workspace is the session
+  // record now; interleaving the same events into scrollback between PR rows is
+  // what made the terminal unreadable.
+  const eLog = (line1: string, line2?: string) => {
+    fileLog({ level: 'info', event: 'message', message: line2 ? `${line1} ${line2}` : line1 })
+  }
+
   // Connectivity events (tunnel/webhook) go into the live connectivity section
   const cLog = (line: string) => {
     board.logConnectivity(line)
@@ -360,7 +368,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       const ts = chalk.dim(fmtTime())
       const tsIndent = ' '.repeat(FMT_TIME_WIDTH + 2)
       const modeNote = ss.active ? chalk.yellow(' [smart-switch]') : ''
-      bLog(
+      eLog(
         `${ts}  PR #${prNumber} ${params.action}  ${chalk.dim(params.title)}`,
         `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}${modeNote}`
       )
@@ -641,7 +649,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           const prevShort = prev.sha.slice(0, 7)
           const nowShort = params.headSha.slice(0, 7)
           fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_diff_change', sha: params.headSha, prev_sha: prev.sha })
-          bLog(
+          eLog(
             `${chalk.dim(fmtTime())}  PR #${prNumber} ${params.action}  ${chalk.dim('no diff change since last review')}`,
             `${' '.repeat(FMT_TIME_WIDTH + 2)}prev=${chalk.dim(prevShort)} → ${chalk.dim(nowShort)}  ${chalk.dim('(skipped)')}`,
           )
@@ -671,7 +679,11 @@ export async function runWatch(opts: WatchOpts = {}) {
           tmpDir, token, config: effectiveConfig, origin,
           linearAuth,
           reviewStart,
-          log: (msg: string) => bLog(`${chalk.dim(fmtTime())}  ${msg}`),
+          log: (msg: string) => {
+            const line = `${chalk.dim(fmtTime())}  ${msg}`
+            if (isNoticeLine(msg)) bLog(line)
+            else eLog(line)
+          },
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
           crosscheckShas,
           smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
@@ -735,7 +747,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         // A class-skipped PR (e.g. lockfile-only) never ran a review, so say so
         // rather than reporting it as a completed one.
         if (strategySkipped) {
-          bLog(`${chalk.dim(fmtTime())}  ${chalk.dim(`PR #${prNumber} skipped — ${strategySkipped} class, nothing to review`)}`)
+          eLog(`${chalk.dim(fmtTime())}  ${chalk.dim(`PR #${prNumber} skipped — ${strategySkipped} class, nothing to review`)}`)
         }
         board.completePR(key, {
           elapsedMs: Date.now() - reviewStart,
