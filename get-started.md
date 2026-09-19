@@ -323,6 +323,22 @@ Waiting for PR events — Ctrl+C to stop.
 
 When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned up automatically.
 
+**Browsing the session history.** The live board holds every PR the session has
+handled, not just the ones on screen. The footer says where you are:
+
+```
+  live · page 1/4  │  showing 18 of 61  │  ctrl+< older  ctrl+> newer
+```
+
+Press `ctrl+<` (or plain `<`) to page back through the history and `ctrl+>` (or
+plain `>`) to return to the live page. `ctrl+←` / `ctrl+→` work too, for
+terminals that swallow modified punctuation — macOS Terminal never forwards
+`cmd`, so use the bare `<` / `>` keys there. The live page keeps its place while
+you browse: new PR events land on it without yanking you forward. Per-event
+narration (routing decisions, strategy picks) is no longer printed between the
+rows — it goes to the file log at `~/.crosscheck/logs/`, which `crosscheck
+status` points at.
+
 **Token scope for org webhooks:** `GITHUB_TOKEN` needs `write:org` scope for org-level coverage. For repo-level, `repo` scope is sufficient.
 
 **Review-only for a repo:** make a repo post reviews and nothing else with `crosscheck alter <repo> --review-only` — crosscheck never runs the fix, recheck, or conflict-resolve steps for it, and never pushes commits to its PRs:

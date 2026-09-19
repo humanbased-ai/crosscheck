@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { PRBoard, fmtTokens } from '../lib/board.js'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { EventEmitter } from 'events'
+import { PRBoard, fmtTokens, pageKeyAction, isNoticeLine } from '../lib/board.js'
 import type { Config } from '../config/schema.js'
 import type { WorkflowStep } from '../lib/workflow.js'
 
@@ -105,6 +106,8 @@ describe('PRBoard — TTY workspace retention', () => {
   const invokeRender = () => (board as unknown as { render: () => string }).render()
   const invokeFolded = (key: string) =>
     (board as unknown as { renderPRSlotFolded: (s: unknown) => string }).renderPRSlotFolded(slots().get(key))
+  const superseded = (key: string) =>
+    (slots().get(key) as { superseded?: boolean } | undefined)?.superseded === true
 
   it('keeps completed slot in the workspace (no auto-clear)', () => {
     board.addPR('k1', 1, 'a/b', 'main')
@@ -113,19 +116,19 @@ describe('PRBoard — TTY workspace retention', () => {
     expect(slots().has('k1')).toBe(true)
   })
 
-  it('evicts oldest completed slots when total exceeds workspace cap', () => {
+  // The workspace is the session record now: nothing is dropped on a count cap,
+  // because anything the live page cannot show is reachable on a history page.
+  it('keeps every completed PR in history instead of evicting on a count cap', () => {
     for (let i = 0; i < 30; i++) {
       board.addPR(`k${i}`, i, 'a/b', `branch-${i}`)
       board.completePR(`k${i}`, { elapsedMs: 1000, url: `https://github.com/a/b/pull/${i}` })
     }
     invokeRender()
-    expect(slots().size).toBe(25)
-    // The 5 oldest should be evicted (0..4); 5..29 retained.
-    for (let i = 0; i < 5; i++) expect(slots().has(`k${i}`)).toBe(false)
-    for (let i = 5; i < 30; i++) expect(slots().has(`k${i}`)).toBe(true)
+    expect(slots().size).toBe(30)
+    for (let i = 0; i < 30; i++) expect(slots().has(`k${i}`)).toBe(true)
   })
 
-  it('never evicts active slots even at overflow', () => {
+  it('keeps active slots on the live page however much history is behind them', () => {
     for (let i = 0; i < 24; i++) {
       board.addPR(`done-${i}`, i, 'a/b', `branch-${i}`)
       board.completePR(`done-${i}`, { elapsedMs: 1000, url: `url-${i}` })
@@ -133,11 +136,11 @@ describe('PRBoard — TTY workspace retention', () => {
     for (let i = 0; i < 5; i++) {
       board.addPR(`active-${i}`, 100 + i, 'a/b', `active-${i}`)
     }
+    const output = stripAnsi(invokeRender())
     expect(slots().size).toBe(29)
-    invokeRender()
-    expect(slots().size).toBe(25)
     for (let i = 0; i < 5; i++) {
       expect(slots().has(`active-${i}`)).toBe(true)
+      expect(output).toContain(`active-${i}`)
     }
   })
 
@@ -181,7 +184,7 @@ describe('PRBoard — TTY workspace retention', () => {
     expect(stripAnsi(invokeRender())).toContain('skipped · generated')
   })
 
-  it('evicts the prior-round completed slot when round 2 starts for the same PR', () => {
+  it('supersedes the prior-round completed slot when round 2 starts for the same PR', () => {
     // Round 1 — BLOCK, fix skipped, recheck skipped (the stale slot the user saw)
     board.addPR('k1@sha1', 214, 'owner/repo', 'fix/branch', 1)
     board.updatePR('k1@sha1', { verdict: 'BLOCK', commentCount: 1, fixCount: 0 })
@@ -190,7 +193,8 @@ describe('PRBoard — TTY workspace retention', () => {
 
     // Round 2 — new SHA push: board must evict round 1 and add round 2
     board.addPR('k1@sha2', 214, 'owner/repo', 'fix/branch', 2)
-    expect(slots().has('k1@sha1')).toBe(false)   // prior round evicted
+    expect(slots().has('k1@sha1')).toBe(true)    // prior round kept in history
+    expect(superseded('k1@sha1')).toBe(true)     // but off the live page
     expect(slots().has('k1@sha2')).toBe(true)    // new round present
 
     board.updatePR('k1@sha2', { recheckVerdict: 'APPROVE' })
@@ -201,7 +205,7 @@ describe('PRBoard — TTY workspace retention', () => {
     expect(output).toContain('APPROVE')
   })
 
-  it('does not evict active slots when round 2 starts', () => {
+  it('does not supersede active slots when round 2 starts', () => {
     // Active round 1 for a different PR — must not be touched
     board.addPR('other@sha', 99, 'owner/repo', 'other-branch', 1)
     // Completed round 1 for PR 214
@@ -210,7 +214,8 @@ describe('PRBoard — TTY workspace retention', () => {
 
     board.addPR('k1@sha2', 214, 'owner/repo', 'fix/branch', 2)
     expect(slots().has('other@sha')).toBe(true)   // untouched
-    expect(slots().has('k1@sha1')).toBe(false)    // evicted
+    expect(superseded('other@sha')).toBe(false)
+    expect(superseded('k1@sha1')).toBe(true)      // prior round hidden, not dropped
     expect(slots().has('k1@sha2')).toBe(true)
   })
 
@@ -319,12 +324,14 @@ describe('PRBoard — viewport height fitting', () => {
     expect(countRows(invokeRender(), 100)).toBeLessThanOrEqual(11)
   })
 
-  it('evicts completed slots to scrollback when the compact layout still overflows', () => {
+  it('moves overflow onto history pages instead of dropping it when compact still overflows', () => {
     setViewport(12, 100)
     addCompleted(15)
     const output = invokeRender()
     expect(countRows(output, 100)).toBeLessThanOrEqual(11)
-    expect(slots().size).toBeLessThan(15)
+    expect(slots().size).toBe(15)                       // nothing dropped
+    expect(stripAnsi(output)).toContain('branch-14')    // newest is on the live page
+    expect(stripAnsi(output)).not.toContain('branch-0') // oldest moved to history
   })
 
   it('truncates from the top as a last resort when active slots alone overflow', () => {
@@ -362,6 +369,269 @@ describe('PRBoard — viewport height fitting', () => {
     const liveOnlyMarkers = ['crosscheck', 'workflow:', 'vendors:', 'PRs:', 'tunnel:']
     const residue = scrollback.filter(l => liveOnlyMarkers.some(m => l.includes(m)))
     expect(residue).toEqual([])
+  })
+})
+
+// ── History pagination ────────────────────────────────────────────────────────
+//
+// The live page shows what fits; everything older stays in the map and is
+// reached by flipping pages. Nothing a session has seen leaves the board.
+
+describe('PRBoard — history pagination', () => {
+  let board: PRBoard
+  let originalIsTTY: boolean | undefined
+  let originalRows: number | undefined
+  let originalColumns: number | undefined
+  let originalWrite: typeof process.stdout.write
+
+  beforeEach(() => {
+    originalIsTTY = process.stdout.isTTY
+    originalRows = process.stdout.rows
+    originalColumns = process.stdout.columns
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: 20, configurable: true })
+    Object.defineProperty(process.stdout, 'columns', { value: 120, configurable: true })
+    originalWrite = process.stdout.write.bind(process.stdout)
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    board = new PRBoard()
+    board.setConfig(baseConfig, [reviewStep])
+  })
+
+  afterEach(() => {
+    board.stop()
+    process.stdout.write = originalWrite
+    Object.defineProperty(process.stdout, 'isTTY', { value: originalIsTTY, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: originalRows, configurable: true })
+    Object.defineProperty(process.stdout, 'columns', { value: originalColumns, configurable: true })
+  })
+
+  const invokeRender = () => (board as unknown as { render: () => string }).render()
+  const page = () => (board as unknown as { page: number }).page
+  const pageCount = () => (board as unknown as { pageCount: number }).pageCount
+  // The footer is the last line — the tip line also names the page keys.
+  const footerOf = (content: string) => stripAnsi(content).split('\n').at(-1) ?? ''
+
+  const addCompleted = (n: number) => {
+    for (let i = 0; i < n; i++) {
+      board.addPR(`k${i}`, i, 'acme/api', `branch-${i}`)
+      board.updatePR(`k${i}`, { verdict: 'APPROVE', commentCount: 2 })
+      board.completePR(`k${i}`, { elapsedMs: 60_000, url: `https://github.com/acme/api/pull/${i}` })
+    }
+  }
+
+  it('reaches PRs the live page cannot show by paging back', () => {
+    addCompleted(40)
+    const live = stripAnsi(invokeRender())
+    expect(live).not.toContain('branch-0 ')
+    expect(pageCount()).toBeGreaterThan(1)
+
+    // Walk back to the oldest page — PR 0 has to surface somewhere along it.
+    let found = live.includes('branch-0 ')
+    while (page() < pageCount() - 1 && !found) {
+      board.pageOlder()
+      found = stripAnsi(invokeRender()).includes('branch-0 ')
+    }
+    expect(found).toBe(true)
+  })
+
+  it('stops at the oldest page and returns to live', () => {
+    addCompleted(40)
+    invokeRender()
+    for (let i = 0; i < 50; i++) board.pageOlder()
+    expect(page()).toBe(pageCount() - 1)
+
+    for (let i = 0; i < 50; i++) board.pageNewer()
+    expect(page()).toBe(0)
+  })
+
+  it('stays on a history page as new PRs arrive', () => {
+    addCompleted(40)
+    invokeRender()
+    board.pageOlder()
+    board.pageOlder()
+    const before = page()
+
+    board.addPR('new', 999, 'acme/api', 'branch-new')
+    invokeRender()
+    expect(page()).toBe(before)
+    expect(stripAnsi(invokeRender())).not.toContain('branch-new')
+  })
+
+  it('labels the live page and the history pages in the footer', () => {
+    addCompleted(40)
+    expect(stripAnsi(invokeRender())).toContain('live')
+    expect(stripAnsi(invokeRender())).toMatch(/showing \d+ of 40/)
+    board.pageOlder()
+    const older = footerOf(invokeRender())
+    expect(older).toContain('history · page 2/')
+    expect(older).toContain('ctrl+<')
+  })
+
+  it('keeps a history page inside the viewport', () => {
+    addCompleted(60)
+    invokeRender()
+    board.pageOlder()
+    const rows = stripAnsi(invokeRender()).split('\n')
+      .reduce((sum, l) => sum + Math.max(1, Math.ceil(l.length / 120)), 0)
+    expect(rows).toBeLessThanOrEqual(19)
+  })
+
+  it('has one page when everything fits on the live page', () => {
+    addCompleted(2)
+    invokeRender()
+    expect(pageCount()).toBe(1)
+    expect(footerOf(invokeRender())).not.toContain('ctrl+<')  // no keys offered with nowhere to go
+    expect(footerOf(invokeRender())).toContain('showing 2 of 2')
+  })
+})
+
+// The board owns the terminal while it runs, so it also owns stdin: raw mode
+// for the page keys, and the ctrl-c the terminal no longer translates for it.
+describe('PRBoard — key input', () => {
+  let board: PRBoard
+  let originalStdin: NodeJS.ReadStream
+  let originalIsTTY: boolean | undefined
+  let originalRows: number | undefined
+  let originalColumns: number | undefined
+  let originalWrite: typeof process.stdout.write
+  let fake: FakeStdin
+
+  interface FakeStdin extends EventEmitter {
+    isTTY: boolean
+    isRaw: boolean
+    rawModeCalls: boolean[]
+    paused: boolean
+    setRawMode(on: boolean): FakeStdin
+    resume(): FakeStdin
+    pause(): FakeStdin
+  }
+
+  const makeFakeStdin = (): FakeStdin => {
+    const emitter = new EventEmitter() as FakeStdin
+    emitter.isTTY = true
+    emitter.isRaw = false
+    emitter.rawModeCalls = []
+    emitter.paused = false
+    emitter.setRawMode = (on: boolean) => { emitter.isRaw = on; emitter.rawModeCalls.push(on); return emitter }
+    emitter.resume = () => { emitter.paused = false; return emitter }
+    emitter.pause = () => { emitter.paused = true; return emitter }
+    return emitter
+  }
+
+  beforeEach(() => {
+    originalStdin = process.stdin
+    originalIsTTY = process.stdout.isTTY
+    originalRows = process.stdout.rows
+    originalColumns = process.stdout.columns
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: 20, configurable: true })
+    Object.defineProperty(process.stdout, 'columns', { value: 120, configurable: true })
+    originalWrite = process.stdout.write.bind(process.stdout)
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    fake = makeFakeStdin()
+    Object.defineProperty(process, 'stdin', { value: fake, configurable: true })
+    board = new PRBoard()
+    board.setConfig(baseConfig, [reviewStep])
+  })
+
+  afterEach(() => {
+    board.stop()
+    Object.defineProperty(process, 'stdin', { value: originalStdin, configurable: true })
+    process.stdout.write = originalWrite
+    Object.defineProperty(process.stdout, 'isTTY', { value: originalIsTTY, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: originalRows, configurable: true })
+    Object.defineProperty(process.stdout, 'columns', { value: originalColumns, configurable: true })
+  })
+
+  const page = () => (board as unknown as { page: number }).page
+  const fillHistory = () => {
+    for (let i = 0; i < 40; i++) {
+      board.addPR(`k${i}`, i, 'acme/api', `branch-${i}`)
+      board.completePR(`k${i}`, { elapsedMs: 1000, url: `https://github.com/acme/api/pull/${i}` })
+    }
+    ;(board as unknown as { render: () => string }).render()
+  }
+
+  it('pages with the key sequences while running, and stops listening once stopped', () => {
+    fillHistory()
+    board.start()
+    expect(fake.isRaw).toBe(true)
+
+    fake.emit('data', Buffer.from('<'))
+    expect(page()).toBe(1)
+    fake.emit('data', Buffer.from('<'))
+    expect(page()).toBe(2)
+    fake.emit('data', Buffer.from('>'))
+    expect(page()).toBe(1)
+
+    board.stop()
+    expect(fake.isRaw).toBe(false)          // terminal handed back
+    expect(fake.listenerCount('data')).toBe(0)
+    fake.emit('data', Buffer.from('<'))
+    expect(page()).toBe(1)                  // no longer listening
+  })
+
+  it('raises SIGINT itself, since raw mode suppresses the terminal ctrl-c', () => {
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    board.start()
+    fake.emit('data', Buffer.from('\u0003'))
+    expect(kill).toHaveBeenCalledWith(process.pid, 'SIGINT')
+    kill.mockRestore()
+  })
+
+  it('ignores keys that are not page keys', () => {
+    fillHistory()
+    board.start()
+    fake.emit('data', Buffer.from('q'))
+    fake.emit('data', Buffer.from('\u001b[A'))
+    expect(page()).toBe(0)
+  })
+})
+
+describe('pageKeyAction', () => {
+  it('maps bare < and > and their unshifted keys', () => {
+    expect(pageKeyAction('<')).toBe('older')
+    expect(pageKeyAction(',')).toBe('older')
+    expect(pageKeyAction('>')).toBe('newer')
+    expect(pageKeyAction('.')).toBe('newer')
+  })
+
+  it('maps the CSI-u encodings terminals use for ctrl/cmd + punctuation', () => {
+    expect(pageKeyAction('\u001b[44;5u')).toBe('older')   // ctrl+,
+    expect(pageKeyAction('\u001b[46;5u')).toBe('newer')   // ctrl+.
+    expect(pageKeyAction('\u001b[60;9u')).toBe('older')   // cmd+<
+    expect(pageKeyAction('\u001b[62;9u')).toBe('newer')   // cmd+>
+  })
+
+  it('maps plain and modified arrows', () => {
+    expect(pageKeyAction('\u001b[D')).toBe('older')
+    expect(pageKeyAction('\u001b[C')).toBe('newer')
+    expect(pageKeyAction('\u001b[1;5D')).toBe('older')
+    expect(pageKeyAction('\u001b[1;5C')).toBe('newer')
+  })
+
+  it('ignores everything else', () => {
+    expect(pageKeyAction('a')).toBe(null)
+    expect(pageKeyAction('\u0003')).toBe(null)
+    expect(pageKeyAction('\u001b[A')).toBe(null)
+    expect(pageKeyAction('\u001b[48;5u')).toBe(null)
+  })
+})
+
+describe('isNoticeLine', () => {
+  it('keeps warnings and errors on the terminal', () => {
+    expect(isNoticeLine('⚠  push rejected')).toBe(true)
+    expect(isNoticeLine('✗ codex did not review PR #1')).toBe(true)
+    expect(isNoticeLine('\u001b[33m⚠  usage limit\u001b[39m')).toBe(true)
+  })
+
+  it('keeps multi-line dumps, which always follow a notice', () => {
+    expect(isNoticeLine('\n--- unposted review ---\nbody\n--- end ---')).toBe(true)
+  })
+
+  it('routes routine narration to the file log', () => {
+    expect(isNoticeLine('  strategy v1.2.0: trivial → fast tier (medium)')).toBe(false)
+    expect(isNoticeLine('  skills: typescript')).toBe(false)
   })
 })
 

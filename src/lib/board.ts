@@ -40,7 +40,7 @@ interface PRSlot {
   branch: string
   label: string
   startedAt: number
-  completedAt?: number      // set by completePR — slot stays in workspace until overflow eviction
+  completedAt?: number      // set by completePR — the slot stays in the session history
   url?: string              // PR URL, set on completion
   prLoc?: number
   phase?: PRPhase
@@ -56,6 +56,7 @@ interface PRSlot {
   recheckReviewer?: string  // vendor that ran the recheck step
   qualityTier?: string      // quality tier used for this run
   stickyFolded?: boolean    // once folded on the count threshold, stays folded (see renderPRWorkspace)
+  superseded?: boolean      // a later round replaced this slot: kept in history, hidden from the live page
 }
 
 export interface PRUpdate {
@@ -150,6 +151,89 @@ function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max - 1) + '…'
 }
 
+// Cut a rendered line to `max` visible columns, keeping the ANSI sequences it
+// passes over (they have no width) and closing with a reset so a cut mid-colour
+// cannot bleed into the next line. Folded rows are clamped with this so they
+// always occupy exactly one terminal row — history pagination counts on it.
+function truncateVisible(s: string, max: number): string {
+  if (max <= 0) return ''
+  if (stripAnsi(s).length <= max) return s
+  let out = ''
+  let width = 0
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (ch === '\x1B') {
+      const end = s.indexOf('m', i)
+      if (end === -1) break
+      out += s.slice(i, end + 1)
+      i = end
+      continue
+    }
+    if (width >= max - 1) break
+    out += ch
+    width++
+  }
+  return out + '…\x1B[0m'
+}
+
+// Lines the runner hands to its log callback are prefixed ⚠ or ✗ when they
+// report something an operator must act on. Everything else is progress
+// narration that the board's own PR rows already carry, and a multi-line
+// message is a dump (an unposted review, a dry-run comment) that always
+// follows one of those notices. Only these earn a line of terminal scrollback
+// beside the board; the rest goes to the file log.
+// eslint-disable-next-line no-control-regex -- matching the ESC byte is the point
+const NOTICE_PREFIX = /^(?:\x1B\[[0-9;]*m)*\s*[⚠✗]/
+
+export function isNoticeLine(msg: string): boolean {
+  return NOTICE_PREFIX.test(msg) || msg.includes('\n')
+}
+
+// ── Page keys ─────────────────────────────────────────────────────────────────
+
+export type PageKey = 'older' | 'newer' | null
+
+// Bare `<`/`>` (and their unshifted `,`/`.`) always work. Terminals cannot agree
+// on how to report ctrl/cmd with a punctuation key, so every encoding they do
+// emit is accepted: meta-prefixed, CSI-u (kitty / xterm modifyOtherKeys) and
+// modified arrows. macOS Terminal swallows cmd entirely — there the bare keys,
+// or ctrl+arrow, are the way through.
+const PAGE_OLDER_KEYS = new Set(['<', ',', '\u001b<', '\u001b,', '\u001b[D', '\u001b[5~'])
+const PAGE_NEWER_KEYS = new Set(['>', '.', '\u001b>', '\u001b.', '\u001b[C', '\u001b[6~'])
+// eslint-disable-next-line no-control-regex -- the ESC byte is the sequence
+const CSI_U = /^\u001b\[(\d+);\d+u$/          // ESC [ <codepoint> ; <modifiers> u
+// eslint-disable-next-line no-control-regex -- the ESC byte is the sequence
+const CSI_ARROW = /^\u001b\[1;\d+([DC])$/      // ESC [ 1 ; <modifiers> D|C
+
+/** Map a raw stdin key sequence to a page direction, or null when it is not a page key. */
+export function pageKeyAction(seq: string): PageKey {
+  if (PAGE_OLDER_KEYS.has(seq)) return 'older'
+  if (PAGE_NEWER_KEYS.has(seq)) return 'newer'
+
+  const csiU = CSI_U.exec(seq)
+  if (csiU) {
+    const codepoint = Number(csiU[1])
+    if (codepoint === 44 || codepoint === 60) return 'older'  // , <
+    if (codepoint === 46 || codepoint === 62) return 'newer'  // . >
+    return null
+  }
+
+  const arrow = CSI_ARROW.exec(seq)
+  if (arrow) return arrow[1] === 'D' ? 'older' : 'newer'
+
+  return null
+}
+
+// Keep every active slot plus the newest `budget` settled ones. Anything older
+// cannot fit the live page (one row minimum per slot), so the fitting loop need
+// never consider it.
+function trimToBudget(pool: PRSlot[], budget: number): PRSlot[] {
+  const settled = pool.filter(s => s.completedAt !== undefined)
+  if (settled.length <= budget) return pool.slice()
+  const keep = new Set(settled.slice(settled.length - budget))
+  return pool.filter(s => s.completedAt === undefined || keep.has(s))
+}
+
 function makeBar(filled: number, total: number, fillFn: ChalkFn, emptyFn: ChalkFn): string {
   const f = Math.max(0, Math.min(total, Math.round(filled)))
   return fillFn(BAR_FILLED.repeat(f)) + emptyFn(BAR_EMPTY.repeat(total - f))
@@ -229,7 +313,7 @@ function buildTheme(cfg: DisplayTheme): Theme {
 const CONN_LOG_MAX = 6  // max connectivity log lines kept in memory
 const COMPACT_CONN_LOG_LINES = 2  // conn log lines shown when the live block must shrink to fit the viewport
 const FOLD_THRESHOLD = 3  // when completed count exceeds this, fold all completed PRs to 1 line
-const WORKSPACE_MAX = 25  // when total slots exceed this, evict oldest completed to scrollback
+const HISTORY_MAX = 2000  // hard cap on retained slots — oldest settled rows drop out beyond it
 
 interface LayoutOpts {
   foldAll: boolean        // fold every completed slot regardless of FOLD_THRESHOLD
@@ -248,6 +332,10 @@ export class PRBoard {
   private liveContent = ''
   private readonly isTTY: boolean = Boolean(process.stdout.isTTY)
   private connLog: string[] = []
+  private page = 0        // 0 = live page (newest); higher = further back in history
+  private pageCount = 1   // recomputed every render; page keys clamp against it
+  private keyHandler: ((data: Buffer) => void) | null = null
+  private stdinWasRaw = false
 
   private stats: Stats = {
     prsReceived: 0,
@@ -284,6 +372,7 @@ export class PRBoard {
 
   start(): void {
     if (!this.isTTY) return
+    this.attachKeys()
     this.timer = setInterval(() => {
       this.frameIdx = (this.frameIdx + 1) % FRAMES.length
       this.redraw()
@@ -292,19 +381,35 @@ export class PRBoard {
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null }
+    this.detachKeys()
     this.eraseLive()
+  }
+
+  /** Flip one page toward older history. No-op when already at the oldest page. */
+  pageOlder(): void {
+    const next = Math.min(this.page + 1, Math.max(0, this.pageCount - 1))
+    if (next === this.page) return
+    this.page = next
+    this.redraw()
+  }
+
+  /** Flip one page toward the live page. No-op when already on it. */
+  pageNewer(): void {
+    if (this.page === 0) return
+    this.page--
+    this.redraw()
   }
 
   addPR(key: string, prNumber: number, repo: string, branch: string, round?: number): void {
     // When a new round starts for a PR that already has a completed slot in the
-    // workspace, evict the prior-round slot to scrollback so only the current
-    // round is shown. Prior-round slots always have a different key (different
-    // SHA suffix) but the same prNumber + repo combination.
+    // workspace, mark the prior-round slot superseded so only the current round
+    // shows on the live page. It stays in the map: history pages still carry it.
+    // Prior-round slots always have a different key (different SHA suffix) but
+    // the same prNumber + repo combination.
     if ((round ?? 1) >= 2) {
       for (const [existingKey, slot] of this.slots) {
         if (existingKey !== key && slot.prNumber === prNumber && slot.repo === repo && slot.completedAt !== undefined) {
-          this.printStatic(this.renderPRSlotFolded(slot))
-          this.slots.delete(existingKey)
+          slot.superseded = true
         }
       }
     }
@@ -617,8 +722,7 @@ export class PRBoard {
   private render(): string {
     if (!this.config) return ''
 
-    // When the workspace overflows, evict oldest completed slots to scrollback.
-    this.evictOverflow()
+    this.trimHistory()
 
     const w = process.stdout.columns || 80
     // The live block must never be taller than the viewport: lines that scroll
@@ -626,23 +730,64 @@ export class PRBoard {
     // viewport top), leaving permanent duplicates in scrollback. Reserve one
     // row for the trailing newline writeLive appends.
     const budget = (process.stdout.rows || 24) - 1
+    const entries = [...this.slots.values()]
 
-    const normal = this.renderLayout(w, LAYOUT_NORMAL)
-    if (this.countRenderedLines(normal, w) <= budget) return normal
+    // The live page carries every active slot plus the newest settled ones that
+    // fit. What it cannot show is not dropped — it moves into the history pages.
+    const live = this.fitLivePage(entries.filter(s => s.superseded !== true), w, budget)
+    const onLivePage = new Set(live.visible)
+    const history = entries.filter(s => !onLivePage.has(s))  // oldest → newest
 
-    let compact = this.renderLayout(w, LAYOUT_COMPACT)
-    // Still too tall: flush oldest completed slots to scrollback until it fits.
-    while (this.countRenderedLines(compact, w) > budget && this.evictOldestCompleted()) {
-      compact = this.renderLayout(w, LAYOUT_COMPACT)
-    }
-    if (this.countRenderedLines(compact, w) <= budget) return compact
+    // History rows are always folded, and a folded row is clamped to one
+    // terminal row, so a history page holds exactly the rows the panels leave.
+    const perPage = Math.max(1, budget - this.chromeRows(w, LAYOUT_COMPACT))
+    this.pageCount = 1 + Math.ceil(history.length / perPage)
+    this.page = Math.max(0, Math.min(this.page, this.pageCount - 1))
 
-    // Only active slots remain and they still overflow (tiny terminal):
-    // drop rows from the top, keeping the most recent activity visible.
-    return this.truncateTop(compact, w, budget)
+    if (this.page === 0) return this.fitToBudget(this.renderLayout(w, live.opts, live.visible, entries.length), w, budget)
+
+    // Page 1 is the newest history page, so it ends where the live page begins.
+    const end = history.length - (this.page - 1) * perPage
+    const slice = history.slice(Math.max(0, end - perPage), end)
+    return this.fitToBudget(this.renderLayout(w, LAYOUT_COMPACT, slice, entries.length), w, budget)
   }
 
-  private renderLayout(w: number, opts: LayoutOpts): string {
+  /**
+   * Pick the slots the live page shows: the expanded layout when it fits, then
+   * the compact one, then compact with the oldest settled slots handed over to
+   * history until the block fits the viewport. Active slots are never handed
+   * over — a running review must stay on screen.
+   */
+  private fitLivePage(pool: PRSlot[], w: number, budget: number): { visible: PRSlot[]; opts: LayoutOpts } {
+    // Bound the work: a slot costs at least one row, so a settled slot older
+    // than the last `budget` of them can never fit on the live page anyway.
+    const visible = trimToBudget(pool, budget)
+
+    const fits = (opts: LayoutOpts): boolean =>
+      this.countRenderedLines(this.renderLayout(w, opts, visible, pool.length), w) <= budget
+
+    if (fits(LAYOUT_NORMAL)) return { visible, opts: LAYOUT_NORMAL }
+
+    while (!fits(LAYOUT_COMPACT)) {
+      const oldestSettled = visible.findIndex(s => s.completedAt !== undefined)
+      if (oldestSettled === -1) break  // only active slots left — truncateTop takes it from here
+      visible.splice(oldestSettled, 1)
+    }
+    return { visible, opts: LAYOUT_COMPACT }
+  }
+
+  /** Rows the panels and footer cost, i.e. everything but the PR rows. */
+  private chromeRows(w: number, opts: LayoutOpts): number {
+    return this.countRenderedLines(this.renderLayout(w, opts, [], this.slots.size), w)
+  }
+
+  private fitToBudget(content: string, w: number, budget: number): string {
+    return this.countRenderedLines(content, w) <= budget
+      ? content
+      : this.truncateTop(content, w, budget)
+  }
+
+  private renderLayout(w: number, opts: LayoutOpts, visible: PRSlot[], total: number): string {
     const t = this.theme
     // Use w-1 to prevent the exact-terminal-width cursor wrap ambiguity that
     // causes the first char of the next line to appear at the end of the separator.
@@ -653,20 +798,23 @@ export class PRBoard {
       sep,
       ...this.renderStatsPanel(opts.connLogLines, opts.showTip),
       sep,
-      ...this.renderPRWorkspace(opts.foldAll),
+      ...this.renderPRWorkspace(visible, opts.foldAll, w),
       sep,
+      // Clamped: the footer is counted as exactly one row when sizing a page.
+      truncateVisible(this.renderFooter(visible.length, total), w - 1),
     ].join('\n')
   }
 
-  /** Evict the oldest completed slot to scrollback. Returns false when none left. */
-  private evictOldestCompleted(): boolean {
+  /** Drop the oldest settled slots once the session history outgrows the cap. */
+  private trimHistory(): void {
+    if (this.slots.size <= HISTORY_MAX) return
+    let excess = this.slots.size - HISTORY_MAX
     for (const [key, slot] of this.slots) {
-      if (slot.completedAt === undefined) continue
-      this.printStatic(this.renderPRSlotFolded(slot))
+      if (excess <= 0) break
+      if (slot.completedAt === undefined) continue  // never drop an active slot
       this.slots.delete(key)
-      return true
+      excess--
     }
-    return false
   }
 
   /** Drop rows from the top until the content (plus an indicator line) fits the budget. */
@@ -743,16 +891,16 @@ export class PRBoard {
     return `  ${badge}${formatted}`
   }
 
-  private renderPRWorkspace(foldAll: boolean): string[] {
+  private renderPRWorkspace(visible: PRSlot[], foldAll: boolean, w: number): string[] {
     const t = this.theme
     const frame = FRAMES[this.frameIdx]
 
-    if (this.slots.size === 0) {
-      return [t.dim('  waiting for PRs...')]
+    if (visible.length === 0) {
+      return this.slots.size === 0 ? [t.dim('  waiting for PRs...')] : []
     }
 
     let completedCount = 0
-    for (const slot of this.slots.values()) {
+    for (const slot of visible) {
       if (slot.completedAt !== undefined) completedCount++
     }
     const foldByCount = completedCount > FOLD_THRESHOLD
@@ -761,7 +909,7 @@ export class PRBoard {
     let prevWasExpanded = false
     let first = true
 
-    for (const slot of this.slots.values()) {
+    for (const slot of visible) {
       const isCompleted = slot.completedAt !== undefined
       // Sticky fold: once a completed slot folds because the count crossed
       // FOLD_THRESHOLD, keep it folded. Otherwise a later recheck round drops
@@ -773,7 +921,9 @@ export class PRBoard {
       const useFolded = isCompleted && (foldAll || slot.stickyFolded === true)
 
       if (useFolded) {
-        lines.push(this.renderPRSlotFolded(slot))
+        // Clamped so the row never wraps: history pagination sizes a page by
+        // counting one terminal row per folded slot.
+        lines.push(truncateVisible(this.renderPRSlotFolded(slot), w - 1))
         prevWasExpanded = false
       } else {
         if (!first && prevWasExpanded) lines.push('')
@@ -784,6 +934,24 @@ export class PRBoard {
     }
 
     return lines
+  }
+
+  /** Footer: where in the retained history this page sits, and how to move. */
+  private renderFooter(shown: number, total: number): string {
+    const t = this.theme
+    if (total === 0) return t.dim('  no PRs yet')
+
+    const position = this.page === 0
+      ? `${t.success('live')}${this.pageCount > 1 ? t.dim(` · page 1/${this.pageCount}`) : ''}`
+      : t.dim(`history · page ${this.page + 1}/${this.pageCount}`)
+    // "shown of retained", not of stats.prsReceived: rounds add rows, and the
+    // history cap eventually drops the oldest, so the two counts diverge.
+    const counts = t.dim(`showing ${shown} of ${total}`)
+    const keys = this.pageCount > 1
+      ? `  ${t.dim('│')}  ${t.accent('ctrl+<')} ${t.dim('older')}  ${t.accent('ctrl+>')} ${t.dim('newer')}`
+      : ''
+
+    return `  ${position}  ${t.dim('│')}  ${counts}${keys}`
   }
 
   // ── Folded PR slot ─────────────────────────────────────────────────────────
@@ -823,22 +991,42 @@ export class PRBoard {
     return `  ${t.success('✓')} ${t.dim(`#${slot.prNumber}`)}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(`(${elapsed})`)}${urlPart}`
   }
 
-  // ── Overflow eviction ──────────────────────────────────────────────────────
-
-  private evictOverflow(): void {
-    if (this.slots.size <= WORKSPACE_MAX) return
-    let toEvict = this.slots.size - WORKSPACE_MAX
-    for (const [key, slot] of this.slots) {
-      if (toEvict <= 0) break
-      if (slot.completedAt === undefined) continue  // never evict active
-      this.printStatic(this.renderPRSlotFolded(slot))
-      this.slots.delete(key)
-      toEvict--
-    }
-  }
-
   private redraw(): void {
     const content = this.render()
     if (content) this.writeLive(content)
+  }
+
+  // ── Private: key input ─────────────────────────────────────────────────────
+
+  private attachKeys(): void {
+    const stdin = process.stdin
+    if (this.keyHandler || !stdin.isTTY) return
+
+    this.stdinWasRaw = stdin.isRaw === true
+    stdin.setRawMode(true)
+    stdin.resume()
+
+    const handler = (data: Buffer): void => {
+      const seq = data.toString('utf8')
+      // Raw mode suppresses the terminal's own ctrl-c → SIGINT translation, so
+      // the board has to raise it itself or the daemon becomes unkillable.
+      if (seq === '\u0003') { process.kill(process.pid, 'SIGINT'); return }
+      const action = pageKeyAction(seq)
+      if (action === 'older') this.pageOlder()
+      else if (action === 'newer') this.pageNewer()
+    }
+
+    stdin.on('data', handler)
+    this.keyHandler = handler
+  }
+
+  private detachKeys(): void {
+    if (!this.keyHandler) return
+    process.stdin.off('data', this.keyHandler)
+    this.keyHandler = null
+    // Hand the terminal back the way it was found: the idle-issue flow and the
+    // interactive prompts read stdin themselves while the board is stopped.
+    if (process.stdin.isTTY && !this.stdinWasRaw) process.stdin.setRawMode(false)
+    process.stdin.pause()
   }
 }
