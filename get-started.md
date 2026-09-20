@@ -582,6 +582,7 @@ crosscheck review https://github.com/owner/repo/pull/245,https://github.com/othe
 | `--concurrent [n]` | Multi-PR: cap parallel agents; omit `n` for one agent per PR (default) |
 | `--sequential` | Multi-PR: run PRs one at a time instead of in parallel |
 | `--stagger <ms>` | Multi-PR: delay between concurrent worker starts (default 2000) |
+| `--force` | Review even when this commit is already approved |
 | `-c, --config <path>` | Use a specific config file |
 
 ---
