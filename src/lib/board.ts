@@ -57,6 +57,7 @@ interface PRSlot {
   qualityTier?: string      // quality tier used for this run
   stickyFolded?: boolean    // once folded on the count threshold, stays folded (see renderPRWorkspace)
   superseded?: boolean      // a later round replaced this slot: kept in history, hidden from the live page
+  error?: string            // set by failPR — the slot settles in the workspace instead of being deleted
 }
 
 export interface PRUpdate {
@@ -84,6 +85,16 @@ export interface PRCompletionData {
   label?: string
 }
 
+/**
+ * The terminal state of one settled slot, for the session outcome distribution.
+ * `skipped` is a PR that settled without any verdict at all — the review
+ * strategy short-circuited it (lockfile-only, doc-only) — as distinct from
+ * `no verdict`, where a reviewer ran and returned nothing parseable.
+ */
+export type Outcome = 'APPROVE' | 'NEEDS WORK' | 'BLOCK' | 'no verdict' | 'skipped' | 'error'
+
+const OUTCOME_ORDER: readonly Outcome[] = ['APPROVE', 'NEEDS WORK', 'BLOCK', 'no verdict', 'skipped', 'error']
+
 interface Stats {
   prsReceived: number
   crsCompleted: number
@@ -91,6 +102,8 @@ interface Stats {
   errorsOccurred: number
   crTotalMs: number
   sessionStart: number
+  /** Cumulative over the session: survives the HISTORY_MAX slot cap. */
+  outcomes: Record<Outcome, number>
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -123,6 +136,48 @@ function fmtDuration(ms: number): string {
 // Short HH:MM timestamp (no seconds) for the "started" label
 function fmtStartTime(epochMs: number): string {
   return new Date(epochMs).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
+}
+
+// Session age in hours and minutes: "3h32m", or "12m" under the hour. Deliberately
+// not fmtDuration: that renders MM:SS shaped output under an hour, which reads as
+// hours:minutes on a long-running watch and understates the session by 60x.
+export function fmtUptime(ms: number): string {
+  const totalMin = Math.max(0, Math.floor(ms / 60_000))
+  const h = Math.floor(totalMin / 60)
+  const m = totalMin % 60
+  return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`
+}
+
+/**
+ * Whole percentages summing to exactly 100, by the largest-remainder method.
+ * Plain rounding drifts — three equal shares render as 33/33/33 — and a
+ * distribution that visibly fails to add up reads as a bug in the numbers.
+ *
+ * A non-zero count too small to earn a point comes back as 0; the caller
+ * renders those as "<1%" rather than claiming the outcome never happened.
+ */
+export function distribute(counts: readonly number[]): number[] {
+  const total = counts.reduce((a, b) => a + b, 0)
+  if (total === 0) return counts.map(() => 0)
+
+  const exact = counts.map(c => (c * 100) / total)
+  const out = exact.map(Math.floor)
+  // Exact shares sum to 100, so the floors leave fewer whole points than there
+  // are entries: one pass in remainder order always places every last one.
+  let remaining = 100 - out.reduce((a, b) => a + b, 0)
+
+  const byRemainder = exact
+    .map((e, i) => ({ i, rem: e - Math.floor(e) }))
+    .filter(({ i }) => counts[i] > 0)
+    .sort((a, b) => b.rem - a.rem)
+
+  for (const { i } of byRemainder) {
+    if (remaining <= 0) break
+    out[i]++
+    remaining--
+  }
+
+  return out
 }
 
 // Format token count as a compact suffix: "(900)", "(1.2K)", "(1.5M)". Returns '' when undefined.
@@ -232,6 +287,22 @@ function trimToBudget(pool: PRSlot[], budget: number): PRSlot[] {
   if (settled.length <= budget) return pool.slice()
   const keep = new Set(settled.slice(settled.length - budget))
   return pool.filter(s => s.completedAt === undefined || keep.has(s))
+}
+
+/**
+ * The one outcome a settled slot counts toward. A recheck verdict supersedes
+ * the review verdict — it is the later word on the same PR — and `null` from
+ * either step means a reviewer ran but returned nothing parseable, which is a
+ * different event from never having run at all.
+ */
+function outcomeOf(slot: PRSlot): Outcome {
+  if (slot.error !== undefined) return 'error'
+  const final = typeof slot.recheckVerdict === 'string'
+    ? slot.recheckVerdict
+    : typeof slot.verdict === 'string' ? slot.verdict : null
+  if (final === 'APPROVE' || final === 'NEEDS WORK' || final === 'BLOCK') return final
+  if (slot.recheckVerdict === null || slot.verdict === null) return 'no verdict'
+  return 'skipped'
 }
 
 function makeBar(filled: number, total: number, fillFn: ChalkFn, emptyFn: ChalkFn): string {
@@ -344,6 +415,7 @@ export class PRBoard {
     errorsOccurred: 0,
     crTotalMs: 0,
     sessionStart: Date.now(),
+    outcomes: { 'APPROVE': 0, 'NEEDS WORK': 0, 'BLOCK': 0, 'no verdict': 0, 'skipped': 0, 'error': 0 },
   }
 
   private tunnel: { type: string; url: string | null; alive: boolean } = {
@@ -452,6 +524,7 @@ export class PRBoard {
       this.stats.crTotalMs += data.elapsedMs
     }
     if (fixCount !== undefined && fixCount > 0) this.stats.fixesApplied++
+    this.stats.outcomes[outcomeOf(slot)]++
 
     // Non-TTY has no live block to re-render — emit the folded line to scrollback and drop the slot.
     if (!this.isTTY) {
@@ -460,13 +533,26 @@ export class PRBoard {
     }
   }
 
+  /**
+   * Settle a slot that ended in an error. The slot stays in the workspace as a
+   * settled row, the same as a completed one: a failed run is a session record,
+   * and deleting it here was what pushed reviewer timeouts out of the table and
+   * into raw scrollback, where a long watch session showed 43 errors above an
+   * empty workspace reading "no PRs yet".
+   */
   failPR(key: string, error: string): void {
     const slot = this.slots.get(key)
-    this.slots.delete(key)
     this.stats.errorsOccurred++
-    if (slot) {
-      const ts = fmtTime()
-      this.printStatic(`${chalk.dim(ts)}  PR #${slot.prNumber}  ${chalk.red('✗')} ${error}`)
+    if (!slot || slot.completedAt !== undefined) return
+
+    slot.completedAt = Date.now()
+    slot.error = error
+    slot.label = 'failed'
+    this.stats.outcomes.error++
+
+    if (!this.isTTY) {
+      process.stdout.write(this.renderPRSlotFolded(slot) + '\n')
+      this.slots.delete(key)
     }
   }
 
@@ -541,13 +627,44 @@ export class PRBoard {
 
   // ── Private: render ────────────────────────────────────────────────────────
 
-  private uptime(): string {
-    const totalSec = Math.floor((Date.now() - this.stats.sessionStart) / 1000)
-    const h = Math.floor(totalSec / 3600)
-    const m = Math.floor((totalSec % 3600) / 60)
-    const s = totalSec % 60
-    if (h > 0) return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
-    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  /** "since 08:25 PM · up 3h32m" — when watch started, and how long it has run. */
+  private sessionRow(): string {
+    const t = this.theme
+    const started = fmtStartTime(this.stats.sessionStart)
+    const age = fmtUptime(Date.now() - this.stats.sessionStart)
+    return `${t.dim('since')} ${started}  ${t.dim('·')}  ${t.dim('up')} ${age}`
+  }
+
+  /**
+   * Outcome shares across every PR that settled this session, e.g.
+   * "APPROVE 45% · BLOCK 30% · error 25%". Empty when nothing has settled yet.
+   */
+  private outcomeRow(): string {
+    const t = this.theme
+    const counts = OUTCOME_ORDER.map(o => this.stats.outcomes[o])
+    const total = counts.reduce((a, b) => a + b, 0)
+    if (total === 0) return ''
+
+    const pcts = distribute(counts)
+    const mixed = counts.filter(c => c > 0).length > 1
+    const parts = OUTCOME_ORDER.map((outcome, i) => {
+      if (counts[i] === 0) return null
+      // A share too small to earn a whole point still happened; "<1%" says so
+      // where "0%" would read as never. Its complement is then not a whole 100
+      // either — "error 100%" beside "APPROVE <1%" contradicts itself — so the
+      // rounded-up bucket reads ">99%" whenever some other outcome is non-zero.
+      const pct = pcts[i] === 0 ? '<1%'
+        : pcts[i] === 100 && mixed ? '>99%'
+        : `${pcts[i]}%`
+      const paint = outcome === 'APPROVE' ? t.barCRApprove
+        : outcome === 'BLOCK' ? t.barCRBlock
+        : outcome === 'NEEDS WORK' ? t.barCRNeedsWork
+        : outcome === 'error' ? t.error
+        : t.dim
+      return `${paint(outcome)} ${t.dim(pct)}`
+    }).filter((p): p is string => p !== null)
+
+    return parts.join(t.dim(' · '))
   }
 
   private statsRow(): string {
@@ -854,7 +971,12 @@ export class PRBoard {
     const t = this.theme
     const lines: string[] = []
 
-    lines.push(`  ${this.statsRow()}  ${t.dim('│')}  ${t.dim('↑')} ${this.uptime()}`)
+    lines.push(`  ${this.statsRow()}`)
+
+    // Session line: start time + age, and the outcome split when anything has
+    // settled. One row, because every row here costs a PR row on the live page.
+    const outcomes = this.outcomeRow()
+    lines.push(`  ${this.sessionRow()}${outcomes ? `  ${t.dim('│')}  ${outcomes}` : ''}`)
 
     const { type: tunnelType, url, alive } = this.tunnel
     if (tunnelType !== 'none') {
@@ -918,7 +1040,10 @@ export class PRBoard {
       // height-driven foldAll is deliberately NOT sticky — a taller terminal
       // should re-expand.
       if (isCompleted && foldByCount) slot.stickyFolded = true
-      const useFolded = isCompleted && (foldAll || slot.stickyFolded === true)
+      // A failed slot is always folded: its pipeline bars are frozen wherever the
+      // run died ("CR queued", "Fix queued"), which describes work that will
+      // never happen. The folded row carries the error instead.
+      const useFolded = isCompleted && (foldAll || slot.stickyFolded === true || slot.error !== undefined)
 
       if (useFolded) {
         // Clamped so the row never wraps: history pagination sizes a page by
@@ -985,10 +1110,18 @@ export class PRBoard {
       parts.push(`recheck ${rFn(slot.recheckVerdict)}`)
     }
 
+    // A failed run reports the error in place of the verdict trail: whatever the
+    // pipeline had reached is what it never got to finish, and the reason it
+    // stopped is the only thing worth the row.
+    if (slot.error !== undefined) {
+      parts.push(t.error(slot.error))
+    }
+
     const urlPart = slot.url ? `  ${t.dim('→')} ${t.accent(slot.url)}` : ''
     const partsStr = parts.length > 0 ? parts.join(t.dim(' · ')) : t.dim('—')
+    const icon = slot.error !== undefined ? t.error('✗') : t.success('✓')
 
-    return `  ${t.success('✓')} ${t.dim(`#${slot.prNumber}`)}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(`(${elapsed})`)}${urlPart}`
+    return `  ${icon} ${t.dim(`#${slot.prNumber}`)}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(`(${elapsed})`)}${urlPart}`
   }
 
   private redraw(): void {
