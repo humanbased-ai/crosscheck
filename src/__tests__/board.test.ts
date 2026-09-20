@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { EventEmitter } from 'events'
-import { PRBoard, fmtTokens, pageKeyAction, isNoticeLine } from '../lib/board.js'
+import { PRBoard, fmtTokens, pageKeyAction, isNoticeLine, distribute, fmtUptime } from '../lib/board.js'
 import type { Config } from '../config/schema.js'
 import type { WorkflowStep } from '../lib/workflow.js'
 
@@ -108,6 +108,14 @@ describe('PRBoard — TTY workspace retention', () => {
     (board as unknown as { renderPRSlotFolded: (s: unknown) => string }).renderPRSlotFolded(slots().get(key))
   const superseded = (key: string) =>
     (slots().get(key) as { superseded?: boolean } | undefined)?.superseded === true
+  // The PR rows only. Layout is config │ stats │ workspace │ footer, separated by
+  // rules, so the third block is the workspace. Assertions about which PRs are on
+  // screen scope to this: the stats panel names verdicts too (outcome shares), so
+  // searching the whole frame for "BLOCK" no longer answers "is that row shown?".
+  const workspaceOf = (output: string): string => {
+    const blocks = output.split(/^─+$/m)
+    return blocks[2] ?? ''
+  }
 
   it('keeps completed slot in the workspace (no auto-clear)', () => {
     board.addPR('k1', 1, 'a/b', 'main')
@@ -200,9 +208,9 @@ describe('PRBoard — TTY workspace retention', () => {
     board.updatePR('k1@sha2', { recheckVerdict: 'APPROVE' })
     board.completePR('k1@sha2', { elapsedMs: 362_000, url: 'https://github.com/owner/repo/pull/214' })
 
-    const output = stripAnsi(invokeRender())
-    expect(output).not.toContain('BLOCK')
-    expect(output).toContain('APPROVE')
+    const workspace = workspaceOf(stripAnsi(invokeRender()))
+    expect(workspace).not.toContain('BLOCK')
+    expect(workspace).toContain('APPROVE')
   })
 
   it('does not supersede active slots when round 2 starts', () => {
@@ -364,6 +372,29 @@ describe('PRBoard — viewport height fitting', () => {
     board.log('PR #160 synchronize', 'origin=claude via=author_routes reviewer=claude')
     invokeRedraw()
     invokeRedraw()
+
+    const { scrollback } = emulateVT(captured.join(''), ROWS, COLS)
+    const liveOnlyMarkers = ['crosscheck', 'workflow:', 'vendors:', 'PRs:', 'tunnel:']
+    const residue = scrollback.filter(l => liveOnlyMarkers.some(m => l.includes(m)))
+    expect(residue).toEqual([])
+  })
+
+  // failPR settles into the live block now rather than printing a static line
+  // per failure. This pins that: a long run of failures on a short viewport must
+  // stay a redraw, never scrollback. (It is an invariant guard, not a reproducer
+  // — the doubled header operators report comes from a viewport resize, which
+  // strands rows above the cursor-up clamp regardless of what wrote them.)
+  it('keeps a long run of failures in the live block, not scrollback', () => {
+    const ROWS = 14, COLS = 100
+    setViewport(ROWS, COLS)
+    board.setTunnel('smee', 'https://smee.io/test', true)
+    invokeRedraw()
+    for (let i = 0; i < 20; i++) {
+      board.addPR(`k${i}`, 4600 + i, 'humanbased-ai/monorepo', `codex/branch-${i}`)
+      invokeRedraw()
+      board.failPR(`k${i}`, 'codex: timed out after 1200s (retried once) — PR diff may be too large')
+      invokeRedraw()
+    }
 
     const { scrollback } = emulateVT(captured.join(''), ROWS, COLS)
     const liveOnlyMarkers = ['crosscheck', 'workflow:', 'vendors:', 'PRs:', 'tunnel:']
@@ -632,6 +663,282 @@ describe('isNoticeLine', () => {
   it('routes routine narration to the file log', () => {
     expect(isNoticeLine('  strategy v1.2.0: trivial → fast tier (medium)')).toBe(false)
     expect(isNoticeLine('  skills: typescript')).toBe(false)
+  })
+})
+
+describe('distribute', () => {
+  it('returns all zeroes when nothing has been counted', () => {
+    expect(distribute([0, 0, 0])).toEqual([0, 0, 0])
+  })
+
+  it('sums to exactly 100 where plain rounding would not', () => {
+    // Three equal shares floor to 33 each; the leftover point goes to a remainder.
+    const out = distribute([1, 1, 1])
+    expect(out.reduce((a, b) => a + b, 0)).toBe(100)
+    expect(out.sort((a, b) => a - b)).toEqual([33, 33, 34])
+  })
+
+  it('sums to 100 across a spread of awkward splits', () => {
+    const cases = [[1, 2], [1, 1, 1, 1, 1, 1], [7, 11, 13], [95, 1, 1, 1, 1, 1], [1, 999]]
+    for (const c of cases) {
+      expect(distribute(c).reduce((a, b) => a + b, 0)).toBe(100)
+    }
+  })
+
+  it('gives a lone outcome the whole 100%', () => {
+    expect(distribute([43, 0, 0])).toEqual([100, 0, 0])
+  })
+
+  it('reports 0 for a share too small to earn a point, so callers can say "<1%"', () => {
+    const out = distribute([999, 1])
+    expect(out[1]).toBe(0)
+    expect(out.reduce((a, b) => a + b, 0)).toBe(100)
+  })
+})
+
+describe('fmtUptime', () => {
+  it('renders minutes only under an hour', () => {
+    expect(fmtUptime(0)).toBe('0m')
+    expect(fmtUptime(59_000)).toBe('0m')
+    expect(fmtUptime(12 * 60_000)).toBe('12m')
+  })
+
+  it('renders hours and zero-padded minutes past the hour', () => {
+    expect(fmtUptime(60 * 60_000)).toBe('1h00m')
+    expect(fmtUptime((3 * 60 + 32) * 60_000)).toBe('3h32m')
+    expect(fmtUptime((11 * 60 + 57) * 60_000)).toBe('11h57m')
+  })
+
+  it('never renders a negative age if the clock steps backwards', () => {
+    expect(fmtUptime(-5000)).toBe('0m')
+  })
+})
+
+describe('PRBoard \u2014 failed PRs stay in the workspace', () => {
+  let board: PRBoard
+  let originalIsTTY: boolean | undefined
+  let originalRows: number | undefined
+  let originalWrite: typeof process.stdout.write
+  let written: string[]
+
+  beforeEach(() => {
+    originalIsTTY = process.stdout.isTTY
+    originalRows = process.stdout.rows
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: 200, configurable: true })
+    originalWrite = process.stdout.write.bind(process.stdout)
+    written = []
+    process.stdout.write = ((chunk: string) => { written.push(String(chunk)); return true }) as typeof process.stdout.write
+    board = new PRBoard()
+    board.setConfig(baseConfig, [reviewStep])
+  })
+
+  afterEach(() => {
+    board.stop()
+    process.stdout.write = originalWrite
+    Object.defineProperty(process.stdout, 'isTTY', { value: originalIsTTY, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: originalRows, configurable: true })
+  })
+
+  const slots = () => (board as unknown as { slots: Map<string, unknown> }).slots
+  const invokeRender = () => (board as unknown as { render: () => string }).render()
+
+  it('keeps the slot instead of deleting it', () => {
+    board.addPR('k1', 4641, 'a/b', 'feat/x')
+    board.failPR('k1', 'codex: timed out after 600s')
+    expect(slots().size).toBe(1)
+    expect(slots().has('k1')).toBe(true)
+  })
+
+  it('renders the failed PR as a row carrying its error, not as scrollback', () => {
+    board.addPR('k1', 4641, 'a/b', 'feat/x')
+    board.failPR('k1', 'codex: timed out after 600s')
+
+    const output = stripAnsi(invokeRender())
+    expect(output).toContain('#4641')
+    expect(output).toContain('codex: timed out after 600s')
+    // The regression: the row went to scrollback and the table read "no PRs yet".
+    expect(output).not.toContain('no PRs yet')
+    expect(written.join('')).not.toContain('codex: timed out after 600s')
+  })
+
+  it('folds a failed row even when it is the only one on the page', () => {
+    board.addPR('k1', 4641, 'a/b', 'feat/x')
+    board.failPR('k1', 'codex: timed out after 600s')
+
+    const output = stripAnsi(invokeRender())
+    // Folded rows carry no pipeline bars; an expanded row would show "CR" queued
+    // against work the failed run will never do.
+    expect(output).not.toMatch(/CR [\u2588\u2591]/)
+    expect(output).toContain('\u2717 #4641')
+  })
+
+  it('counts a failure once, toward errors and the outcome split', () => {
+    board.addPR('k1', 1, 'a/b', 'feat/x')
+    board.failPR('k1', 'boom')
+    const stats = (board as unknown as { stats: { errorsOccurred: number; outcomes: Record<string, number> } }).stats
+    expect(stats.errorsOccurred).toBe(1)
+    expect(stats.outcomes.error).toBe(1)
+  })
+
+  it('still counts the error when the slot is already gone', () => {
+    board.failPR('never-added', 'boom')
+    const stats = (board as unknown as { stats: { errorsOccurred: number; outcomes: Record<string, number> } }).stats
+    expect(stats.errorsOccurred).toBe(1)
+    // No slot means no row, so nothing should be added to the distribution.
+    expect(stats.outcomes.error).toBe(0)
+  })
+
+  it('pages failed rows into history like any other settled row', () => {
+    for (let i = 0; i < 40; i++) {
+      board.addPR(`k${i}`, 4600 + i, 'a/b', `feat/${i}`)
+      board.failPR(`k${i}`, 'codex: timed out after 600s')
+    }
+    invokeRender()
+    expect(slots().size).toBe(40)
+    const pageCount = (board as unknown as { pageCount: number }).pageCount
+    expect(pageCount).toBeGreaterThan(0)
+  })
+
+  it('emits the folded line to scrollback and drops the slot when not a TTY', () => {
+    Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true })
+    const nonTty = new PRBoard()
+    nonTty.setConfig(baseConfig, [reviewStep])
+    nonTty.addPR('k1', 4641, 'a/b', 'feat/x')
+    nonTty.failPR('k1', 'codex: timed out after 600s')
+
+    expect(stripAnsi(written.join(''))).toContain('codex: timed out after 600s')
+    expect((nonTty as unknown as { slots: Map<string, unknown> }).slots.size).toBe(0)
+  })
+})
+
+describe('PRBoard \u2014 session stats panel', () => {
+  let board: PRBoard
+  let originalIsTTY: boolean | undefined
+  let originalRows: number | undefined
+  let originalWrite: typeof process.stdout.write
+
+  beforeEach(() => {
+    originalIsTTY = process.stdout.isTTY
+    originalRows = process.stdout.rows
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: 200, configurable: true })
+    originalWrite = process.stdout.write.bind(process.stdout)
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    board = new PRBoard()
+    board.setConfig(baseConfig, [reviewStep])
+  })
+
+  afterEach(() => {
+    board.stop()
+    process.stdout.write = originalWrite
+    Object.defineProperty(process.stdout, 'isTTY', { value: originalIsTTY, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: originalRows, configurable: true })
+  })
+
+  const invokeRender = () => (board as unknown as { render: () => string }).render()
+  const setStart = (ms: number) =>
+    ((board as unknown as { stats: { sessionStart: number } }).stats.sessionStart = ms)
+
+  it('shows the local start time and the session age', () => {
+    const start = Date.now() - (3 * 60 + 32) * 60_000
+    setStart(start)
+    const output = stripAnsi(invokeRender())
+    const expected = new Date(start).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
+    expect(output).toContain(`since ${expected}`)
+    expect(output).toContain('up 3h32m')
+  })
+
+  it('omits the outcome split until something settles', () => {
+    const output = stripAnsi(invokeRender())
+    expect(output).toContain('since')
+    expect(output).not.toContain('%')
+  })
+
+  it('reports the outcome split as percentages that sum to 100', () => {
+    const verdicts = ['APPROVE', 'APPROVE', 'BLOCK', 'NEEDS WORK']
+    verdicts.forEach((v, i) => {
+      board.addPR(`k${i}`, i, 'a/b', `b${i}`)
+      board.updatePR(`k${i}`, { verdict: v })
+      board.completePR(`k${i}`, { elapsedMs: 1000, url: `u${i}` })
+    })
+
+    const output = stripAnsi(invokeRender())
+    expect(output).toContain('APPROVE 50%')
+    expect(output).toContain('BLOCK 25%')
+    expect(output).toContain('NEEDS WORK 25%')
+  })
+
+  it('counts a failure in the split alongside verdicts', () => {
+    board.addPR('ok', 1, 'a/b', 'b1')
+    board.updatePR('ok', { verdict: 'APPROVE' })
+    board.completePR('ok', { elapsedMs: 1000, url: 'u1' })
+    board.addPR('bad', 2, 'a/b', 'b2')
+    board.failPR('bad', 'codex: timed out after 600s')
+
+    const output = stripAnsi(invokeRender())
+    expect(output).toContain('APPROVE 50%')
+    expect(output).toContain('error 50%')
+  })
+
+  it('takes the recheck verdict as the outcome when a recheck ran', () => {
+    board.addPR('k1', 1, 'a/b', 'b1')
+    board.updatePR('k1', { verdict: 'BLOCK', recheckVerdict: 'APPROVE' })
+    board.completePR('k1', { elapsedMs: 1000, url: 'u1' })
+
+    // Scoped to the stats block: the PR row still shows the round's own BLOCK in
+    // its CR bar, which is correct — only the split should read APPROVE.
+    const stats = stripAnsi(invokeRender()).split(/^─+$/m)[1] ?? ''
+    expect(stats).toContain('APPROVE 100%')
+    expect(stats).not.toContain('BLOCK')
+  })
+
+  it('separates a reviewer that returned nothing from one that never ran', () => {
+    board.addPR('noverdict', 1, 'a/b', 'b1')
+    board.updatePR('noverdict', { verdict: null })
+    board.completePR('noverdict', { elapsedMs: 1000, url: 'u1' })
+    board.addPR('skipped', 2, 'a/b', 'b2')
+    board.completePR('skipped', { elapsedMs: 900, url: 'u2', label: 'skipped \u00b7 generated' })
+
+    const output = stripAnsi(invokeRender())
+    expect(output).toContain('no verdict 50%')
+    expect(output).toContain('skipped 50%')
+  })
+
+  it('never pairs a "<1%" outcome with a flat 100%', () => {
+    for (let i = 0; i < 999; i++) {
+      board.addPR(`e${i}`, i, 'a/b', 'x')
+      board.failPR(`e${i}`, 'boom')
+    }
+    board.addPR('ok', 9999, 'a/b', 'y')
+    board.updatePR('ok', { verdict: 'APPROVE' })
+    board.completePR('ok', { elapsedMs: 1, url: 'u' })
+
+    const output = stripAnsi(invokeRender())
+    expect(output).toContain('APPROVE <1%')
+    expect(output).toContain('error >99%')
+    expect(output).not.toContain('error 100%')
+  })
+
+  it('still reads a clean 100% when one outcome is the only one', () => {
+    for (let i = 0; i < 5; i++) {
+      board.addPR(`e${i}`, i, 'a/b', 'x')
+      board.failPR(`e${i}`, 'boom')
+    }
+    expect(stripAnsi(invokeRender())).toContain('error 100%')
+  })
+
+  it('keeps the cumulative split after the slot history cap drops old rows', () => {
+    const stats = (board as unknown as {
+      stats: { outcomes: Record<string, number> }
+    }).stats
+    board.addPR('k1', 1, 'a/b', 'b1')
+    board.updatePR('k1', { verdict: 'APPROVE' })
+    board.completePR('k1', { elapsedMs: 1000, url: 'u1' })
+    // Simulate the cap having evicted the row it was counted from.
+    ;(board as unknown as { slots: Map<string, unknown> }).slots.clear()
+    expect(stats.outcomes.APPROVE).toBe(1)
+    expect(stripAnsi(invokeRender())).toContain('APPROVE 100%')
   })
 })
 
