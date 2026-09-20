@@ -7,7 +7,7 @@ import { parseDuration } from '../lib/durations.js'
 import ora from 'ora'
 import { createGithubClient, fetchIssueComment } from '../github/client.js'
 import { parseAnnotation } from '../lib/annotation.js'
-import { fetchStandingVerdictRecords, fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
+import { fetchStandingVerdictRecords, fetchStepHistoryWithRetry, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken, getLinearApiKey, getLinearCredentials } from '../config/loader.js'
 import { enrichIssueContext } from '../issues/enrich.js'
@@ -26,7 +26,7 @@ import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { buildNoVerdictReport, renderNoVerdictReport, selectStandingVerdict, type JudgedRecordShape } from '../lib/no-verdict.js'
 import { clonePRForReview, runGitWithoutHooks, BaseRefUnavailableError } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
-import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
+import { checkRemoteLock, acquireRemoteLock, claimRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import type { PREvent } from '../github/webhook.js'
 
 export interface RunOpts {
@@ -445,7 +445,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
   if (!opts.steps) {
     try {
-      const history = await fetchStepHistory(owner, repo, number, token)
+      const history = await fetchStepHistoryWithRetry(owner, repo, number, token)
       // prData comes from pulls.get, which carries `mergeable` — so routing a conflicted
       // PR to conflict-resolve costs no extra call here.
       const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha, { mergeable: prData.mergeable })
@@ -483,7 +483,16 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         // so the subprocess exits non-zero and kickass records a retryable failure.
         throw err
       }
-      /* best-effort for other triggers — fall through to normal review flow */
+      // Fail closed here too. This history is what carries the approval stop and the
+      // per-SHA dedup, so falling through without it re-reviews commits that are
+      // already approved — measured on 2026-09-19, when a batch of `ck run`
+      // invocations rate-limited this fetch and re-reviewed four already-APPROVEd
+      // SHAs. `--steps` remains the deliberate way to force a pass without history.
+      const message = err instanceof Error ? err.message : String(err)
+      fileLog({ level: 'warn', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'history_unavailable', sha: prData.head.sha, error: message })
+      console.log(chalk.yellow(`⚠  could not read PR history (${message}) — skipping rather than risk re-reviewing an approved commit`))
+      console.log(chalk.dim('   use --steps review to force a pass without history detection'))
+      return
     }
   }
 
@@ -612,7 +621,15 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         // request still triggers releaseRemoteLock (GitHub may have already
         // created the pending status server-side).
         lockAttemptStarted = true
-        await acquireRemoteLock(octokit, owner, repo, sha)
+        if (!await claimRemoteLock(octokit, owner, repo, sha)) {
+          // Another instance claimed this commit inside the check-then-act window.
+          // Its claim is the live one, so leave it alone and drop ours.
+          releasePRLock(owner, repo, number, sha)
+          lockAttemptStarted = false
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'lost_remote_claim', sha })
+          console.log(chalk.yellow(`⚠  PR #${number} was claimed by another crosscheck instance — skipping`))
+          return
+        }
       } catch (err: unknown) {
         releasePRLock(owner, repo, number, sha)
         throw err

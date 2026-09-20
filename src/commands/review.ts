@@ -21,6 +21,11 @@ import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
+import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
+import { checkRemoteLock, claimRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
+import { fetchStepHistoryWithRetry, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
+import { loadWorkflow } from '../lib/workflow.js'
+import { filterStepsByTypes, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
 import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession } from '../skills/broker.js'
 import { formatSkillAttribution } from '../skills/attribution.js'
@@ -31,7 +36,7 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
   return { owner: m[1], repo: m[2], number: parseInt(m[3], 10) }
 }
 
-export async function runReview(prUrl: string, configPath?: string, forceReviewer?: string) {
+export async function runReview(prUrl: string, configPath?: string, forceReviewer?: string, force = false) {
   const config = loadConfig(configPath)
   initLogger(config.logs)
   fileLog({ level: 'info', event: 'session_start', command: 'review', pr_url: prUrl })
@@ -64,6 +69,33 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   }
   spinner.succeed(`PR #${number}: ${pr.title}`)
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: pr.head.sha })
+
+  // `review` posts to the same PR as `run` and `watch`, so it answers to the same two
+  // questions they do — is this commit already settled, and is anyone else on it.
+  // Skipping both is how this command re-reviewed commits another instance had already
+  // APPROVEd, and how it posted a second, contradicting verdict on a commit a watcher
+  // was reviewing at that moment (measured on humanbased-ai/monorepo#4507).
+  if (!force) {
+    try {
+      const repoStepOverride = readRepoWorkflowStepTypes(owner, repo)
+      const globalWorkflow = loadWorkflow(process.cwd())
+      const allSteps = repoStepOverride ? filterStepsByTypes(globalWorkflow, repoStepOverride) : globalWorkflow
+      const history = await fetchStepHistoryWithRetry(owner, repo, number, token)
+      const next = identifyNextWorkflowStep(history, allSteps, pr.head.sha, { mergeable: pr.mergeable })
+      if (next.stopReason === 'approved') {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'approved', sha: pr.head.sha })
+        console.log(chalk.dim('  this commit is already approved — nothing to do until new commits land (use --force to review it anyway)'))
+        return
+      }
+    } catch (err: unknown) {
+      // Unlike run/watch this command reviews and nothing more: it cannot resume a
+      // half-finished workflow or modify an approved commit, so an unreadable history
+      // costs at most one redundant review comment. Warn and continue rather than
+      // strand an explicit user request on a transient API failure.
+      fileLog({ level: 'warn', event: 'approval_check_skipped', repo: `${owner}/${repo}`, pr: number, error: err instanceof Error ? err.message : String(err) })
+      console.log(chalk.yellow('  ⚠ could not read PR history — reviewing without the approval check'))
+    }
+  }
 
   let reviewer: 'claude' | 'codex' | null
   let origin: PROrigin = 'human'
@@ -112,6 +144,52 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       process.exit(isLinearConfigError(err) ? 1 : 2)
     }
   }
+
+  // Taken here, not earlier: everything above can still decline the PR — a closed
+  // PR, routing that assigns no reviewer, an unusable Linear credential — and each
+  // of those returns. Holding the lock across them would leave the lock file and a
+  // pending `crosscheck/review` status behind on a PR nothing is reviewing.
+  if (!acquirePRLock(owner, repo, number, pr.head.sha)) {
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_local', sha: pr.head.sha })
+    console.log(chalk.yellow(`⚠  PR #${number} is already being worked on by another crosscheck process — skipping`))
+    return
+  }
+  let lockHeld = true
+  // A holder rather than a bare `let`: releaseLocks closes over it, so it has to be
+  // declared before the heartbeat that fills it in can start.
+  const heartbeat: { stop?: () => void } = {}
+  // Every exit after this point goes through here exactly once: the lock must not
+  // outlive the review, and the commit status must not be resolved twice.
+  const releaseLocks = async (outcome: 'success' | 'failure'): Promise<void> => {
+    if (!lockHeld) return
+    lockHeld = false
+    heartbeat.stop?.()
+    await releaseRemoteLock(octokit, owner, repo, pr.head.sha, outcome)
+    releasePRLock(owner, repo, number, pr.head.sha)
+  }
+  try {
+    if (await checkRemoteLock(octokit, owner, repo, pr.head.sha)) {
+      lockHeld = false
+      releasePRLock(owner, repo, number, pr.head.sha)
+      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote', sha: pr.head.sha })
+      console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed on another machine — skipping`))
+      return
+    }
+    if (!await claimRemoteLock(octokit, owner, repo, pr.head.sha)) {
+      lockHeld = false
+      releasePRLock(owner, repo, number, pr.head.sha)
+      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'lost_remote_claim', sha: pr.head.sha })
+      console.log(chalk.yellow(`⚠  PR #${number} was claimed by another crosscheck instance — skipping`))
+      return
+    }
+  } catch (err: unknown) {
+    lockHeld = false
+    releasePRLock(owner, repo, number, pr.head.sha)
+    logError({ repo: `${owner}/${repo}`, pr: number, phase: 'lock' }, err)
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(2)
+  }
+  heartbeat.stop = startRemoteLockHeartbeat(octokit, owner, repo, pr.head.sha)
 
   // Clone the repo into a temp dir
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
@@ -260,9 +338,14 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     reviewSpinner?.fail()
     const message = err instanceof Error ? err.message : String(err)
     logError({ repo: `${owner}/${repo}`, pr: number, phase: 'review' }, err)
+    // Released as `failure`, not `success`: this SHA was not reviewed, and
+    // `crosscheck/review` is a status a repo can require for merge — a green one
+    // here would let an unreviewed HEAD satisfy branch protection.
+    await releaseLocks('failure')
     console.error(chalk.red(`\n✗ ${message}`))
     process.exit(2)
   } finally {
+    await releaseLocks('success')
     skillSession?.close()
     rmSync(tmpDir, { force: true, recursive: true })
   }
@@ -271,12 +354,15 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 export interface ReviewSpecOpts extends ConcurrencyOpts {
   config?: string
   reviewer?: string
+  /** Review this commit even when it is already approved. */
+  force?: boolean
 }
 
 export function buildReviewChildArgs(ref: PRRef, opts: ReviewSpecOpts): string[] {
   const args = ['review', ref.url]
   if (opts.config) args.push('-c', opts.config)
   if (opts.reviewer) args.push('--reviewer', opts.reviewer)
+  if (opts.force) args.push('--force')
   return args
 }
 
@@ -298,7 +384,7 @@ export async function runReviewSpec(spec: string, opts: ReviewSpecOpts = {}): Pr
   }
 
   if (refs.length === 1) {
-    await runReview(refs[0].url, opts.config, opts.reviewer)
+    await runReview(refs[0].url, opts.config, opts.reviewer, opts.force)
     return
   }
 

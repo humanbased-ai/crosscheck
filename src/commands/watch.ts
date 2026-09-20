@@ -36,7 +36,7 @@ import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
-import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly, type StepRecord } from '../lib/pr-workflow-state.js'
+import { fetchStepHistoryWithRetry, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH, isNoticeLine } from '../lib/board.js'
 import { clonePRForReview, BaseRefUnavailableError } from '../lib/clone.js'
@@ -60,7 +60,7 @@ import { PersistentShaSet } from '../lib/sha-cache.js'
 import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
 import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
-import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
+import { checkRemoteLock, claimRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
 
 const WEBHOOK_EVENTS = ['pull_request', 'issue_comment']
@@ -177,27 +177,6 @@ export interface WatchOpts {
   reconfigure?: boolean
   port?: number
   backtrace?: boolean
-}
-
-// PR history is what decides whether a step runs at all — the approval stop, the
-// per-SHA dedup, the resume point. Acting without it means posting a duplicate review
-// or modifying an already-approved commit, so callers fail closed rather than assume an
-// empty history. One short retry first: the usual cause is a transient GitHub blip or a
-// rate-limit tick, and deferring the event strands the PR until something else happens.
-const HISTORY_RETRY_DELAY_MS = 3_000
-
-async function fetchStepHistoryWithRetry(
-  owner: string,
-  repo: string,
-  prNumber: number,
-  token: string,
-): Promise<StepRecord[]> {
-  try {
-    return await fetchStepHistory(owner, repo, prNumber, token)
-  } catch {
-    await new Promise(resolve => setTimeout(resolve, HISTORY_RETRY_DELAY_MS))
-    return await fetchStepHistory(owner, repo, prNumber, token)
-  }
 }
 
 export async function runWatch(opts: WatchOpts = {}) {
@@ -402,7 +381,13 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
       try {
-        await acquireRemoteLock(lockOctokit, owner, repoName, params.headSha)
+        if (!await claimRemoteLock(lockOctokit, owner, repoName, params.headSha)) {
+          // Another instance claimed this commit inside the check-then-act window.
+          // Leave its claim standing and stand down.
+          releasePRLock(owner, repoName, prNumber, params.headSha)
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'lost_remote_claim', sha: params.headSha })
+          return
+        }
       } catch (err: unknown) {
         releasePRLock(owner, repoName, prNumber, params.headSha)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'lock' }, err)
