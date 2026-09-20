@@ -543,7 +543,7 @@ export class PRBoard {
   failPR(key: string, error: string): void {
     const slot = this.slots.get(key)
     this.stats.errorsOccurred++
-    if (!slot) return
+    if (!slot || slot.completedAt !== undefined) return
 
     slot.completedAt = Date.now()
     slot.error = error
