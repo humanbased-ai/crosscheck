@@ -495,7 +495,7 @@ describe('PRBoard — history pagination', () => {
     board.pageOlder()
     const older = footerOf(invokeRender())
     expect(older).toContain('history · page 2/')
-    expect(older).toContain('ctrl+<')
+    expect(older).toContain('←')
   })
 
   it('keeps a history page inside the viewport', () => {
@@ -511,7 +511,7 @@ describe('PRBoard — history pagination', () => {
     addCompleted(2)
     invokeRender()
     expect(pageCount()).toBe(1)
-    expect(footerOf(invokeRender())).not.toContain('ctrl+<')  // no keys offered with nowhere to go
+    expect(footerOf(invokeRender())).not.toContain('older')  // no keys offered with nowhere to go
     expect(footerOf(invokeRender())).toContain('showing 2 of 2')
   })
 })
@@ -639,6 +639,15 @@ describe('pageKeyAction', () => {
     expect(pageKeyAction('\u001b[C')).toBe('newer')
     expect(pageKeyAction('\u001b[1;5D')).toBe('older')
     expect(pageKeyAction('\u001b[1;5C')).toBe('newer')
+  })
+
+  it('maps the option+arrow and application-cursor forms macOS terminals send', () => {
+    expect(pageKeyAction('\u001bb')).toBe('older')          // Terminal.app option+left
+    expect(pageKeyAction('\u001bf')).toBe('newer')          // Terminal.app option+right
+    expect(pageKeyAction('\u001b\u001b[D')).toBe('older')   // iTerm2 option+left
+    expect(pageKeyAction('\u001b\u001b[C')).toBe('newer')   // iTerm2 option+right
+    expect(pageKeyAction('\u001bOD')).toBe('older')         // application-cursor left
+    expect(pageKeyAction('\u001bOC')).toBe('newer')         // application-cursor right
   })
 
   it('ignores everything else', () => {
@@ -771,6 +780,17 @@ describe('PRBoard \u2014 failed PRs stay in the workspace', () => {
     // against work the failed run will never do.
     expect(output).not.toMatch(/CR [\u2588\u2591]/)
     expect(output).toContain('\u2717 #4641')
+  })
+
+  it('flattens a multi-line subprocess dump into a single row', () => {
+    board.addPR('k1', 4823, 'a/b', 'feat/x')
+    board.failPR('k1', 'claude: Command failed with exit code 1: claude --print\n\n{"is_error":true,\n"result":"limit reached"}')
+
+    const rows = stripAnsi(invokeRender()).split('\n').filter(l => l.includes('#4823'))
+    // One row per folded slot is what history pagination sizes a page by.
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).not.toContain('{')
+    expect(rows[0]).toContain('claude: Command failed')
   })
 
   it('counts a failure once, toward errors and the outcome split', () => {

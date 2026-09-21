@@ -9,7 +9,7 @@ export const TIP_INTERVAL_MS = 45_000
 
 export const TIPS: Tip[] = [
   // 🔥 New features — kept at the front so a fresh `watch` session surfaces them first.
-  { text: '`ctrl+<` / `ctrl+>` (or plain `<` / `>`) — page back through every PR this session has handled', badge: 'fire' },
+  { text: '`←` / `→` (or `<` / `>`, option+arrows on macOS) — page back through every PR this session has handled', badge: 'fire' },
   { text: '`ck run .../pull/245,255` — run the workflow on many PRs at once: comma lists, `245-256` ranges, even cross-repo URLs', badge: 'fire' },
   { text: '`ck fix` · `ck recheck` · `ck resolve <pr>` — force one workflow step (fix / recheck / conflict-resolve) on one or more PRs', badge: 'fire' },
   { text: 'multi-PR `ck run` / `ck review` run concurrently by default — cap with `--concurrent <n>` or use `--sequential`', badge: 'fire' },
