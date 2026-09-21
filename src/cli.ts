@@ -41,11 +41,15 @@ const portParser = (raw: string): number => {
   }
 }
 
+// Largest interval whose millisecond value still fits a Node timer (2^31-1 ms).
+// Above it the delay overflows to 1ms and the scan would fire continuously.
+const MAX_BACKTRACE_INTERVAL_MIN = 35_000
+
 // Commander arg parser for --backtrace-interval: minutes, 0 meaning startup-only.
 const intervalParser = (raw: string): number => {
   const n = Number(raw)
-  if (!Number.isInteger(n) || n < 0) {
-    throw new InvalidArgumentError(`--backtrace-interval must be a non-negative integer (minutes), got: ${raw}`)
+  if (!Number.isInteger(n) || n < 0 || n > MAX_BACKTRACE_INTERVAL_MIN) {
+    throw new InvalidArgumentError(`--backtrace-interval must be an integer between 0 and ${MAX_BACKTRACE_INTERVAL_MIN} (minutes), got: ${raw}`)
   }
   return n
 }

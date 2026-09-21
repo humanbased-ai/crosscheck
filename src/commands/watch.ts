@@ -105,6 +105,8 @@ export async function runWithConcurrency(
 ): Promise<void> {
   let next = 0
   const workers = Array.from({ length: Math.min(Math.max(limit, 1), tasks.length) }, async () => {
+    // Bounded worker pool: each worker pulls the next task only after its current
+    // one settles, so the awaits are intentionally sequential per worker.
     while (next < tasks.length) {
       const task = tasks[next++]
       if (!task) return
@@ -377,6 +379,10 @@ export async function runWatch(opts: WatchOpts = {}) {
     lastActivityAt = Date.now()  // reset idle timer on any PR event
     const { owner, repoName, prNumber } = params
     const key = `${owner}/${repoName}#${prNumber}@${params.headSha}`
+    // Set when this invocation lost the PR lock and queued its event. Draining
+    // from that same invocation's `finally` would replay the event immediately
+    // against a lock that is still held, spinning until the holder finishes.
+    let requeued = false
     if (inFlight.has(key)) return
     inFlight.add(key)
 
@@ -439,6 +445,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       if (!acquirePRLock(owner, repoName, prNumber, params.headSha)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_local' })
         queuePendingEvent(params, 'in_progress_local')
+        requeued = true
         return
       }
 
@@ -447,6 +454,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         releasePRLock(owner, repoName, prNumber, params.headSha)
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_remote' })
         queuePendingEvent(params, 'in_progress_remote')
+        requeued = true
         return
       }
       // The local lock is held and no peer claims this SHA — the review is going
@@ -890,7 +898,10 @@ export async function runWatch(opts: WatchOpts = {}) {
       logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'setup' }, err)
     } finally {
       inFlight.delete(key)
-      drainPendingEvent(`${owner}/${repoName}#${prNumber}`)
+      // Only drain when this invocation actually ran (or attempted) a review. A
+      // call that just queued its event is retried by the timer, which counts
+      // attempts, or by the lock holder's own `finally`.
+      if (!requeued) drainPendingEvent(`${owner}/${repoName}#${prNumber}`)
     }
   }
 
