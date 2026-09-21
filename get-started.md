@@ -1184,6 +1184,8 @@ mode: cross-vendor
 # Pick https if you have multi-account SSH setup or your default SSH key
 # cannot access target repos. Independent of `gh config get git_protocol`.
 clone_protocol: ssh
+# Reuse fetched Git objects; set false to always clone from scratch.
+repository_cache: true
 
 # ── Vendors ───────────────────────────────────────────────────────────────────
 vendors:
@@ -1202,6 +1204,8 @@ vendors:
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:
+  # Structured findings and incremental follow-ups; set false for legacy prose reviews.
+  review_memory: true
   mode: smart               # smart (default) | fixed — see Review thoroughness
   tier: balanced            # fast | balanced | thorough (fallback under smart)
   focus:                    # narrows review scope (optional)
@@ -1794,3 +1798,56 @@ The authoring agent has the most context about its own code — the same style, 
 ### Does optimize run automatically?
 
 No — `crosscheck optimize` is always user-triggered. You run it when you want to improve instructions. There is no background daemon or scheduled job. A future version may add an optional `--schedule` mode, but the default will always be manual to keep you in control of what gets written to `~/.crosscheck/workflow.yml`.
+
+
+### Review efficiency (enabled by default)
+
+`repository_cache` and `quality.review_memory` default to `true`, including
+existing configs that omit them. They reuse Git objects and retain structured
+findings across reviews. Set either option to `false` to disable it. Both
+work with `review`, `run`/`recheck`, and `watch`; no CLI flags change.
+
+The repository cache lives in `~/.crosscheck/repository-cache`. It fetches the
+PR head under a per-repository lock and makes an independent checkout with no
+hardlinks or object alternates. Cache credentials are never stored: only the
+temporary checkout has the authenticated remote URL, as before. A cold fetch
+still costs network time; concurrent preparation for the same repository waits
+for the lock. A lock whose owning process has exited (or that is older than 30
+minutes) is broken automatically. The cache fetch uses the same network retries
+as a fresh clone; if the cache fails anyway it is discarded and the review falls
+back to a fresh clone. Caches unused for 30 days are pruned. Disable the option
+to always use fresh clones.
+
+Review memory lives in `~/.crosscheck/review-memory`, keyed by repository and PR.
+It is saved only after publication. First reviews are full reviews. Small
+descendant changes on the same base and quality policy receive the previous
+findings and a delta-first review brief, including affected callers and new
+regressions. Missing/corrupt history, rewritten history, changed bases/policies,
+binary changes, more than 20 changed files or 600 changed lines, a still-open
+P0/P1 finding, and sensitive path matches trigger full review. If the base ref
+cannot be resolved, the review runs without memory. Path matching is conservative routing, not
+a proof of low risk; the reviewer can always expand to the full PR. The memory
+is local to this machine and cannot reuse reviews from another host.
+
+The model returns validated JSON with evidence and stable semantic finding keys.
+Every previously open finding must remain open or have an explicit resolved or
+dismissed entry; an incremental review may resolve a previous finding but may
+not dismiss it or lower its priority. Previous findings replayed into the prompt
+are truncated and capped in size. Missing findings, duplicate identities,
+malformed JSON, and incomplete coverage never approve: crosscheck posts the raw
+output with a warning and no verdict, and saves no memory. Open P0/P1 findings produce
+BLOCK, open P2 findings NEEDS WORK, and P3-only/empty findings APPROVE, subject
+to the existing documentation-only policy. Existing prose reviews are unaffected.
+
+A new PR head/base, or an open PR closed during the review, detected before
+publication rejects the stale review; it does not save a new memory snapshot.
+Manual reviews of an already-closed PR still post. When two reviews of one PR
+finish concurrently, the slower one does not overwrite a snapshot published
+while it ran. There remains an API race between
+that check and posting, so comments always identify the reviewed SHA. This does
+not add a global scheduler lock or change poll frequency. Review memory is not
+pruned; remove `~/.crosscheck/review-memory` while workers are stopped to
+reclaim space.
+
+This is an efficiency mechanism, not a guarantee of defect detection. Validate
+latency and recall on representative historical PRs before fleet-wide rollout.

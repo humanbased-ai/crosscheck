@@ -6,6 +6,7 @@ import { isAbsolute, resolve } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 import { getGitIdentityFromEnv } from '../config/loader.js'
+import { cloneFromCache } from './repository-cache.js'
 
 const GIT_RESILIENCE_ARGS = [
   '-c', 'http.postBuffer=524288000',
@@ -165,12 +166,15 @@ export async function clonePRForReview(params: {
    * itself — so this is what turns an unreviewable PR back into a reviewable one.
    */
   baseSha?: string
+  repositoryCache?: boolean
   tmpDir: string
   token: string
   protocol: Config['clone_protocol']
   onBaseFetchFailed?: () => void
   onBaseRefRecovered?: (status: BaseRefStatus) => void
   onProgress?: (line: string) => void
+  /** The repository cache failed and a fresh clone is being used instead. */
+  onCacheFailed?: (message: string) => void
 }): Promise<CloneResult> {
   // Isolation is scoped here, not globally in cli.ts, so commands like `skill install`
   // that don't execute agents keep using the operator's normal Git config (credential
@@ -183,7 +187,25 @@ export async function clonePRForReview(params: {
   // requiring a local repo to already exist.
   // --progress forces git to emit stderr progress even when piped; without a
   // progress consumer, stay --quiet so error output remains clean.
-  await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress)
+  let cloned = false
+  if (params.repositoryCache) {
+    try {
+      await cloneFromCache({
+        source: cloneUrl, repository: `${owner}/${repo}`, prNumber, destination: tmpDir,
+        // Same hardening as the fresh clone: resilience flags, transient retries,
+        // progress, and redacted errors for the one step that hits the network.
+        git: (subcommand, args, { cwd, network }) => network
+          ? runGit([...GIT_RESILIENCE_ARGS, subcommand, ...(onProgress ? ['--progress'] : []), ...args], cwd, true, onProgress)
+          : runGit([subcommand, ...args], cwd),
+      })
+      cloned = true
+    } catch (err) {
+      params.onCacheFailed?.(redactCloneSecrets(err instanceof Error ? err.message : String(err)))
+    }
+  }
+  if (!cloned) {
+    await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress)
+  }
   await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir, true, onProgress)
   await runGit(['checkout', `pr-${prNumber}`], tmpDir)
 

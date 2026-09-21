@@ -662,9 +662,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
       const { baseRefStatus } = await clonePRForReview({
         owner, repo, prNumber: number, baseRef: prData.base.ref, baseSha: prData.base.sha,
-        tmpDir, token, protocol: config.clone_protocol,
+        tmpDir, token, protocol: config.clone_protocol, repositoryCache: config.repository_cache,
         onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref }),
         onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref, via: status }),
+        onCacheFailed: message => fileLog({ level: 'warn', event: 'repository_cache_failed', repo: `${owner}/${repo}`, pr: number, error: message }),
       })
       cloneSpinner.succeed('Repo ready')
       if (baseRefStatus === 'unavailable') {

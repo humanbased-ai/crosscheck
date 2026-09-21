@@ -63,6 +63,7 @@ export const QualityConfigSchema = z.object({
   mode: z.enum(['fixed', 'smart']).default('smart'),
   focus: z.array(z.string()).default([]),
   custom_prompt: z.string().optional(),
+  review_memory: z.boolean().default(true),
 })
 
 export const SkillsConfigSchema = z.object({
@@ -357,6 +358,7 @@ export const ConfigSchema = z.object({
   // Pick https if you have multi-account SSH setup or your default SSH key cannot
   // access target repos. Independent of `gh config get git_protocol`.
   clone_protocol: z.enum(['ssh', 'https']).default('ssh'),
+  repository_cache: z.boolean().default(true),
   vendors: z.object({
     codex: CodexVendorConfigSchema.default({}),
     claude: VendorConfigSchema.default({}),

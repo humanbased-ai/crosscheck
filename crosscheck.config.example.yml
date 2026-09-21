@@ -21,6 +21,8 @@ mode: cross-vendor
 # Pick https if you have a multi-account SSH setup or your default SSH key
 # cannot access target repos. Independent of `gh config get git_protocol`.
 clone_protocol: ssh
+# Reuse fetched Git objects; set false to always clone from scratch.
+repository_cache: true
 
 # ─── Vendors ─────────────────────────────────────────────────────────────────
 vendors:
@@ -39,6 +41,8 @@ vendors:
 
 # ─── Quality & Focus ─────────────────────────────────────────────────────────
 quality:
+  # Structured findings and incremental follow-ups; set false for legacy prose reviews.
+  review_memory: true
   mode: smart               # smart (default) | fixed
   #
   # smart  - dynamically adjust model + effort based on task type. The PR is
