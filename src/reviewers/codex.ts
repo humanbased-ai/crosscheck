@@ -8,6 +8,7 @@ import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveCodexModel } from '../lib/review-models.js'
 import type { ReviewResult } from './claude.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
+import { vendorFailureSummary } from '../lib/vendor-error-summary.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { buildCodexEnv } from './codex-env.js'
@@ -274,7 +275,7 @@ export async function runCodexReview(
       const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
       const summary = execa.timedOut
         ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large (tier: ${quality.tier})`
-        : (extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error')
+        : vendorFailureSummary(execa, extractErrorSummary)
       const thrown = Object.assign(new Error(`codex: ${summary}`), {
         exitCode: execa.exitCode,
         timedOut: execa.timedOut,

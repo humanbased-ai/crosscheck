@@ -2,6 +2,7 @@ import chalk from 'chalk'
 import type { Config, DisplayTheme } from '../config/schema.js'
 import type { WorkflowStep } from './workflow.js'
 import { selectTip } from './tips.js'
+import { oneLine } from './vendor-error-summary.js'
 
 // ── Phase state ───────────────────────────────────────────────────────────────
 
@@ -248,13 +249,25 @@ export function isNoticeLine(msg: string): boolean {
 
 export type PageKey = 'older' | 'newer' | null
 
-// Bare `<`/`>` (and their unshifted `,`/`.`) always work. Terminals cannot agree
-// on how to report ctrl/cmd with a punctuation key, so every encoding they do
-// emit is accepted: meta-prefixed, CSI-u (kitty / xterm modifyOtherKeys) and
-// modified arrows. macOS Terminal swallows cmd entirely — there the bare keys,
-// or ctrl+arrow, are the way through.
-const PAGE_OLDER_KEYS = new Set(['<', ',', '\u001b<', '\u001b,', '\u001b[D', '\u001b[5~'])
-const PAGE_NEWER_KEYS = new Set(['>', '.', '\u001b>', '\u001b.', '\u001b[C', '\u001b[6~'])
+// Bare `←`/`→` and `<`/`>` (with their unshifted `,`/`.`) always work.
+// Terminals cannot agree on how to report ctrl/cmd with a punctuation key, so
+// every encoding they do emit is accepted: meta-prefixed, CSI-u (kitty / xterm
+// modifyOtherKeys) and modified arrows.
+//
+// macOS needs the extra encodings on the end. It never forwards cmd, and fn+←/→
+// scrolls the terminal's own scrollback rather than reaching the process, so the
+// arrows are the shortcut that works there — including option+←/→, which
+// Terminal.app sends as the readline words `ESC b` / `ESC f` and iTerm2 sends as
+// a doubled escape. `ESC O D/C` is the application-cursor form of a bare arrow,
+// which is what Terminal.app emits while an alternate-screen app has the tty.
+const PAGE_OLDER_KEYS = new Set([
+  '<', ',', '\u001b<', '\u001b,', '\u001b[D', '\u001b[5~',
+  '\u001bb', '\u001b\u001b[D', '\u001bOD',
+])
+const PAGE_NEWER_KEYS = new Set([
+  '>', '.', '\u001b>', '\u001b.', '\u001b[C', '\u001b[6~',
+  '\u001bf', '\u001b\u001b[C', '\u001bOC',
+])
 // eslint-disable-next-line no-control-regex -- the ESC byte is the sequence
 const CSI_U = /^\u001b\[(\d+);\d+u$/          // ESC [ <codepoint> ; <modifiers> u
 // eslint-disable-next-line no-control-regex -- the ESC byte is the sequence
@@ -546,7 +559,12 @@ export class PRBoard {
     if (!slot || slot.completedAt !== undefined) return
 
     slot.completedAt = Date.now()
-    slot.error = error
+    // A failure message is whatever the thrower had — a subprocess dump can
+    // arrive with embedded newlines and hundreds of columns. The folded row is
+    // clamped to one terminal row and history pagination counts on that, so the
+    // text is flattened here rather than at render time. The untouched error is
+    // in the file log.
+    slot.error = oneLine(error, 160)
     slot.label = 'failed'
     this.stats.outcomes.error++
 
@@ -1072,8 +1090,10 @@ export class PRBoard {
     // "shown of retained", not of stats.prsReceived: rounds add rows, and the
     // history cap eventually drops the oldest, so the two counts diverge.
     const counts = t.dim(`showing ${shown} of ${total}`)
+    // Arrows first: they are the one binding every terminal forwards, and on
+    // macOS the ctrl+punctuation form never arrives at all.
     const keys = this.pageCount > 1
-      ? `  ${t.dim('│')}  ${t.accent('ctrl+<')} ${t.dim('older')}  ${t.accent('ctrl+>')} ${t.dim('newer')}`
+      ? `  ${t.dim('│')}  ${t.accent('←')} ${t.dim('older')}  ${t.accent('→')} ${t.dim('newer')}`
       : ''
 
     return `  ${position}  ${t.dim('│')}  ${counts}${keys}`
