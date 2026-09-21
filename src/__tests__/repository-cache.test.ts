@@ -1,17 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { execFileSync } from 'child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { cloneFromCache } from '../lib/repository-cache.js'
+import { cloneFromCache, type CacheGitRunner } from '../lib/repository-cache.js'
 
 let root: string
 let source: string
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' }).trim()
 }
-function clone(destination: string, prNumber = 1) {
-  return cloneFromCache({ source, repository: 'team/repo', prNumber, destination, root: join(root, 'cache') })
+function clone(destination: string, prNumber = 1, git?: CacheGitRunner) {
+  return cloneFromCache({ source, repository: 'team/repo', prNumber, destination, root: join(root, 'cache'), ...(git && { git }) })
+}
+function cacheRepo(): string {
+  return join(root, 'cache', readdirSync(join(root, 'cache')).find(n => n.endsWith('.git'))!)
 }
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'repository-cache-test-')); source = join(root, 'origin'); mkdirSync(source)
@@ -38,5 +41,35 @@ describe('repository cache', () => {
     await expect(clone(join(root, 'bad'), 99)).rejects.toThrow()
     expect(readdirSync(join(root, 'cache')).some(n => n.endsWith('.lock'))).toBe(false)
     await clone(join(root, 'three'))
+  })
+  it('recovers a lock left by a dead process', async () => {
+    await clone(join(root, 'warm'))
+    const lock = `${cacheRepo()}.lock`; mkdirSync(lock); writeFileSync(join(lock, 'owner'), '999999\n')
+    await clone(join(root, 'after-crash'))
+    expect(readFileSync(join(root, 'after-crash', 'file.txt'), 'utf8')).toBe('first')
+  })
+  it('drops a corrupt cache after a failed fetch so the next clone rebuilds it', async () => {
+    await clone(join(root, 'warm'))
+    writeFileSync(join(cacheRepo(), 'config'), '[core\n\tbroken = ')
+    await expect(clone(join(root, 'broken'))).rejects.toThrow()
+    expect(existsSync(join(root, 'broken'))).toBe(false)
+    await clone(join(root, 'rebuilt'))
+    expect(readFileSync(join(root, 'rebuilt', 'file.txt'), 'utf8')).toBe('first')
+  })
+  it('routes only the fetch through the network runner', async () => {
+    const calls: Array<{ subcommand: string; network: boolean }> = []
+    await clone(join(root, 'routed'), 1, async (subcommand, args, { cwd, network }) => {
+      calls.push({ subcommand, network })
+      execFileSync('git', [subcommand, ...args], { cwd, stdio: 'pipe' })
+    })
+    expect(calls.filter(c => c.network).map(c => c.subcommand)).toEqual(['fetch'])
+  })
+  it('prunes caches unused for a month and restricts the cache root', async () => {
+    mkdirSync(join(root, 'cache'), { recursive: true, mode: 0o755 })
+    const stale = join(root, 'cache', 'stale.git'); mkdirSync(stale)
+    const old = new Date(Date.now() - 31 * 24 * 60 * 60_000); utimesSync(stale, old, old)
+    await clone(join(root, 'fresh'))
+    expect(existsSync(stale)).toBe(false)
+    expect(statSync(join(root, 'cache')).mode & 0o777).toBe(0o700)
   })
 })

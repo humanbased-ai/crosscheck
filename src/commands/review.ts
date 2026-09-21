@@ -1,5 +1,3 @@
-import { prepareReviewPlan, finishReview, savePublishedReview, assertReviewFresh } from '../lib/review-memory.js'
-import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -18,7 +16,8 @@ import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, DOC_ONLY_GATE_NOTE, detectInconclusiveReview } from '../lib/verdict.js'
 import { clonePRForReview, BaseRefUnavailableError, changedFilesVsBase } from '../lib/clone.js'
 import { isDocOnlyChange } from '../lib/review-strategy.js'
-import { linearWritePossible } from '../lib/workflow.js'
+import { linearWritePossible, DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
+import { prepareReviewPlan, finishReviewOrFallback, savePublishedReview, assertReviewFresh } from '../lib/review-memory.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
@@ -130,6 +129,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       onProgress: line => { spinner2.text = `Cloning repo for review... ${line}` },
       onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref }),
       onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref, via: status }),
+      onCacheFailed: message => fileLog({ level: 'warn', event: 'repository_cache_failed', repo: `${owner}/${repo}`, pr: number, error: message }),
     })
     spinner2.succeed('Repo ready')
     if (baseRefStatus === 'unavailable') {
@@ -141,9 +141,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
 
     const memoryPlan = config.quality.review_memory ? prepareReviewPlan({
-      repoDir: tmpDir, repository: `${owner}/${repo}#${number}`, baseBranch: pr.base.ref,
+      repoDir: tmpDir, subject: `${owner}/${repo}#${number}`, baseBranch: pr.base.ref,
       instructions: DEFAULT_REVIEW_INSTRUCTIONS, policy: JSON.stringify(config.quality),
     }) : undefined
+    if (memoryPlan) fileLog({ level: 'info', event: 'review_memory_plan', repo: `${owner}/${repo}`, pr: number, mode: memoryPlan.mode, reason: memoryPlan.reason })
     let reviewText: string
     let tokensUsed: number | undefined
     let model = 'default'
@@ -198,8 +199,12 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     reviewSpinner.succeed(`Review complete (${elapsed}s)`)
     const activatedSkills = skillSession?.activations() ?? []
     if (activatedSkills.length > 0) console.log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
-    const structured = memoryPlan ? finishReview(memoryPlan, reviewText) : undefined
+    const structured = memoryPlan ? finishReviewOrFallback(memoryPlan, reviewText) : undefined
     if (structured) reviewText = structured.text
+    if (structured?.fallbackReason) {
+      fileLog({ level: 'warn', event: 'structured_review_fallback', repo: `${owner}/${repo}`, pr: number, reviewer, reason: structured.fallbackReason })
+      console.log(chalk.yellow(`  structured review unusable (${structured.fallbackReason}) — posting raw output without a verdict`))
+    }
     const parsed = parseVerdict(reviewText)
     const { clean } = parsed
     if (parsed.verdict === null) {
@@ -233,10 +238,17 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       : prependVerdictToComment(gate.downgraded ? `${gateNote}\n\n${clean}` : clean, verdict)
     if (memoryPlan) {
       const { data: current } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
-      assertReviewFresh(memoryPlan, current, pr.head.sha)
+      assertReviewFresh(memoryPlan, current, pr.head.sha, pr.head.sha, pr.state)
     }
     await postReviewComment(octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort)
-    if (memoryPlan && structured) savePublishedReview(memoryPlan, structured.snapshot)
+    if (memoryPlan && structured?.snapshot) {
+      // The review is already posted; a memory write failure only costs the next review its delta.
+      try {
+        if (!await savePublishedReview(memoryPlan, structured.snapshot)) fileLog({ level: 'info', event: 'review_memory_superseded', repo: `${owner}/${repo}`, pr: number })
+      } catch (err) {
+        fileLog({ level: 'warn', event: 'review_memory_save_failed', repo: `${owner}/${repo}`, pr: number, error: err instanceof Error ? err.message : String(err) })
+      }
+    }
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 
