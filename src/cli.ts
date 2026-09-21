@@ -159,10 +159,11 @@ program
   .option('--concurrent [n]', 'multi-PR: cap parallel agents; omit n for one agent per PR (default)')
   .option('--sequential', 'multi-PR: run PRs one at a time instead of in parallel')
   .option('--stagger <ms>', 'multi-PR: ms delay between concurrent worker starts; default 2000')
-  .action((prUrls: string[], opts: { config?: string; reviewer?: string; vendor?: string; concurrent?: string | true; sequential?: boolean; stagger?: string }) => {
+  .option('--force', 'review even when this commit is already approved')
+  .action((prUrls: string[], opts: { config?: string; reviewer?: string; vendor?: string; concurrent?: string | true; sequential?: boolean; stagger?: string; force?: boolean }) => {
     const concurrent = opts.concurrent === undefined ? undefined : opts.concurrent === true ? 0 : Number(opts.concurrent)
     const staggerMs = opts.stagger !== undefined ? Number(opts.stagger) : undefined
-    void runReviewSpec(prUrls.join(','), { config: opts.config, reviewer: opts.reviewer ?? opts.vendor, concurrent, sequential: opts.sequential, staggerMs })
+    void runReviewSpec(prUrls.join(','), { config: opts.config, reviewer: opts.reviewer ?? opts.vendor, concurrent, sequential: opts.sequential, staggerMs, force: opts.force })
   })
 
 addStepRunOptions(
