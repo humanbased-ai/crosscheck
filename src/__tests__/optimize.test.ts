@@ -27,7 +27,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     logs: { enabled: false, retention_days: 7, extended: { enabled: false } },
     tunnel: { backend: 'localhost.run', smee_channel: '' },
     impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },
-    backtrace: { enabled: false },
+    backtrace: { enabled: false, interval_min: 0, concurrency: 2 },
     issue_enrichment: { enabled: false, provider: 'linear', team_keys: [], max_description_chars: 4000 },
     linear: { enabled: false, auth: { mode: 'api_key', api_key_env: 'LINEAR_API_KEY', client_id_env: 'LINEAR_CLIENT_ID', client_secret_env: 'LINEAR_CLIENT_SECRET', scopes: 'read write' }, identity: { actor: 'crosscheck', signature: '🤖 {actor} · {product}', icon_url: '', per_step_actor: true }, comment_on: ['APPROVE', 'NEEDS_WORK', 'BLOCK'], team_keys: [] },
     watch: { idle_issue: { enabled: true, timeout_min: 30 } },

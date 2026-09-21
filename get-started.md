@@ -775,7 +775,8 @@ Uses `localhost.run` (SSH) to open a public tunnel — SSH is pre-installed on m
 | `-c, --config <path>` | Use a specific config file |
 | `--personal` / `--team` | Override the saved deployment mode for this session only |
 | `--reconfigure` | Re-run deployment setup and save the new choice |
-| `--backtrace` / `--no-backtrace` | Force on/off the startup scan for unreviewed open PRs |
+| `--backtrace` / `--no-backtrace` | Force on/off the scan for unreviewed open PRs |
+| `--backtrace-interval <min>` | Minutes between backtrace re-scans this session (`0` = startup only) |
 
 ---
 
@@ -1336,14 +1337,22 @@ post_review:
 #     timeout_min: 30     # minutes of no PR activity before the idle prompt fires (min: 5)
 
 # ── Backtrace ─────────────────────────────────────────────────────────────────
-# On startup, scan all open PRs in the monitored scope and review any that
-# haven't received a [crosscheck] comment yet. Off by default.
+# Scan all open PRs in the monitored scope and review any that haven't received
+# a [crosscheck] comment yet. Off by default.
 # Enable with:
 #   backtrace.enabled: true  (persistent — runs every startup)
 #   --backtrace flag         (this session only)
 #   --no-backtrace flag      (suppress even when enabled: true)
+#
+# interval_min re-runs the scan while watch is up. Webhooks are the fast path,
+# not a guarantee — a PR opened while watch was down, an org hook that failed to
+# register, or a smee reconnect gap leaves a PR no future event will mention.
+# The recurring scan is what finds those. concurrency caps how many reviews it
+# starts at once; unbounded fan-out is what exhausts a reviewer subscription.
 # backtrace:
 #   enabled: true
+#   interval_min: 30    # re-scan every N minutes; 0 = startup only (default)
+#   concurrency: 2      # max reviews started at once (default 2)
 
 # ── Server ────────────────────────────────────────────────────────────────────
 server:

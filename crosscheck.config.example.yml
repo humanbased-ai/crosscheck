@@ -254,12 +254,19 @@ post_review:
 #     timeout_min: 30     # minutes of no PR activity before the idle prompt fires (min: 5)
 
 # ─── Backtrace ───────────────────────────────────────────────────────────────
-# On startup, scan all open PRs in the monitored scope and review any that have
-# never received a [crosscheck] comment. Ensures coverage for PRs opened while
+# Scan all open PRs in the monitored scope and review any that have never
+# received a [crosscheck] comment. Ensures coverage for PRs opened while
 # crosscheck was offline or before it was first set up.
 # Off by default — enable with the config below or pass --backtrace at startup.
+#
+# Webhook delivery is best-effort, so the scan is also the recovery path for PRs
+# no future event will mention: opened while watch was down, an org hook that
+# failed to register, a smee reconnect gap, or a push dropped while the PR was
+# locked. Set interval_min to re-run it on a cadence, not just at startup.
 # backtrace:
-#   enabled: true   # set to true to enable the startup scan (or pass --backtrace)
+#   enabled: true       # set to true to enable the scan (or pass --backtrace)
+#   interval_min: 30    # re-scan every N minutes while watch is up; 0 = startup only
+#   concurrency: 2      # max reviews the scan starts at once (default 2)
 
 # ─── Issue enrichment ────────────────────────────────────────────────────────
 # Recover the linked tracker issue (e.g. IN-2017) from the PR title / branch /
