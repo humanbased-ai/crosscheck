@@ -25,6 +25,7 @@ interface Theme {
   warning: ChalkFn
   error: ChalkFn
   dim: ChalkFn
+  muted: ChalkFn  // fainter than dim: controls that do nothing in the current state
   accent: ChalkFn
   barPRFill: ChalkFn
   barEmpty: ChalkFn
@@ -132,6 +133,14 @@ function fmtDuration(ms: number): string {
   if (h > 0) return `${h}h${String(m).padStart(2, '0')}m`
   if (m > 0) return `${m}m${String(s).padStart(2, '0')}s`
   return `${s}s`
+}
+
+// When a PR entered the board, in the operator's locale: "09/22, 03:50 PM" in
+// en-US. Every part is 2-digit so the column keeps one width within a session.
+export function fmtEnteredAt(epochMs: number): string {
+  return new Date(epochMs).toLocaleString(undefined, {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  })
 }
 
 // Short HH:MM timestamp (no seconds) for the "started" label
@@ -381,6 +390,7 @@ function buildTheme(cfg: DisplayTheme): Theme {
     warning: chalk.yellow,
     error: chalk.red,
     dim: chalk.dim,
+    muted: chalk.gray.dim,
     accent: chalk.cyan,
     barPRFill: resolveColor(cfg.bar_fill),
     barEmpty: empty,
@@ -696,7 +706,7 @@ export class PRBoard {
     return `PRs: ${prsReceived} · CRs: ${crsCompleted}${errorPart} · fixes: ${fixesApplied}${avgCr}`
   }
 
-  private renderPRSlot(slot: PRSlot, frame: string): string {
+  private renderPRSlot(slot: PRSlot, frame: string, numWidth = 0): string {
     const t = this.theme
     const w = process.stdout.columns || 80
     const isCompleted = slot.completedAt !== undefined
@@ -709,15 +719,15 @@ export class PRBoard {
     const branch = truncate(slot.branch, 22)
     const icon = isCompleted ? t.success('✓') : t.spinner(frame)
     const phaseLabel = this.phaseLine1Label(slot, frame)
-    const timePart = isCompleted
-      ? t.dim(eSuffix)
-      : `${t.dim('started ' + fmtStartTime(slot.startedAt))}  ${t.dim(eSuffix)}`
-    const rightPart = `${timePart}  ${phaseLabel}`
-    const identityPlain = `   #${slot.prNumber}  ${slot.repo}  ${branch}`
+    // The entered-at column after the PR number already says when it started.
+    const rightPart = `${t.dim(eSuffix)}  ${phaseLabel}`
+    const numText = `#${slot.prNumber}`.padEnd(numWidth)
+    const entered = fmtEnteredAt(slot.startedAt)
+    const identityPlain = `   ${numText}  ${entered}  ${slot.repo}  ${branch}`
     const l1Pad = Math.max(2, w - stripAnsi(identityPlain).length - stripAnsi(rightPart).length - 2)
-    const prNum = isCompleted ? t.dim(`#${slot.prNumber}`) : chalk.bold(`#${slot.prNumber}`)
+    const prNum = isCompleted ? t.dim(numText) : chalk.bold(numText)
     const repoStr = isCompleted ? t.dim(slot.repo) : chalk.white(slot.repo)
-    const l1 = `  ${icon} ${prNum}  ${repoStr}  ${t.dim(branch)}` +
+    const l1 = `  ${icon} ${prNum}  ${t.dim(entered)}  ${repoStr}  ${t.dim(branch)}` +
       ' '.repeat(l1Pad) + rightPart
 
     // ── Line 2: PR | CR | Fix | Recheck pipeline ────────────────────────────────
@@ -1045,6 +1055,9 @@ export class PRBoard {
     }
     const foldByCount = completedCount > FOLD_THRESHOLD
 
+    // Pad the PR number to the page's widest so the entered-at column lines up.
+    const numWidth = Math.max(...visible.map(s => `#${s.prNumber}`.length))
+
     const lines: string[] = []
     let prevWasExpanded = false
     let first = true
@@ -1066,11 +1079,11 @@ export class PRBoard {
       if (useFolded) {
         // Clamped so the row never wraps: history pagination sizes a page by
         // counting one terminal row per folded slot.
-        lines.push(truncateVisible(this.renderPRSlotFolded(slot), w - 1))
+        lines.push(truncateVisible(this.renderPRSlotFolded(slot, numWidth), w - 1))
         prevWasExpanded = false
       } else {
         if (!first && prevWasExpanded) lines.push('')
-        lines.push(this.renderPRSlot(slot, frame))
+        lines.push(this.renderPRSlot(slot, frame, numWidth))
         prevWasExpanded = true
       }
       first = false
@@ -1092,8 +1105,12 @@ export class PRBoard {
     const counts = t.dim(`showing ${shown} of ${total}`)
     // Arrows first: they are the one binding every terminal forwards, and on
     // macOS the ctrl+punctuation form never arrives at all.
+    // A key with nowhere to go fades to the muted colour: → on the live page,
+    // ← on the oldest history page.
+    const key = (arrow: string, label: string, live: boolean): string =>
+      live ? `${t.accent(arrow)} ${t.dim(label)}` : t.muted(`${arrow} ${label}`)
     const keys = this.pageCount > 1
-      ? `  ${t.dim('│')}  ${t.accent('←')} ${t.dim('older')}  ${t.accent('→')} ${t.dim('newer')}`
+      ? `  ${t.dim('│')}  ${key('←', 'older', this.page < this.pageCount - 1)}  ${key('→', 'newer', this.page > 0)}`
       : ''
 
     return `  ${position}  ${t.dim('│')}  ${counts}${keys}`
@@ -1101,7 +1118,7 @@ export class PRBoard {
 
   // ── Folded PR slot ─────────────────────────────────────────────────────────
 
-  private renderPRSlotFolded(slot: PRSlot): string {
+  private renderPRSlotFolded(slot: PRSlot, numWidth = 0): string {
     const t = this.theme
     const elapsedMs = (slot.completedAt ?? Date.now()) - slot.startedAt
     const elapsed = fmtDuration(elapsedMs)
@@ -1141,7 +1158,8 @@ export class PRBoard {
     const partsStr = parts.length > 0 ? parts.join(t.dim(' · ')) : t.dim('—')
     const icon = slot.error !== undefined ? t.error('✗') : t.success('✓')
 
-    return `  ${icon} ${t.dim(`#${slot.prNumber}`)}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(`(${elapsed})`)}${urlPart}`
+    const numText = `#${slot.prNumber}`.padEnd(numWidth)
+    return `  ${icon} ${t.dim(numText)}  ${t.dim(fmtEnteredAt(slot.startedAt))}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(`(${elapsed})`)}${urlPart}`
   }
 
   private redraw(): void {
