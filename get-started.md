@@ -331,10 +331,9 @@ handled, not just the ones on screen. The footer says where you are:
 ```
 
 Press `←` to page back through the history and `→` to return to the live page.
-`<` / `>` (and their unshifted `,` / `.`) do the same, as do ctrl+ and option+
-arrows. On macOS use the arrows or the bare `<` / `>`: Terminal.app and iTerm2
-never forward `cmd` to the process, and fn+←/→ scrolls the terminal's own
-scrollback instead. The live page keeps its place while
+The arrows are the only page keys, on Windows, Linux and macOS alike. A key with
+nowhere to go is shown in a muted colour: `→` on the live page, `←` on the
+oldest page. The live page keeps its place while
 you browse: new PR events land on it without yanking you forward. Per-event
 narration (routing decisions, strategy picks) is no longer printed between the
 rows — it goes to the file log at `~/.crosscheck/logs/`, which `crosscheck

@@ -258,46 +258,18 @@ export function isNoticeLine(msg: string): boolean {
 
 export type PageKey = 'older' | 'newer' | null
 
-// Bare `←`/`→` and `<`/`>` (with their unshifted `,`/`.`) always work.
-// Terminals cannot agree on how to report ctrl/cmd with a punctuation key, so
-// every encoding they do emit is accepted: meta-prefixed, CSI-u (kitty / xterm
-// modifyOtherKeys) and modified arrows.
-//
-// macOS needs the extra encodings on the end. It never forwards cmd, and fn+←/→
-// scrolls the terminal's own scrollback rather than reaching the process, so the
-// arrows are the shortcut that works there — including option+←/→, which
-// Terminal.app sends as the readline words `ESC b` / `ESC f` and iTerm2 sends as
-// a doubled escape. `ESC O D/C` is the application-cursor form of a bare arrow,
-// which is what Terminal.app emits while an alternate-screen app has the tty.
-const PAGE_OLDER_KEYS = new Set([
-  '<', ',', '\u001b<', '\u001b,', '\u001b[D', '\u001b[5~',
-  '\u001bb', '\u001b\u001b[D', '\u001bOD',
-])
-const PAGE_NEWER_KEYS = new Set([
-  '>', '.', '\u001b>', '\u001b.', '\u001b[C', '\u001b[6~',
-  '\u001bf', '\u001b\u001b[C', '\u001bOC',
-])
-// eslint-disable-next-line no-control-regex -- the ESC byte is the sequence
-const CSI_U = /^\u001b\[(\d+);\d+u$/          // ESC [ <codepoint> ; <modifiers> u
-// eslint-disable-next-line no-control-regex -- the ESC byte is the sequence
-const CSI_ARROW = /^\u001b\[1;\d+([DC])$/      // ESC [ 1 ; <modifiers> D|C
+// ← / → are the only page keys, on Windows, Linux and macOS alike: every
+// terminal forwards a bare arrow, where modifier and punctuation combinations
+// arrive inconsistently or not at all (macOS never forwards cmd). Each arrow has
+// two encodings: normal cursor mode (`ESC [ D`) and application cursor mode
+// (`ESC O D`), which Terminal.app emits while an alternate-screen app owns the tty.
+const PAGE_OLDER_KEYS = new Set(['\u001b[D', '\u001bOD'])
+const PAGE_NEWER_KEYS = new Set(['\u001b[C', '\u001bOC'])
 
 /** Map a raw stdin key sequence to a page direction, or null when it is not a page key. */
 export function pageKeyAction(seq: string): PageKey {
   if (PAGE_OLDER_KEYS.has(seq)) return 'older'
   if (PAGE_NEWER_KEYS.has(seq)) return 'newer'
-
-  const csiU = CSI_U.exec(seq)
-  if (csiU) {
-    const codepoint = Number(csiU[1])
-    if (codepoint === 44 || codepoint === 60) return 'older'  // , <
-    if (codepoint === 46 || codepoint === 62) return 'newer'  // . >
-    return null
-  }
-
-  const arrow = CSI_ARROW.exec(seq)
-  if (arrow) return arrow[1] === 'D' ? 'older' : 'newer'
-
   return null
 }
 
@@ -1103,8 +1075,6 @@ export class PRBoard {
     // "shown of retained", not of stats.prsReceived: rounds add rows, and the
     // history cap eventually drops the oldest, so the two counts diverge.
     const counts = t.dim(`showing ${shown} of ${total}`)
-    // Arrows first: they are the one binding every terminal forwards, and on
-    // macOS the ctrl+punctuation form never arrives at all.
     // A key with nowhere to go fades to the muted colour: → on the live page,
     // ← on the oldest history page.
     const key = (arrow: string, label: string, live: boolean): string =>
