@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { EventEmitter } from 'events'
-import { PRBoard, fmtTokens, pageKeyAction, isNoticeLine, distribute, fmtUptime } from '../lib/board.js'
+import chalk from 'chalk'
+import { PRBoard, fmtEnteredAt, fmtTokens, pageKeyAction, isNoticeLine, distribute, fmtUptime } from '../lib/board.js'
 import type { Config } from '../config/schema.js'
 import type { WorkflowStep } from '../lib/workflow.js'
 
@@ -440,6 +441,7 @@ describe('PRBoard — history pagination', () => {
   const page = () => (board as unknown as { page: number }).page
   const pageCount = () => (board as unknown as { pageCount: number }).pageCount
   // The footer is the last line — the tip line also names the page keys.
+  const slotsOf = (b: PRBoard) => (b as unknown as { slots: Map<string, unknown> }).slots
   const footerOf = (content: string) => stripAnsi(content).split('\n').at(-1) ?? ''
 
   const addCompleted = (n: number) => {
@@ -505,6 +507,48 @@ describe('PRBoard — history pagination', () => {
     const rows = stripAnsi(invokeRender()).split('\n')
       .reduce((sum, l) => sum + Math.max(1, Math.ceil(l.length / 120)), 0)
     expect(rows).toBeLessThanOrEqual(19)
+  })
+
+  it('mutes the page key that has nowhere to go', () => {
+    const level = chalk.level
+    chalk.level = 3
+    try {
+      addCompleted(60)
+      const rawFooter = () => invokeRender().split('\n').at(-1) ?? ''
+      const muted = (k: string) => chalk.gray.dim(k)
+
+      // Live page: nothing newer, so → fades; ← still leads somewhere.
+      expect(rawFooter()).toContain(muted('→ newer'))
+      expect(rawFooter()).not.toContain(muted('← older'))
+
+      board.pageOlder()
+      expect(rawFooter()).not.toContain(muted('→ newer'))
+      expect(rawFooter()).not.toContain(muted('← older'))
+
+      for (let i = 0; i < 50; i++) board.pageOlder()
+      expect(rawFooter()).toContain(muted('← older'))
+      expect(rawFooter()).not.toContain(muted('→ newer'))
+    } finally {
+      chalk.level = level
+    }
+  })
+
+  it('shows when each PR entered, in a column after the PR number', () => {
+    board.addPR('a', 7, 'acme/api', 'branch-a')
+    board.addPR('b', 4880, 'acme/api', 'branch-b')
+    for (const k of ['a', 'b']) {
+      board.updatePR(k, { verdict: 'APPROVE', commentCount: 0 })
+      board.completePR(k, { elapsedMs: 60_000, url: `https://github.com/acme/api/pull/${k}` })
+    }
+    const rows = stripAnsi(invokeRender()).split('\n').filter(l => l.includes('branch-'))
+    expect(rows).toHaveLength(2)
+    const stampOf = (k: string) => fmtEnteredAt((slotsOf(board).get(k) as { startedAt: number }).startedAt)
+    const [sa, sb] = [stampOf('a'), stampOf('b')]
+    expect(rows[0]).toContain(sa)
+    expect(rows[1]).toContain(sb)
+    // #7 is padded to #4880's width, so the timestamp starts in the same column.
+    expect(rows[0].indexOf(sa)).toBe(rows[1].indexOf(sb))
+    expect(rows[0].indexOf('#7')).toBeLessThan(rows[0].indexOf(sa))
   })
 
   it('has one page when everything fits on the live page', () => {
