@@ -149,3 +149,12 @@ it('rejects stale publication for updated, retargeted and newly closed PRs', () 
   // A manual review of an already-closed PR may still publish.
   expect(() => assertReviewFresh(p, { ...current, state: 'closed' }, p.snapshot.head, p.snapshot.head, 'closed')).not.toThrow()
 })
+
+// The API's base.sha stays at the PR's last sync while the snapshot holds the live
+// base tip, so the two differ whenever the base branch has advanced since then.
+// Nothing moved during the review, and the PR's own diff is unchanged.
+it('publishes when only the base branch advanced', () => {
+  const p = plan()
+  const baseAdvanced = { state: 'open', head: { sha: p.snapshot.head }, base: { sha: 'c'.repeat(40), ref: p.snapshot.baseBranch } }
+  expect(() => assertReviewFresh(p, baseAdvanced, p.snapshot.head)).not.toThrow()
+})
