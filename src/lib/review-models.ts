@@ -24,8 +24,8 @@ export const CODEX_TIER_MODELS_API: Record<QualityConfig['tier'], string> = revi
 /**
  * The tier in force for one call. Under `quality.mode: 'smart'` the per-PR
  * strategy wins; otherwise the single configured tier applies. Falls back to the
- * configured tier whenever no strategy resolved — one-shot commands, or a PR
- * whose file list could not be read.
+ * configured tier whenever no strategy tier is in force: a PR whose file list
+ * could not be read, or a class that names no tier.
  */
 export function effectiveTier(
   quality: QualityConfig,

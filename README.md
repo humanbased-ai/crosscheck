@@ -257,6 +257,8 @@ Classification may set a **floor**, or promote on **consequence** — a security
 
 Class tier, effort, **and** step set are all applied. The class is resolved once per workflow, not per step — the fix step pushes commits, so re-classifying could make the review and recheck comments cite different tiers for the same PR.
 
+`crosscheck review <pr>` classifies the same way and runs at the class's tier and effort. It is an explicit request for one review, so the step set does not apply, and a class that would skip the PR is overridden: the review runs at the configured `quality.tier`, as `crosscheck run --steps review` does.
+
 The step set **narrows** the configured pipeline and never widens it: a repo pinned to review-only with `crosscheck alter` stays review-only whatever the class says.
 
 Rounds beyond the first escalate on measured non-convergence rather than prediction — effort rises where the model supports it, the tier is promoted where it does not, and the model never weakens.
