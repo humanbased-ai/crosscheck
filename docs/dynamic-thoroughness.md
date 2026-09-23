@@ -20,7 +20,8 @@ stale — the weekly `Review Strategy` workflow files an issue when either drift
 **Enforced today:** the `Tier`, `Effort`, and `Steps` columns below all reach the
 run. A class resolving to a null tier (class 1) skips the workflow outright,
 unless an explicit request (`crosscheck review`, `run --steps`) overrides it and
-the step runs at the configured tier; the
+the step runs at the configured tier, with a comment that cites the class and its
+reason but no tier, since the class chose none; the
 per-class step set narrows the configured pipeline (never widens it — a repo
 pinned to review-only stays review-only); and rounds past the first escalate via
 `escalate()`, raising effort where the model supports it and promoting the tier

@@ -790,14 +790,22 @@ export function strategyDeterminedModel(
  * The strategy fields a review comment may cite, or undefined when citing them
  * would name a tier the run did not use. One function so run/watch and
  * `crosscheck review` cannot disagree about when a tier is named.
+ *
+ * Takes the class as matched and the class as run this round, because
+ * resolveRoundExecution fills a null class tier from `quality.tier`. A class
+ * that names no tier only runs when an explicit request overrides its skip, and
+ * then the configured tier ran, not one the class chose — so the class and its
+ * reason are cited with a null tier, which the comment renders without one.
  */
 export function strategyCitation(
   vendor: { model?: string | null },
-  strategy: ResolvedStrategy | null,
+  classStrategy: ResolvedStrategy | null,
+  roundStrategy: ResolvedStrategy | null,
   resolvedModel: string,
-): { version: string; classId: string; tier: string; reason: string } | undefined {
-  if (!strategyDeterminedModel(vendor, strategy, resolvedModel) || !strategy?.tier) return undefined
-  return { version: strategy.version, classId: strategy.classId, tier: strategy.tier, reason: strategy.reason }
+): { version: string; classId: string; tier: string | null; reason: string } | undefined {
+  if (!roundStrategy || !strategyDeterminedModel(vendor, roundStrategy, resolvedModel)) return undefined
+  const tier = classStrategy?.tier === null ? null : roundStrategy.tier
+  return { version: roundStrategy.version, classId: roundStrategy.classId, tier, reason: roundStrategy.reason }
 }
 
 /**
@@ -1530,7 +1538,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           // Withheld when an explicit vendors.*.model overrode the tier map:
           // citing a tier the run did not use would assert a routing decision
           // that never happened.
-          strategyCitation(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, roundStrategy, model),
+          strategyCitation(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, strategy, roundStrategy, model),
         )
         if (memoryPlan && structured?.snapshot) {
           // The review is already posted; a memory write failure only costs the next review its delta.

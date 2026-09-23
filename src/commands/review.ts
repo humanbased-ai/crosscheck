@@ -342,7 +342,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
     await postReviewComment(
       octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort,
-      strategyCitation(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, appliedStrategy, model),
+      strategyCitation(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, strategy, appliedStrategy, model),
     )
     if (memoryPlan && structured?.snapshot) {
       // The review is already posted; a memory write failure only costs the next review its delta.

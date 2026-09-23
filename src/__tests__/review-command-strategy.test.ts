@@ -6,7 +6,8 @@ import { ConfigSchema } from '../config/schema.js'
 import { runReview } from '../commands/review.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runCodexReview } from '../reviewers/codex.js'
-import { postReviewComment } from '../github/client.js'
+import { postReviewComment, buildReviewCommentBody } from '../github/client.js'
+import { parseAnnotation } from '../lib/annotation.js'
 
 // `crosscheck review` classifies from its clone the way run and watch do. Only
 // the network, the locks, and the vendor CLIs are faked: the clone is a real git
@@ -185,6 +186,11 @@ describe('crosscheck review under quality.mode: smart', () => {
     expect(eventsNamed('pr_skipped')).toHaveLength(0)
     expect(printed()).toMatch(/generated would skip this PR .* honouring the explicit review/)
     expect(vi.mocked(postReviewComment)).toHaveBeenCalledTimes(1)
+    // The configured tier ran, not one the class chose, so no tier is cited.
+    expect(citation()).toMatchObject({ classId: 'generated', tier: null })
+    const annotation = parseAnnotation(buildReviewCommentBody({ body: 'x', reviewer: 'claude', model: 'claude-opus-5', strategy: citation() }))
+    expect(annotation?.class).toBe('generated')
+    expect(annotation?.tier).toBeUndefined()
   })
 
   it('falls back to the configured tier, and says so, when the diff cannot be read', async () => {

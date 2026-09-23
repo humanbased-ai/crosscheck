@@ -440,18 +440,30 @@ describe('strategyCitation', () => {
   const strat = { version: '1.2.0', classId: 'risky', classLabel: 'Risky', reason: 'security path', tier: 'thorough' as const, effort: 'high', steps: [], domain: 'backend' as const }
 
   it('cites version, class, tier, and reason when the strategy picked the model', () => {
-    expect(strategyCitation({ model: null }, strat, 'claude-opus-5'))
+    expect(strategyCitation({ model: null }, strat, strat, 'claude-opus-5'))
       .toEqual({ version: '1.2.0', classId: 'risky', tier: 'thorough', reason: 'security path' })
   })
 
-  it('cites nothing when a pinned model, fixed mode, or the CLI default decided', () => {
-    expect(strategyCitation({ model: 'claude-sonnet-5' }, strat, 'claude-sonnet-5')).toBeUndefined()
-    expect(strategyCitation({ model: null }, null, 'claude-opus-5')).toBeUndefined()
-    expect(strategyCitation({ model: null }, strat, 'default')).toBeUndefined()
+  // An escalated round ran a promoted tier; the comment names the tier that ran.
+  it('cites the round tier, not the class tier, once a round escalates', () => {
+    const promoted = { ...strat, tier: 'thorough' as const }
+    expect(strategyCitation({ model: null }, { ...strat, tier: 'balanced' }, promoted, 'claude-opus-5')?.tier).toBe('thorough')
   })
 
-  it('cites nothing for a strategy with no tier in force', () => {
-    expect(strategyCitation({ model: null }, { ...strat, tier: null }, 'claude-opus-5')).toBeUndefined()
+  it('cites nothing when a pinned model, fixed mode, or the CLI default decided', () => {
+    expect(strategyCitation({ model: 'claude-sonnet-5' }, strat, strat, 'claude-sonnet-5')).toBeUndefined()
+    expect(strategyCitation({ model: null }, null, null, 'claude-opus-5')).toBeUndefined()
+    expect(strategyCitation({ model: null }, strat, strat, 'default')).toBeUndefined()
+  })
+
+  // resolveRoundExecution fills a null class tier from quality.tier, so the round
+  // strategy carries `fast` here. That tier is the config's, not the class's, and
+  // citing it would claim the generated class chose it.
+  it('cites the class without a tier when the class named none', () => {
+    const generated = { ...strat, classId: 'generated', reason: 'generated only', tier: null }
+    const filled = { ...generated, tier: 'fast' as const }
+    expect(strategyCitation({ model: null }, generated, filled, 'claude-haiku-4-5-20251001'))
+      .toEqual({ version: '1.2.0', classId: 'generated', tier: null, reason: 'generated only' })
   })
 })
 
@@ -466,6 +478,19 @@ describe('annotation round-trips the citation', () => {
     expect(parsed?.strategy).toBe('1.0.0')
     expect(parsed?.class).toBe('risky')
     expect(parsed?.tier).toBe('thorough')
+  })
+
+  it('names the class but no tier when the class selects none', () => {
+    const body = buildReviewCommentBody({
+      body: 'findings', reviewer: 'claude', origin: 'codex', verdict: 'APPROVE',
+      model: 'claude-haiku-4-5-20251001', stepType: 'review', round: 1,
+      strategy: { version: '1.2.0', classId: 'generated', tier: null, reason: 'generated only' },
+    })
+    const parsed = parseAnnotation(body)
+    expect(parsed?.class).toBe('generated')
+    expect(parsed?.tier).toBeUndefined()
+    expect(body).not.toMatch(/tier=/)
+    expect(body).toContain('_generated only · strategy v1.2.0_')
   })
 })
 
