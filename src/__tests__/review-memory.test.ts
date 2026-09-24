@@ -85,10 +85,48 @@ describe('review memory', () => {
     await published([{ ...issue, evidence: 'x'.repeat(4000) }]); commit('screen.ts', 'export const label = "third"')
     const p = plan(); expect(p.instructions).not.toContain('x'.repeat(501)); expect(p.instructions).toContain('x'.repeat(500))
   })
-  it('does not allow an open finding to vanish or a new finding to start resolved', async () => {
+  it('does not allow an open finding to vanish, and drops a closed finding with nothing to close', async () => {
     await published(); commit('screen.ts', 'export const label = "third"'); const p = plan()
     expect(() => finishReview(p, report([]))).toThrow('omitted')
-    expect(() => finishReview(p, report([issue, { ...issue, key: 'new', status: 'resolved' }]))).toThrow('cannot start')
+    const review = finishReview(p, report([issue, { ...issue, key: 'new', status: 'resolved' }]))
+    expect(review.snapshot.report.findings.map(f => f.key)).toEqual(['missing-label'])
+    expect(review.adjustments).toEqual([expect.stringContaining('dropped resolved finding new')])
+  })
+  it('matches a resolved finding to its prior by key when the fix landed in another file', async () => {
+    await published([{ ...issue, priority: 'P1' }]); commit('screen.ts', 'export const label = "third"'); const p = plan()
+    const moved = { ...issue, priority: 'P1', path: 'main.ts', line: 268, status: 'resolved', evidence: 'main.ts now assigns the label' }
+    const fresh = { ...issue, key: 'secret-leak', path: 'chain.ts', line: 715, priority: 'P1', title: 'Error body leaks the RPC key' }
+    const review = finishReview(p, report([moved, fresh]))
+    expect(review.text).toContain('VERDICT: BLOCK')
+    const byKey = Object.fromEntries(review.snapshot.report.findings.map(f => [f.key, f]))
+    expect(byKey['missing-label']).toMatchObject({ path: 'screen.ts', line: 1, status: 'resolved' })
+    expect(findingId(byKey['missing-label'])).toBe(findingId(issue))
+    expect(byKey['secret-leak'].status).toBe('open')
+    expect(review.adjustments).toEqual([expect.stringContaining('matched the prior finding at screen.ts')])
+  })
+  it('drops a closed finding in a review with no prior report instead of discarding the review', () => {
+    const review = finishReviewOrFallback(plan(), report([{ ...issue, key: 'already-fixed', status: 'resolved' }, issue]))
+    expect(review.fallbackReason).toBeUndefined()
+    expect(review.text).toContain('VERDICT: NEEDS WORK')
+    expect(review.snapshot?.report.findings.map(f => f.key)).toEqual(['missing-label'])
+  })
+  it('does not guess between prior findings that share a key', async () => {
+    const other = { ...issue, path: 'other.ts' }
+    await published([issue, other]); commit('screen.ts', 'export const label = "third"')
+    const review = finishReview(plan(), report([issue, other, { ...issue, path: 'third.ts', status: 'resolved' }]))
+    expect(review.snapshot.report.findings.map(f => f.path)).toEqual(['screen.ts', 'other.ts'])
+    expect(review.adjustments).toEqual([expect.stringContaining('dropped resolved finding missing-label at third.ts')])
+  })
+  it('prefers an exact identity match over a key match for the same prior finding', async () => {
+    await published(); commit('screen.ts', 'export const label = "third"')
+    const review = finishReview(plan(), report([{ ...issue, status: 'resolved' }, { ...issue, path: 'main.ts', status: 'resolved' }]))
+    expect(review.snapshot.report.findings).toEqual([expect.objectContaining({ path: 'screen.ts', status: 'resolved' })])
+    expect(review.adjustments).toEqual([expect.stringContaining('dropped resolved finding missing-label at main.ts')])
+  })
+  it('still refuses an incremental dismissal of a prior open finding matched by key', async () => {
+    await published(); commit('screen.ts', 'export const label = "third"'); const p = plan()
+    expect(p.mode).toBe('incremental')
+    expect(() => finishReview(p, report([{ ...issue, path: 'main.ts', status: 'dismissed' }]))).toThrow('cannot be dismissed')
   })
   it('requires valid complete structured output, including nonempty evidence', () => {
     expect(() => finishReview(plan(), 'VERDICT: APPROVE')).toThrow()

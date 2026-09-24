@@ -279,6 +279,9 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     if (activatedSkills.length > 0) console.log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
     const structured = memoryPlan ? finishReviewOrFallback(memoryPlan, reviewText) : undefined
     if (structured) reviewText = structured.text
+    if (structured?.adjustments?.length) {
+      fileLog({ level: 'info', event: 'structured_review_reconciled', repo: `${owner}/${repo}`, pr: number, reviewer, adjustments: structured.adjustments })
+    }
     if (structured?.fallbackReason) {
       fileLog({ level: 'warn', event: 'structured_review_fallback', repo: `${owner}/${repo}`, pr: number, reviewer, reason: structured.fallbackReason })
       console.log(chalk.yellow(`  structured review unusable (${structured.fallbackReason}) — posting raw output without a verdict`))
