@@ -71,7 +71,9 @@ quality:
   tier: balanced            # fast | balanced | thorough
   #
   # Under `fixed` this is the tier for every call. Under `smart` it is the
-  # fallback used when a PR's file list cannot be read.
+  # fallback used when a PR's file list cannot be read, and when an explicit
+  # request (`crosscheck review`, `run --steps`) overrides a class that would
+  # skip the PR.
   #
   # Cost is output-token cost at 48k output tokens, the measured median for one
   # review. A review is an agentic session, so it takes 10-16 minutes of wall

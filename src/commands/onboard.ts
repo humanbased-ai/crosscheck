@@ -304,7 +304,7 @@ async function promptQualityTier(
   console.log()
 
   // Under smart the tier still matters: it is the fallback whenever a PR's file
-  // list can't be read (one-shot commands, API failures).
+  // list can't be read from its clone.
   return idx === 0
     ? { tier: fallbackTier, mode: 'smart' }
     : { tier: tiers[idx - 1], mode: 'fixed' }
@@ -689,7 +689,7 @@ export function applyOnboardConfig(
   // model resolves from the strategy instead.
   //
   // `tier` is written in both modes. Under smart it is the fallback for PRs
-  // whose file list can't be read (one-shot commands, API failures).
+  // whose file list can't be read from their clone.
   if (!raw.quality || typeof raw.quality !== 'object') raw.quality = {}
   const qualityRaw = raw.quality as Record<string, unknown>
   qualityRaw.tier = qualityTier

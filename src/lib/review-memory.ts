@@ -266,16 +266,23 @@ export async function savePublishedReview(plan: ReviewPlan, snapshot: Snapshot):
  * Refuses to publish when the PR moved during the review. `expectedState` is the
  * state the review started from, so a manual review of a closed or merged PR can
  * still post, while an open PR closed mid-review is rejected.
+ *
+ * The base sha is deliberately not compared. The API's `base.sha` is frozen at the
+ * PR's last sync, while the snapshot holds the base branch tip fetched for this
+ * review, so the two differ whenever the base has advanced since the PR was last
+ * pushed — with nothing having moved during the review. Nor does a base advancing
+ * invalidate the review: it judged the PR's own diff, which the base moving does
+ * not change. A retarget does change that diff, so `base.ref` is still compared.
  */
 export function assertReviewFresh(
   plan: ReviewPlan,
-  current: { state: string; head: { sha: string }; base: { sha: string; ref: string } },
+  current: { state: string; head: { sha: string }; base: { ref: string } },
   annotatedSha: string,
   expectedHead: string | null = plan.snapshot.head,
   expectedState = 'open',
 ): void {
   if (current.state !== expectedState || current.head.sha !== expectedHead || annotatedSha !== plan.snapshot.head
-    || current.base.sha !== plan.snapshot.base || current.base.ref !== plan.snapshot.baseBranch) {
+    || current.base.ref !== plan.snapshot.baseBranch) {
     throw new Error('PR changed during review; refusing to publish a stale verdict')
   }
 }

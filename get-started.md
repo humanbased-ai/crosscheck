@@ -327,14 +327,14 @@ When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned 
 handled, not just the ones on screen. The footer says where you are:
 
 ```
-  live · page 1/4  │  showing 18 of 61  │  ← older  → newer
+  live · page 1/4  │  showing 18 of 61  │  ← newer  → older
 ```
 
-Press `←` to page back through the history and `→` to return to the live page.
-`<` / `>` (and their unshifted `,` / `.`) do the same, as do ctrl+ and option+
-arrows. On macOS use the arrows or the bare `<` / `>`: Terminal.app and iTerm2
-never forward `cmd` to the process, and fn+←/→ scrolls the terminal's own
-scrollback instead. The live page keeps its place while
+Press `→` to page back through older history and `←` to return toward the newer
+PRs on the live page.
+The arrows are the only page keys, on Windows, Linux and macOS alike. A key with
+nowhere to go is shown in a muted colour: `←` on the live page, `→` on the
+oldest page. The live page keeps its place while
 you browse: new PR events land on it without yanking you forward. Per-event
 narration (routing decisions, strategy picks) is no longer printed between the
 rows — it goes to the file log at `~/.crosscheck/logs/`, which `crosscheck
@@ -1409,6 +1409,11 @@ repo pinned to review-only with `crosscheck alter` stays review-only. Rounds pas
 the first escalate on measured non-convergence: effort rises where the model
 supports it, the tier is promoted where it does not.
 
+`crosscheck review <pr>` classifies the same way and runs at the class's tier and
+effort. It is an explicit request for one review, so the step set does not apply,
+and a class that would skip the PR is overridden: the review runs at the
+configured `quality.tier`, as `crosscheck run --steps review` does.
+
 Note that classes 3 and 4 narrow to `review` alone, which also drops
 `conflict-resolve` — review-only never touches code, and auto-conflict-resolve
 is code modification. That rule normally follows an operator's explicit
@@ -1434,7 +1439,8 @@ Verify the policy is current with `npm run verify:strategy`. Full rationale:
 ### Quality tiers
 
 Under `fixed`, the tier applies to every call. Under `smart`, it is the fallback
-when a PR's file list cannot be read.
+when a PR's file list cannot be read, and when an explicit request (`crosscheck
+review`, `run --steps`) overrides a class that would skip the PR.
 
 | Tier | Claude | Codex | Cost per review | Best for |
 |---|---|---|---|---|
