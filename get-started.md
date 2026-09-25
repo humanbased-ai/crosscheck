@@ -323,6 +323,23 @@ Waiting for PR events — Ctrl+C to stop.
 
 When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned up automatically.
 
+**Browsing the session history.** The live board holds every PR the session has
+handled, not just the ones on screen. The footer says where you are:
+
+```
+  live · page 1/4  │  showing 18 of 61  │  ← newer  → older
+```
+
+Press `→` to page back through older history and `←` to return toward the newer
+PRs on the live page.
+The arrows are the only page keys, on Windows, Linux and macOS alike. A key with
+nowhere to go is shown in a muted colour: `←` on the live page, `→` on the
+oldest page. The live page keeps its place while
+you browse: new PR events land on it without yanking you forward. Per-event
+narration (routing decisions, strategy picks) is no longer printed between the
+rows — it goes to the file log at `~/.crosscheck/logs/`, which `crosscheck
+status` points at.
+
 **Token scope for org webhooks:** `GITHUB_TOKEN` needs `write:org` scope for org-level coverage. For repo-level, `repo` scope is sufficient.
 
 **Review-only for a repo:** make a repo post reviews and nothing else with `crosscheck alter <repo> --review-only` — crosscheck never runs the fix, recheck, or conflict-resolve steps for it, and never pushes commits to its PRs:
@@ -566,6 +583,7 @@ crosscheck review https://github.com/owner/repo/pull/245,https://github.com/othe
 | `--concurrent [n]` | Multi-PR: cap parallel agents; omit `n` for one agent per PR (default) |
 | `--sequential` | Multi-PR: run PRs one at a time instead of in parallel |
 | `--stagger <ms>` | Multi-PR: delay between concurrent worker starts (default 2000) |
+| `--force` | Review even when this commit is already approved |
 | `-c, --config <path>` | Use a specific config file |
 
 ---
@@ -757,7 +775,8 @@ Uses `localhost.run` (SSH) to open a public tunnel — SSH is pre-installed on m
 | `-c, --config <path>` | Use a specific config file |
 | `--personal` / `--team` | Override the saved deployment mode for this session only |
 | `--reconfigure` | Re-run deployment setup and save the new choice |
-| `--backtrace` / `--no-backtrace` | Force on/off the startup scan for unreviewed open PRs |
+| `--backtrace` / `--no-backtrace` | Force on/off the scan for unreviewed open PRs |
+| `--backtrace-interval <min>` | Minutes between backtrace re-scans this session (`0` = startup only) |
 
 ---
 
@@ -1165,6 +1184,8 @@ mode: cross-vendor
 # Pick https if you have multi-account SSH setup or your default SSH key
 # cannot access target repos. Independent of `gh config get git_protocol`.
 clone_protocol: ssh
+# Reuse fetched Git objects; set false to always clone from scratch.
+repository_cache: true
 
 # ── Vendors ───────────────────────────────────────────────────────────────────
 vendors:
@@ -1183,6 +1204,8 @@ vendors:
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:
+  # Structured findings and incremental follow-ups; set false for legacy prose reviews.
+  review_memory: true
   mode: smart               # smart (default) | fixed — see Review thoroughness
   tier: balanced            # fast | balanced | thorough (fallback under smart)
   focus:                    # narrows review scope (optional)
@@ -1318,14 +1341,22 @@ post_review:
 #     timeout_min: 30     # minutes of no PR activity before the idle prompt fires (min: 5)
 
 # ── Backtrace ─────────────────────────────────────────────────────────────────
-# On startup, scan all open PRs in the monitored scope and review any that
-# haven't received a [crosscheck] comment yet. Off by default.
+# Scan all open PRs in the monitored scope and review any that haven't received
+# a [crosscheck] comment yet. Off by default.
 # Enable with:
 #   backtrace.enabled: true  (persistent — runs every startup)
 #   --backtrace flag         (this session only)
 #   --no-backtrace flag      (suppress even when enabled: true)
+#
+# interval_min re-runs the scan while watch is up. Webhooks are the fast path,
+# not a guarantee — a PR opened while watch was down, an org hook that failed to
+# register, or a smee reconnect gap leaves a PR no future event will mention.
+# The recurring scan is what finds those. concurrency caps how many reviews it
+# starts at once; unbounded fan-out is what exhausts a reviewer subscription.
 # backtrace:
 #   enabled: true
+#   interval_min: 30    # re-scan every N minutes; 0 = startup only (default)
+#   concurrency: 2      # max reviews started at once (default 2)
 
 # ── Server ────────────────────────────────────────────────────────────────────
 server:
@@ -1378,6 +1409,11 @@ repo pinned to review-only with `crosscheck alter` stays review-only. Rounds pas
 the first escalate on measured non-convergence: effort rises where the model
 supports it, the tier is promoted where it does not.
 
+`crosscheck review <pr>` classifies the same way and runs at the class's tier and
+effort. It is an explicit request for one review, so the step set does not apply,
+and a class that would skip the PR is overridden: the review runs at the
+configured `quality.tier`, as `crosscheck run --steps review` does.
+
 Note that classes 3 and 4 narrow to `review` alone, which also drops
 `conflict-resolve` — review-only never touches code, and auto-conflict-resolve
 is code modification. That rule normally follows an operator's explicit
@@ -1403,7 +1439,8 @@ Verify the policy is current with `npm run verify:strategy`. Full rationale:
 ### Quality tiers
 
 Under `fixed`, the tier applies to every call. Under `smart`, it is the fallback
-when a PR's file list cannot be read.
+when a PR's file list cannot be read, and when an explicit request (`crosscheck
+review`, `run --steps`) overrides a class that would skip the PR.
 
 | Tier | Claude | Codex | Cost per review | Best for |
 |---|---|---|---|---|
@@ -1767,3 +1804,56 @@ The authoring agent has the most context about its own code — the same style, 
 ### Does optimize run automatically?
 
 No — `crosscheck optimize` is always user-triggered. You run it when you want to improve instructions. There is no background daemon or scheduled job. A future version may add an optional `--schedule` mode, but the default will always be manual to keep you in control of what gets written to `~/.crosscheck/workflow.yml`.
+
+
+### Review efficiency (enabled by default)
+
+`repository_cache` and `quality.review_memory` default to `true`, including
+existing configs that omit them. They reuse Git objects and retain structured
+findings across reviews. Set either option to `false` to disable it. Both
+work with `review`, `run`/`recheck`, and `watch`; no CLI flags change.
+
+The repository cache lives in `~/.crosscheck/repository-cache`. It fetches the
+PR head under a per-repository lock and makes an independent checkout with no
+hardlinks or object alternates. Cache credentials are never stored: only the
+temporary checkout has the authenticated remote URL, as before. A cold fetch
+still costs network time; concurrent preparation for the same repository waits
+for the lock. A lock whose owning process has exited (or that is older than 30
+minutes) is broken automatically. The cache fetch uses the same network retries
+as a fresh clone; if the cache fails anyway it is discarded and the review falls
+back to a fresh clone. Caches unused for 30 days are pruned. Disable the option
+to always use fresh clones.
+
+Review memory lives in `~/.crosscheck/review-memory`, keyed by repository and PR.
+It is saved only after publication. First reviews are full reviews. Small
+descendant changes on the same base and quality policy receive the previous
+findings and a delta-first review brief, including affected callers and new
+regressions. Missing/corrupt history, rewritten history, changed bases/policies,
+binary changes, more than 20 changed files or 600 changed lines, a still-open
+P0/P1 finding, and sensitive path matches trigger full review. If the base ref
+cannot be resolved, the review runs without memory. Path matching is conservative routing, not
+a proof of low risk; the reviewer can always expand to the full PR. The memory
+is local to this machine and cannot reuse reviews from another host.
+
+The model returns validated JSON with evidence and stable semantic finding keys.
+Every previously open finding must remain open or have an explicit resolved or
+dismissed entry; an incremental review may resolve a previous finding but may
+not dismiss it or lower its priority. Previous findings replayed into the prompt
+are truncated and capped in size. Missing findings, duplicate identities,
+malformed JSON, and incomplete coverage never approve: crosscheck posts the raw
+output with a warning and no verdict, and saves no memory. Open P0/P1 findings produce
+BLOCK, open P2 findings NEEDS WORK, and P3-only/empty findings APPROVE, subject
+to the existing documentation-only policy. Existing prose reviews are unaffected.
+
+A new PR head/base, or an open PR closed during the review, detected before
+publication rejects the stale review; it does not save a new memory snapshot.
+Manual reviews of an already-closed PR still post. When two reviews of one PR
+finish concurrently, the slower one does not overwrite a snapshot published
+while it ran. There remains an API race between
+that check and posting, so comments always identify the reviewed SHA. This does
+not add a global scheduler lock or change poll frequency. Review memory is not
+pruned; remove `~/.crosscheck/review-memory` while workers are stopped to
+reclaim space.
+
+This is an efficiency mechanism, not a guarantee of defect detection. Validate
+latency and recall on representative historical PRs before fleet-wide rollout.

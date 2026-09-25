@@ -3,6 +3,7 @@ import type { QualityConfig, VendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { primaryModelFromUsage, resolveClaudeModel } from '../lib/review-models.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
+import { vendorFailureSummary } from '../lib/vendor-error-summary.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
@@ -185,7 +186,7 @@ export async function runClaudeReview(
       const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
       const summary = execa.timedOut
         ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large`
-        : (rawStderr.split('\n').filter(Boolean).at(-1)) ?? execa.message ?? 'unknown error'
+        : vendorFailureSummary(execa)
       const thrown = Object.assign(new Error(`claude: ${summary}`), {
         exitCode: execa.exitCode,
         timedOut: execa.timedOut,

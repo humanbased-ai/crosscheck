@@ -6,6 +6,28 @@ import { fetchPRCommentPage, fetchPRCommitPage, type RawPRComment, type RawPRCom
 
 export type StepRecordType = 'review' | 'recheck' | 'fix' | 'conflict-resolve'
 
+// PR history is what decides whether a step runs at all — the approval stop, the
+// per-SHA dedup, the resume point. Acting without it means posting a duplicate review
+// or modifying an already-approved commit, so callers fail closed rather than assume an
+// empty history. One short retry first: the usual cause is a transient GitHub blip or a
+// rate-limit tick, and deferring the event strands the PR until something else happens.
+export const HISTORY_RETRY_DELAY_MS = 3_000
+
+export async function fetchStepHistoryWithRetry(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+  delayMs: number = HISTORY_RETRY_DELAY_MS,
+): Promise<StepRecord[]> {
+  try {
+    return await fetchStepHistory(owner, repo, prNumber, token)
+  } catch {
+    await new Promise(resolve => setTimeout(resolve, delayMs))
+    return await fetchStepHistory(owner, repo, prNumber, token)
+  }
+}
+
 export interface StepRecord {
   type: StepRecordType
   /** APPROVE | NEEDS_WORK | BLOCK — from annotation or parsed from body */

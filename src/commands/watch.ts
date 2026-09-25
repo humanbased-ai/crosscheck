@@ -36,9 +36,9 @@ import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
-import { fetchStepHistory, identifyNextWorkflowStep, decideReviewOnly, type StepRecord } from '../lib/pr-workflow-state.js'
+import { fetchStepHistoryWithRetry, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
-import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
+import { PRBoard, fmtTime, FMT_TIME_WIDTH, isNoticeLine } from '../lib/board.js'
 import { clonePRForReview, BaseRefUnavailableError } from '../lib/clone.js'
 import { resolveLinearAuth, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import {
@@ -60,10 +60,61 @@ import { PersistentShaSet } from '../lib/sha-cache.js'
 import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
 import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
-import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
+import { checkRemoteLock, claimRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
 
 const WEBHOOK_EVENTS = ['pull_request', 'issue_comment']
+
+// How often the pending-event drain retries a PR whose lock is held elsewhere,
+// and how many times before the event is given up on. The local lock goes stale
+// after 20 min, so 60 attempts at 60s covers a lock abandoned by a crashed peer
+// with room to spare.
+const DRAIN_INTERVAL_MS = 60_000
+const MAX_DRAIN_ATTEMPTS = 60
+
+interface ReviewPRParams {
+  owner: string
+  repoName: string
+  prNumber: number
+  title: string
+  body: string | null
+  author: string
+  headSha: string
+  headRef: string
+  headRepo: string | null
+  baseRef: string
+  action: string
+  // Base commit from the PR payload — the fallback that keeps a PR reviewable
+  // after its base branch is deleted or renamed. Optional: the backtrace path
+  // builds params from a scan result that carries no base sha, and the clone's
+  // merge-ref recovery covers that case.
+  baseSha?: string
+  // Feed the review strategy's `risky` class: without these its `or_labels`
+  // (risk:T3) and `or_hotfix_to_default_branch` rules can never fire.
+  labels?: string[]
+  defaultBranch?: string
+  // ISO timestamp the PR was opened — feeds the open→verdict latency metric.
+  createdAt?: string
+}
+
+// Run tasks with at most `limit` in flight. Rejections are contained per task so
+// one failing review never cancels the rest of a sweep.
+export async function runWithConcurrency(
+  tasks: Array<() => Promise<void>>,
+  limit: number,
+): Promise<void> {
+  let next = 0
+  const workers = Array.from({ length: Math.min(Math.max(limit, 1), tasks.length) }, async () => {
+    // Bounded worker pool: each worker pulls the next task only after its current
+    // one settles, so the awaits are intentionally sequential per worker.
+    while (next < tasks.length) {
+      const task = tasks[next++]
+      if (!task) return
+      try { await task() } catch { /* per-task errors are logged by the task itself */ }
+    }
+  })
+  await Promise.all(workers)
+}
 
 function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
   return {
@@ -177,27 +228,8 @@ export interface WatchOpts {
   reconfigure?: boolean
   port?: number
   backtrace?: boolean
-}
-
-// PR history is what decides whether a step runs at all — the approval stop, the
-// per-SHA dedup, the resume point. Acting without it means posting a duplicate review
-// or modifying an already-approved commit, so callers fail closed rather than assume an
-// empty history. One short retry first: the usual cause is a transient GitHub blip or a
-// rate-limit tick, and deferring the event strands the PR until something else happens.
-const HISTORY_RETRY_DELAY_MS = 3_000
-
-async function fetchStepHistoryWithRetry(
-  owner: string,
-  repo: string,
-  prNumber: number,
-  token: string,
-): Promise<StepRecord[]> {
-  try {
-    return await fetchStepHistory(owner, repo, prNumber, token)
-  } catch {
-    await new Promise(resolve => setTimeout(resolve, HISTORY_RETRY_DELAY_MS))
-    return await fetchStepHistory(owner, repo, prNumber, token)
-  }
+  /** Minutes between backtrace re-scans this session; overrides backtrace.interval_min. */
+  backtraceIntervalMin?: number
 }
 
 export async function runWatch(opts: WatchOpts = {}) {
@@ -276,6 +308,14 @@ export async function runWatch(opts: WatchOpts = {}) {
     fileLog({ level: 'info', event: 'message', message: line2 ? `${line1} ${line2}` : line1 })
   }
 
+  // Routine per-PR narration (event received, routing decision, strategy pick)
+  // goes to the file log only. The board's paginated workspace is the session
+  // record now; interleaving the same events into scrollback between PR rows is
+  // what made the terminal unreadable.
+  const eLog = (line1: string, line2?: string) => {
+    fileLog({ level: 'info', event: 'message', message: line2 ? `${line1} ${line2}` : line1 })
+  }
+
   // Connectivity events (tunnel/webhook) go into the live connectivity section
   const cLog = (line: string) => {
     board.logConnectivity(line)
@@ -300,29 +340,28 @@ export async function runWatch(opts: WatchOpts = {}) {
   // verdict this watcher is meant to act on — history detection decides how.
   const handledCommentIds = new Set<number>()
 
+  // Events that arrived while the same PR was already being reviewed (by this
+  // process or another one holding the lock). A review takes minutes, so a push
+  // landing inside that window used to be dropped outright and no later event
+  // ever mentioned that SHA again. Keyed by PR — only the newest event per PR is
+  // worth replaying, since it carries the head SHA that supersedes the others.
+  const pendingEvents = new Map<string, { params: ReviewPRParams; attempts: number }>()
+  let drainIntervalRef: ReturnType<typeof setInterval> | null = null
+
   // Idle tracking — reset on any PR activity; used by the idle-issue timer.
   let lastActivityAt = Date.now()
   let idleAnalysisRunning = false
   let idleIntervalRef: ReturnType<typeof setInterval> | null = null
+  let backtraceIntervalRef: ReturnType<typeof setInterval> | null = null
 
-  async function reviewPR(params: {
-    owner: string; repoName: string; prNumber: number; title: string;
-    body: string | null; author: string; headSha: string; headRef: string;
-    headRepo: string | null; baseRef: string; action: string;
-    // Base commit from the PR payload — the fallback that keeps a PR reviewable
-    // after its base branch is deleted or renamed. Optional: the backtrace path
-    // builds params from a scan result that carries no base sha, and the clone's
-    // merge-ref recovery covers that case.
-    baseSha?: string;
-    // Feed the review strategy's `risky` class: without these its `or_labels`
-    // (risk:T3) and `or_hotfix_to_default_branch` rules can never fire.
-    labels?: string[]; defaultBranch?: string;
-    // ISO timestamp the PR was opened — feeds the open→verdict latency metric.
-    createdAt?: string;
-  }): Promise<void> {
+  async function reviewPR(params: ReviewPRParams): Promise<void> {
     lastActivityAt = Date.now()  // reset idle timer on any PR event
     const { owner, repoName, prNumber } = params
     const key = `${owner}/${repoName}#${prNumber}@${params.headSha}`
+    // Set when this invocation lost the PR lock and queued its event. Draining
+    // from that same invocation's `finally` would replay the event immediately
+    // against a lock that is still held, spinning until the holder finishes.
+    let requeued = false
     if (inFlight.has(key)) return
     inFlight.add(key)
 
@@ -360,7 +399,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       const ts = chalk.dim(fmtTime())
       const tsIndent = ' '.repeat(FMT_TIME_WIDTH + 2)
       const modeNote = ss.active ? chalk.yellow(' [smart-switch]') : ''
-      bLog(
+      eLog(
         `${ts}  PR #${prNumber} ${params.action}  ${chalk.dim(params.title)}`,
         `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}${modeNote}`
       )
@@ -384,6 +423,8 @@ export async function runWatch(opts: WatchOpts = {}) {
 
       if (!acquirePRLock(owner, repoName, prNumber, params.headSha)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_local' })
+        queuePendingEvent(params, 'in_progress_local')
+        requeued = true
         return
       }
 
@@ -391,10 +432,22 @@ export async function runWatch(opts: WatchOpts = {}) {
       if (await checkRemoteLock(lockOctokit, owner, repoName, params.headSha)) {
         releasePRLock(owner, repoName, prNumber, params.headSha)
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_remote' })
+        queuePendingEvent(params, 'in_progress_remote')
+        requeued = true
         return
       }
+      // The local lock is held and no peer claims this SHA — the review is going
+      // ahead, so any queued replay of it has served its purpose.
+      clearPendingEvent(params)
+
       try {
-        await acquireRemoteLock(lockOctokit, owner, repoName, params.headSha)
+        if (!await claimRemoteLock(lockOctokit, owner, repoName, params.headSha)) {
+          // Another instance claimed this commit inside the check-then-act window.
+          // Leave its claim standing and stand down.
+          releasePRLock(owner, repoName, prNumber, params.headSha)
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'lost_remote_claim', sha: params.headSha })
+          return
+        }
       } catch (err: unknown) {
         releasePRLock(owner, repoName, prNumber, params.headSha)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'lock' }, err)
@@ -610,9 +663,10 @@ export async function runWatch(opts: WatchOpts = {}) {
 
         const { baseRefStatus } = await clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef, baseSha: params.baseSha,
-          tmpDir, token, protocol: config.clone_protocol,
+          tmpDir, token, protocol: config.clone_protocol, repositoryCache: config.repository_cache,
           onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef }),
           onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef, via: status }),
+          onCacheFailed: message => fileLog({ level: 'warn', event: 'repository_cache_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: message }),
         })
         // Fail closed rather than review a PR whose diff cannot be computed: the
         // vendor would answer "could not review" and that answer would become a
@@ -641,7 +695,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           const prevShort = prev.sha.slice(0, 7)
           const nowShort = params.headSha.slice(0, 7)
           fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_diff_change', sha: params.headSha, prev_sha: prev.sha })
-          bLog(
+          eLog(
             `${chalk.dim(fmtTime())}  PR #${prNumber} ${params.action}  ${chalk.dim('no diff change since last review')}`,
             `${' '.repeat(FMT_TIME_WIDTH + 2)}prev=${chalk.dim(prevShort)} → ${chalk.dim(nowShort)}  ${chalk.dim('(skipped)')}`,
           )
@@ -671,7 +725,11 @@ export async function runWatch(opts: WatchOpts = {}) {
           tmpDir, token, config: effectiveConfig, origin,
           linearAuth,
           reviewStart,
-          log: (msg: string) => bLog(`${chalk.dim(fmtTime())}  ${msg}`),
+          log: (msg: string) => {
+            const line = `${chalk.dim(fmtTime())}  ${msg}`
+            if (isNoticeLine(msg)) bLog(line)
+            else eLog(line)
+          },
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
           crosscheckShas,
           smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
@@ -735,7 +793,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         // A class-skipped PR (e.g. lockfile-only) never ran a review, so say so
         // rather than reporting it as a completed one.
         if (strategySkipped) {
-          bLog(`${chalk.dim(fmtTime())}  ${chalk.dim(`PR #${prNumber} skipped — ${strategySkipped} class, nothing to review`)}`)
+          eLog(`${chalk.dim(fmtTime())}  ${chalk.dim(`PR #${prNumber} skipped — ${strategySkipped} class, nothing to review`)}`)
         }
         board.completePR(key, {
           elapsedMs: Date.now() - reviewStart,
@@ -826,7 +884,80 @@ export async function runWatch(opts: WatchOpts = {}) {
       logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'setup' }, err)
     } finally {
       inFlight.delete(key)
+      // Only drain when this invocation actually ran (or attempted) a review. A
+      // call that just queued its event is retried by the timer, which counts
+      // attempts, or by the lock holder's own `finally`.
+      if (!requeued) drainPendingEvent(`${owner}/${repoName}#${prNumber}`)
     }
+  }
+
+  // Hold the newest event for a PR whose lock was taken. Overwriting is the point:
+  // an older queued SHA is already superseded by the one arriving now. The retry
+  // count survives a re-queue of the same SHA — a redispatch that loses the lock
+  // again lands back here, and resetting the count there would uncap the retries.
+  function queuePendingEvent(params: ReviewPRParams, reason: string): void {
+    const prKey = `${params.owner}/${params.repoName}#${params.prNumber}`
+    const existing = pendingEvents.get(prKey)
+    const attempts = existing !== undefined && existing.params.headSha === params.headSha
+      ? existing.attempts
+      : 0
+    pendingEvents.set(prKey, { params, attempts })
+    fileLog({
+      level: 'info', event: 'pr_requeued',
+      repo: `${params.owner}/${params.repoName}`, pr: params.prNumber,
+      sha: params.headSha, reason, attempts,
+    })
+  }
+
+  // Drop a queued event once its SHA actually starts reviewing.
+  function clearPendingEvent(params: ReviewPRParams): void {
+    const prKey = `${params.owner}/${params.repoName}#${params.prNumber}`
+    if (pendingEvents.get(prKey)?.params.headSha === params.headSha) pendingEvents.delete(prKey)
+  }
+
+  // Replay a queued event once the PR is free again. Called from reviewPR's finally
+  // (the common case: this process just finished the review that blocked it) and
+  // from the drain timer (the lock belonged to another process). The entry stays in
+  // the map until the replay gets past the lock, so a replay that loses the race
+  // again is still tracked.
+  function drainPendingEvent(prKey: string): void {
+    const pending = pendingEvents.get(prKey)
+    if (!pending) return
+    const { owner, repoName, prNumber, headSha } = pending.params
+    // The SHA we queued may itself be in flight now — a later event for it won the
+    // race. Leave it alone; that run's own finally will drain whatever follows.
+    if (inFlight.has(`${owner}/${repoName}#${prNumber}@${headSha}`)) return
+    fileLog({
+      level: 'info', event: 'pr_requeue_dispatched',
+      repo: `${owner}/${repoName}`, pr: prNumber, sha: headSha,
+      attempts: pending.attempts,
+    })
+    setImmediate(() => void reviewPR(pending.params))
+  }
+
+  // Retry events whose lock was held by a process this one cannot observe
+  // (`crosscheck run`, a second watcher, a peer that crashed with the lock held).
+  // acquirePRLock clears locks older than 20 minutes, so a dead peer resolves itself.
+  // Started once the watcher is live — `running` is declared below, and startup can
+  // block on a TTY prompt for longer than one drain tick.
+  function startPendingDrain(): void {
+    drainIntervalRef = setInterval(() => {
+      if (!running) return
+      for (const [prKey, pending] of [...pendingEvents]) {
+        const { owner, repoName, prNumber, headSha } = pending.params
+        if (inFlight.has(`${owner}/${repoName}#${prNumber}@${headSha}`)) continue
+        if (++pending.attempts > MAX_DRAIN_ATTEMPTS) {
+          pendingEvents.delete(prKey)
+          fileLog({
+            level: 'warn', event: 'pr_requeue_abandoned',
+            repo: `${owner}/${repoName}`, pr: prNumber, sha: headSha,
+            attempts: pending.attempts,
+          })
+          continue
+        }
+        drainPendingEvent(prKey)
+      }
+    }, DRAIN_INTERVAL_MS)
   }
 
   // Start local webhook server
@@ -1183,6 +1314,8 @@ export async function runWatch(opts: WatchOpts = {}) {
   const cleanup = async () => {
     running = false
     if (idleIntervalRef !== null) clearInterval(idleIntervalRef)
+    if (backtraceIntervalRef !== null) clearInterval(backtraceIntervalRef)
+    if (drainIntervalRef !== null) clearInterval(drainIntervalRef)
     board.stop()
     stopSmartSwitch()
     console.log('\nCleaning up...')
@@ -1306,14 +1439,35 @@ export async function runWatch(opts: WatchOpts = {}) {
     }, 60_000)
   }
 
+  startPendingDrain()
+
   // ── Backtrace scan ────────────────────────────────────────────────────────
+  // Webhooks are the fast path, not a guarantee: a PR opened while watch was down,
+  // an org hook that failed to register, a smee reconnect gap, or a delivery dropped
+  // while the PR was locked all leave a PR that no future event will mention. The
+  // sweep is what finds those, so it runs on an interval rather than only at startup.
   if (opts.backtrace === true || (opts.backtrace !== false && config.backtrace.enabled)) {
-    void (async () => {
+    const sweepConcurrency = config.backtrace.concurrency
+    const intervalMin = opts.backtraceIntervalMin ?? config.backtrace.interval_min
+    let sweepRunning = false
+
+    const runSweep = async (first: boolean): Promise<void> => {
+      // A sweep can outlive its interval when the queue is long — overlapping runs
+      // would rescan PRs the previous sweep has queued but not yet commented on.
+      if (sweepRunning || !running) return
+      sweepRunning = true
       try {
-        cLog(`${chalk.dim('✦')} backtrace: scanning open PRs in monitored scope...`)
+        if (first) cLog(`${chalk.dim('✦')} backtrace: scanning open PRs in monitored scope...`)
         const { queued, alreadyReviewed, skippedAuthor } = await scanUnreviewedPRs(scopes, config, token)
-        cLog(`${chalk.dim('✦')} backtrace: ${queued.length} unreviewed, ${alreadyReviewed} already reviewed, ${skippedAuthor} skipped (author filter)`)
-        void Promise.all(queued.map(pr => reviewPR({
+        fileLog({
+          level: 'info', event: 'backtrace_scan',
+          unreviewed: queued.length, already_reviewed: alreadyReviewed,
+          skipped_author: skippedAuthor, concurrency: sweepConcurrency, first,
+        })
+        if (first || queued.length > 0) {
+          cLog(`${chalk.dim('✦')} backtrace: ${queued.length} unreviewed, ${alreadyReviewed} already reviewed, ${skippedAuthor} skipped (author filter)`)
+        }
+        await runWithConcurrency(queued.map(pr => () => reviewPR({
           owner: pr.owner, repoName: pr.repo, prNumber: pr.number,
           title: pr.title, body: pr.body, author: pr.author,
           headSha: pr.headSha, headRef: pr.headRef, headRepo: pr.headRepo,
@@ -1321,12 +1475,21 @@ export async function runWatch(opts: WatchOpts = {}) {
           ...(pr.labels !== undefined && { labels: pr.labels }),
           ...(pr.defaultBranch !== undefined && { defaultBranch: pr.defaultBranch }),
           createdAt: pr.createdAt,
-        })))
+        })), sweepConcurrency)
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
+        fileLog({ level: 'warn', event: 'backtrace_scan_failed', message: msg })
         cLog(`${chalk.yellow('⚠')} backtrace: scan failed — ${msg}`)
+      } finally {
+        sweepRunning = false
       }
-    })()
+    }
+
+    void runSweep(true)
+    if (intervalMin > 0) {
+      cLog(`${chalk.dim('✦')} backtrace: re-scanning every ${intervalMin}m`)
+      backtraceIntervalRef = setInterval(() => void runSweep(false), intervalMin * 60_000)
+    }
   }
 
   // ── Smee mode ─────────────────────────────────────────────────────────────

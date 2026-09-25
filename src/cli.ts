@@ -41,6 +41,19 @@ const portParser = (raw: string): number => {
   }
 }
 
+// Largest interval whose millisecond value still fits a Node timer (2^31-1 ms).
+// Above it the delay overflows to 1ms and the scan would fire continuously.
+const MAX_BACKTRACE_INTERVAL_MIN = 35_000
+
+// Commander arg parser for --backtrace-interval: minutes, 0 meaning startup-only.
+const intervalParser = (raw: string): number => {
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 0 || n > MAX_BACKTRACE_INTERVAL_MIN) {
+    throw new InvalidArgumentError(`--backtrace-interval must be an integer between 0 and ${MAX_BACKTRACE_INTERVAL_MIN} (minutes), got: ${raw}`)
+  }
+  return n
+}
+
 const program = new Command()
 
 program
@@ -148,7 +161,11 @@ program
   .option('--port <number>', 'force the webhook server port for this session (overrides config; does not save)', portParser)
   .option('--backtrace', 'enable startup scan for unreviewed open PRs this session (overrides backtrace.enabled: false)')
   .option('--no-backtrace', 'skip startup scan for unreviewed open PRs this session (overrides backtrace.enabled: true)')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; port?: number; backtrace?: boolean }) => void runWatch(opts))
+  .option('--backtrace-interval <min>', 'minutes between backtrace re-scans this session (overrides backtrace.interval_min; 0 = startup only)', intervalParser)
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; port?: number; backtrace?: boolean; backtraceInterval?: number }) => void runWatch({
+    ...opts,
+    ...(opts.backtraceInterval !== undefined && { backtraceIntervalMin: opts.backtraceInterval }),
+  }))
 
 program
   .command('review <pr-urls...>')
@@ -159,10 +176,11 @@ program
   .option('--concurrent [n]', 'multi-PR: cap parallel agents; omit n for one agent per PR (default)')
   .option('--sequential', 'multi-PR: run PRs one at a time instead of in parallel')
   .option('--stagger <ms>', 'multi-PR: ms delay between concurrent worker starts; default 2000')
-  .action((prUrls: string[], opts: { config?: string; reviewer?: string; vendor?: string; concurrent?: string | true; sequential?: boolean; stagger?: string }) => {
+  .option('--force', 'review even when this commit is already approved')
+  .action((prUrls: string[], opts: { config?: string; reviewer?: string; vendor?: string; concurrent?: string | true; sequential?: boolean; stagger?: string; force?: boolean }) => {
     const concurrent = opts.concurrent === undefined ? undefined : opts.concurrent === true ? 0 : Number(opts.concurrent)
     const staggerMs = opts.stagger !== undefined ? Number(opts.stagger) : undefined
-    void runReviewSpec(prUrls.join(','), { config: opts.config, reviewer: opts.reviewer ?? opts.vendor, concurrent, sequential: opts.sequential, staggerMs })
+    void runReviewSpec(prUrls.join(','), { config: opts.config, reviewer: opts.reviewer ?? opts.vendor, concurrent, sequential: opts.sequential, staggerMs, force: opts.force })
   })
 
 addStepRunOptions(

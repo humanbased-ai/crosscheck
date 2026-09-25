@@ -33,7 +33,8 @@ import { planAutoFixDelivery, forceWithLeaseArgs, parseLsRemoteOid, isLeaseRejec
 import type { FixBranchPR } from '../lib/auto-fix-branch.js'
 import { prOpenToVerdictMs } from '../lib/adoption.js'
 import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
-import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, type StepResult, type WorkflowStep } from '../lib/workflow.js'
+import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, DEFAULT_REVIEW_INSTRUCTIONS, type StepResult, type WorkflowStep } from '../lib/workflow.js'
+import { prepareReviewPlan, finishReviewOrFallback, savePublishedReview, assertReviewFresh } from '../lib/review-memory.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
@@ -685,6 +686,16 @@ function diffBucket(totalLines: number): string {
 }
 
 /**
+ * The clone and the PR fields classification reads. Narrower than
+ * WorkflowContext so `crosscheck review`, which clones the same way but runs no
+ * workflow, classifies through the same functions as run and watch.
+ */
+export interface PRContextSource {
+  tmpDir: string
+  pr: Pick<WorkflowContext['pr'], 'title' | 'base' | 'labels'>
+}
+
+/**
  * Builds the input the review strategy classifies on, from the already-cloned
  * working copy rather than the API — the runner has the repo on disk, so this
  * costs one `git diff` instead of a round trip.
@@ -692,7 +703,7 @@ function diffBucket(totalLines: number): string {
  * Returns null when the diff can't be read. Callers then fall back to the
  * configured tier, which is why `quality.tier` stays meaningful under smart mode.
  */
-export function buildPRContext(ctx: WorkflowContext): PRContext | null {
+export function buildPRContext(ctx: PRContextSource): PRContext | null {
   const { tmpDir, pr } = ctx
   const changed = changedFilesVsBase(tmpDir, pr.base.ref)
   if (!changed) return null
@@ -776,14 +787,69 @@ export function strategyDeterminedModel(
 }
 
 /**
+ * The strategy fields a review comment may cite, or undefined when citing them
+ * would name a tier the run did not use. One function so run/watch and
+ * `crosscheck review` cannot disagree about when a tier is named.
+ *
+ * Takes the class as matched and the class as run this round, because
+ * resolveRoundExecution fills a null class tier from `quality.tier`. A class
+ * that names no tier only runs when an explicit request overrides its skip, and
+ * then the configured tier ran, not one the class chose — so the class and its
+ * reason are cited with a null tier, which the comment renders without one.
+ */
+export function strategyCitation(
+  vendor: { model?: string | null },
+  classStrategy: ResolvedStrategy | null,
+  roundStrategy: ResolvedStrategy | null,
+  resolvedModel: string,
+): { version: string; classId: string; tier: string | null; reason: string } | undefined {
+  if (!roundStrategy || !strategyDeterminedModel(vendor, roundStrategy, resolvedModel)) return undefined
+  const tier = classStrategy?.tier === null ? null : roundStrategy.tier
+  return { version: roundStrategy.version, classId: roundStrategy.classId, tier, reason: roundStrategy.reason }
+}
+
+/**
  * Classifies the PR and resolves the strategy, or returns null under
  * `quality.mode: fixed` so the single configured tier applies unchanged.
  */
-export function resolveStrategyForPR(ctx: WorkflowContext): ResolvedStrategy | null {
+export function resolveStrategyForPR(ctx: PRContextSource & { config: Pick<Config, 'quality'> }): ResolvedStrategy | null {
   if (ctx.config.quality.mode !== 'smart') return null
   const prContext = buildPRContext(ctx)
   if (!prContext) return null
   return resolveReviewStrategy(prContext)
+}
+
+/**
+ * Records how classification resolved for one PR. Shared by run/watch and
+ * `crosscheck review` so both write the same events with the same fields.
+ */
+export function logStrategyResolution(
+  quality: Config['quality'],
+  strategy: ResolvedStrategy | null,
+  repo: string,
+  prNumber: number,
+): void {
+  if (quality.mode === 'smart' && !strategy) {
+    // A smart-mode install quietly behaving as fixed is otherwise invisible.
+    fileLog({ level: 'warn', event: 'strategy_unresolved', repo, pr: prNumber, reason: 'pr_context_unavailable', fallback_tier: quality.tier })
+  } else if (strategy) {
+    // A config written before `mode` existed parses as smart on upgrade, so a
+    // hand-set `quality.tier` can be silently overridden. onboard preserves the
+    // old tier by reading raw yaml, but that only helps users who re-run it —
+    // so record it here for everyone else.
+    //
+    // info, not warn: `config.quality.tier` carries a schema default of
+    // `balanced` on every install, so the parsed config cannot tell a hand-set
+    // tier from an unset one. Five of the eight classes resolve to something
+    // other than balanced, which made this fire on the majority of PRs — and
+    // recommend a `mode: fixed` opt-out to users who never chose a tier at all.
+    // Only the raw yaml can draw that distinction (thoroughnessDefaults), and it
+    // is not available on this path.
+    if (strategy.tier && strategy.tier !== quality.tier) {
+      fileLog({ level: 'info', event: 'strategy_overrode_configured_tier', repo, pr: prNumber, configured_tier: quality.tier, applied_tier: strategy.tier, pr_class: strategy.classId })
+    }
+    fileLog({ level: 'info', event: 'strategy_resolved', repo, pr: prNumber, strategy_version: strategy.version, pr_class: strategy.classId, tier: strategy.tier, effort: strategy.effort, steps: strategy.steps, domain: strategy.domain })
+  }
 }
 
 export interface RoundExecution {
@@ -1025,27 +1091,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // all-or-nothing answer on every install. Independent of `strategy` for that
   // reason, and cheap — buildPRContext is one `git diff --numstat`.
   const docOnlyChange = isDocOnlyChange(buildPRContext(ctx)?.files ?? [])
-  if (config.quality.mode === 'smart' && !strategy) {
-    // A smart-mode install quietly behaving as fixed is otherwise invisible.
-    fileLog({ level: 'warn', event: 'strategy_unresolved', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'pr_context_unavailable', fallback_tier: config.quality.tier })
-  } else if (strategy) {
-    // A config written before `mode` existed parses as smart on upgrade, so a
-    // hand-set `quality.tier` can be silently overridden. onboard preserves the
-    // old tier by reading raw yaml, but that only helps users who re-run it —
-    // so record it here for everyone else.
-    //
-    // info, not warn: `config.quality.tier` carries a schema default of
-    // `balanced` on every install, so the parsed config cannot tell a hand-set
-    // tier from an unset one. Five of the eight classes resolve to something
-    // other than balanced, which made this fire on the majority of PRs — and
-    // recommend a `mode: fixed` opt-out to users who never chose a tier at all.
-    // Only the raw yaml can draw that distinction (thoroughnessDefaults), and it
-    // is not available on this path.
-    if (strategy.tier && strategy.tier !== config.quality.tier) {
-      fileLog({ level: 'info', event: 'strategy_overrode_configured_tier', repo: `${owner}/${repoName}`, pr: prNumber, configured_tier: config.quality.tier, applied_tier: strategy.tier, pr_class: strategy.classId })
-    }
-    fileLog({ level: 'info', event: 'strategy_resolved', repo: `${owner}/${repoName}`, pr: prNumber, strategy_version: strategy.version, pr_class: strategy.classId, tier: strategy.tier, effort: strategy.effort, steps: strategy.steps, domain: strategy.domain })
-  }
+  logStrategyResolution(config.quality, strategy, `${owner}/${repoName}`, prNumber)
 
   // The class's step set NARROWS the configured pipeline; it never widens it.
   // A repo set to review-only stays review-only whatever the class says, which
@@ -1292,13 +1338,18 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       // Under `quality.mode: smart` the PR's class picks the tier; under fixed
       // this is config.quality untouched.
+      const memoryPlan = config.quality.review_memory ? prepareReviewPlan({
+        repoDir: tmpDir, subject: `${owner}/${repoName}#${prNumber}`, baseBranch: pr.base.ref,
+        instructions: step.instructions ?? DEFAULT_REVIEW_INSTRUCTIONS, policy: JSON.stringify(config.quality),
+      }) : undefined
+      if (memoryPlan) fileLog({ level: 'info', event: 'review_memory_plan', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, mode: memoryPlan.mode, reason: memoryPlan.reason })
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, codexVendor, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, reviewContext, skillSession, config.skills.codex_full_access))
+          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, codexVendor, memoryPlan?.instructions ?? step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, reviewContext, skillSession, config.skills.codex_full_access))
           inputTokens = undefined
           outputTokens = undefined
         } else {
-          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, effort, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, quality, claudeVendor, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, reviewContext, skillSession))
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, effort, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, quality, claudeVendor, config.budget.per_review_usd, memoryPlan?.instructions ?? step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log, reviewContext, skillSession))
         }
       }
 
@@ -1366,6 +1417,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         fileLog({ level: 'info', event: 'review_retried', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, retry_timeout_sec: Math.round(retried.timeoutMs / 1000), retry_delay_sec: Math.round(retried.delayMs / 1000), ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
       }
 
+      const structured = memoryPlan ? finishReviewOrFallback(memoryPlan, rawReview) : undefined
+      if (structured) rawReview = structured.text
+      if (structured?.adjustments?.length) {
+        fileLog({ level: 'info', event: 'structured_review_reconciled', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, adjustments: structured.adjustments })
+      }
+      if (structured?.fallbackReason) {
+        fileLog({ level: 'warn', event: 'structured_review_fallback', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, reason: structured.fallbackReason })
+        log(chalk.yellow(`  structured review unusable (${structured.fallbackReason}) — posting raw output without a verdict`))
+      }
       const parsed = parseVerdict(rawReview)
       const { clean } = parsed
       if (parsed.verdict === null) {
@@ -1467,6 +1527,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           fileLog({ level: 'warn', event: 'verdict_sha_off_head', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, verdict, sha: annotationSha, head_sha: shaVerification.headSha, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
         }
 
+        if (memoryPlan) {
+          const { data: current } = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+          assertReviewFresh(memoryPlan, current, annotationSha, shaVerification.headSha)
+        }
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
           origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, annotationSha,
@@ -1477,10 +1541,16 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           // Withheld when an explicit vendors.*.model overrode the tier map:
           // citing a tier the run did not use would assert a routing decision
           // that never happened.
-          strategyDeterminedModel(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, roundStrategy, model) && roundStrategy?.tier
-            ? { version: roundStrategy.version, classId: roundStrategy.classId, tier: roundStrategy.tier, reason: roundStrategy.reason }
-            : undefined,
+          strategyCitation(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, strategy, roundStrategy, model),
         )
+        if (memoryPlan && structured?.snapshot) {
+          // The review is already posted; a memory write failure only costs the next review its delta.
+          try {
+            if (!await savePublishedReview(memoryPlan, structured.snapshot)) fileLog({ level: 'info', event: 'review_memory_superseded', repo: `${owner}/${repoName}`, pr: prNumber })
+          } catch (err) {
+            fileLog({ level: 'warn', event: 'review_memory_save_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
+          }
+        }
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
 

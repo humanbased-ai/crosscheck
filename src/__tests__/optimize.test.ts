@@ -12,12 +12,13 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
   return {
     mode: 'cross-vendor',
     clone_protocol: 'ssh',
+    repository_cache: true,
     orgs: [],
     users: [],
     repos: [],
     routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], allowed_authors: [], author_routes: {}, fallback_reviewer: 'auto' },
     server: { port: 7892, webhook_path: '/webhook' },
-    quality: { tier: 'balanced', mode: 'fixed', focus: [], custom_prompt: undefined },
+    quality: { tier: 'balanced', mode: 'fixed', review_memory: true, focus: [], custom_prompt: undefined },
     skills: { enabled: [], codex_full_access: false },
     budget: { codex_monthly_usd: null, per_review_usd: 1 },
     vendors: {
@@ -27,7 +28,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     logs: { enabled: false, retention_days: 7, extended: { enabled: false } },
     tunnel: { backend: 'localhost.run', smee_channel: '' },
     impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },
-    backtrace: { enabled: false },
+    backtrace: { enabled: false, interval_min: 0, concurrency: 2 },
     issue_enrichment: { enabled: false, provider: 'linear', team_keys: [], max_description_chars: 4000 },
     linear: { enabled: false, auth: { mode: 'api_key', api_key_env: 'LINEAR_API_KEY', client_id_env: 'LINEAR_CLIENT_ID', client_secret_env: 'LINEAR_CLIENT_SECRET', scopes: 'read write' }, identity: { actor: 'crosscheck', signature: '🤖 {actor} · {product}', icon_url: '', per_step_actor: true }, comment_on: ['APPROVE', 'NEEDS_WORK', 'BLOCK'], team_keys: [] },
     watch: { idle_issue: { enabled: true, timeout_min: 30 } },
@@ -128,7 +129,7 @@ describe('deriveConfigChanges', () => {
   function makeFullConfig(tier: 'fast' | 'balanced' | 'thorough', budgetUsd = 2): Config {
     return {
       ...makeConfig(true, true),
-      quality: { tier, mode: 'fixed', focus: [], custom_prompt: undefined },
+      quality: { tier, mode: 'fixed', review_memory: true, focus: [], custom_prompt: undefined },
       budget: { codex_monthly_usd: null, per_review_usd: budgetUsd },
     }
   }

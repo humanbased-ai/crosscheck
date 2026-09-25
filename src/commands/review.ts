@@ -16,14 +16,21 @@ import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, DOC_ONLY_GATE_NOTE, detectInconclusiveReview } from '../lib/verdict.js'
 import { clonePRForReview, BaseRefUnavailableError, changedFilesVsBase } from '../lib/clone.js'
 import { isDocOnlyChange } from '../lib/review-strategy.js'
-import { linearWritePossible } from '../lib/workflow.js'
+import { linearWritePossible, DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
+import { prepareReviewPlan, finishReviewOrFallback, savePublishedReview, assertReviewFresh } from '../lib/review-memory.js'
 import { parsePRSpec, type PRRef } from '../lib/pr-spec.js'
 import { closedPRSkip } from '../lib/pr-state.js'
 import { resolveCliInvocation } from '../lib/cli-invocation.js'
 import { executeMultiPR, resolveRunConcurrency, printMultiPRSummary, concurrencyError, aggregateExitCode, type ConcurrencyOpts } from '../lib/multi-run.js'
+import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
+import { checkRemoteLock, claimRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
+import { fetchStepHistoryWithRetry, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
+import { loadWorkflow } from '../lib/workflow.js'
+import { filterStepsByTypes, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
 import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession } from '../skills/broker.js'
 import { formatSkillAttribution } from '../skills/attribution.js'
+import { resolveStrategyForPR, logStrategyResolution, resolveRoundExecution, strategyCitation } from '../lib/runner.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -31,7 +38,7 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
   return { owner: m[1], repo: m[2], number: parseInt(m[3], 10) }
 }
 
-export async function runReview(prUrl: string, configPath?: string, forceReviewer?: string) {
+export async function runReview(prUrl: string, configPath?: string, forceReviewer?: string, force = false) {
   const config = loadConfig(configPath)
   initLogger(config.logs)
   fileLog({ level: 'info', event: 'session_start', command: 'review', pr_url: prUrl })
@@ -64,6 +71,33 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   }
   spinner.succeed(`PR #${number}: ${pr.title}`)
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: pr.head.sha })
+
+  // `review` posts to the same PR as `run` and `watch`, so it answers to the same two
+  // questions they do — is this commit already settled, and is anyone else on it.
+  // Skipping both is how this command re-reviewed commits another instance had already
+  // APPROVEd, and how it posted a second, contradicting verdict on a commit a watcher
+  // was reviewing at that moment (measured on humanbased-ai/monorepo#4507).
+  if (!force) {
+    try {
+      const repoStepOverride = readRepoWorkflowStepTypes(owner, repo)
+      const globalWorkflow = loadWorkflow(process.cwd())
+      const allSteps = repoStepOverride ? filterStepsByTypes(globalWorkflow, repoStepOverride) : globalWorkflow
+      const history = await fetchStepHistoryWithRetry(owner, repo, number, token)
+      const next = identifyNextWorkflowStep(history, allSteps, pr.head.sha, { mergeable: pr.mergeable })
+      if (next.stopReason === 'approved') {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'approved', sha: pr.head.sha })
+        console.log(chalk.dim('  this commit is already approved — nothing to do until new commits land (use --force to review it anyway)'))
+        return
+      }
+    } catch (err: unknown) {
+      // Unlike run/watch this command reviews and nothing more: it cannot resume a
+      // half-finished workflow or modify an approved commit, so an unreadable history
+      // costs at most one redundant review comment. Warn and continue rather than
+      // strand an explicit user request on a transient API failure.
+      fileLog({ level: 'warn', event: 'approval_check_skipped', repo: `${owner}/${repo}`, pr: number, error: err instanceof Error ? err.message : String(err) })
+      console.log(chalk.yellow('  ⚠ could not read PR history — reviewing without the approval check'))
+    }
+  }
 
   let reviewer: 'claude' | 'codex' | null
   let origin: PROrigin = 'human'
@@ -113,6 +147,52 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
   }
 
+  // Taken here, not earlier: everything above can still decline the PR — a closed
+  // PR, routing that assigns no reviewer, an unusable Linear credential — and each
+  // of those returns. Holding the lock across them would leave the lock file and a
+  // pending `crosscheck/review` status behind on a PR nothing is reviewing.
+  if (!acquirePRLock(owner, repo, number, pr.head.sha)) {
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_local', sha: pr.head.sha })
+    console.log(chalk.yellow(`⚠  PR #${number} is already being worked on by another crosscheck process — skipping`))
+    return
+  }
+  let lockHeld = true
+  // A holder rather than a bare `let`: releaseLocks closes over it, so it has to be
+  // declared before the heartbeat that fills it in can start.
+  const heartbeat: { stop?: () => void } = {}
+  // Every exit after this point goes through here exactly once: the lock must not
+  // outlive the review, and the commit status must not be resolved twice.
+  const releaseLocks = async (outcome: 'success' | 'failure'): Promise<void> => {
+    if (!lockHeld) return
+    lockHeld = false
+    heartbeat.stop?.()
+    await releaseRemoteLock(octokit, owner, repo, pr.head.sha, outcome)
+    releasePRLock(owner, repo, number, pr.head.sha)
+  }
+  try {
+    if (await checkRemoteLock(octokit, owner, repo, pr.head.sha)) {
+      lockHeld = false
+      releasePRLock(owner, repo, number, pr.head.sha)
+      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote', sha: pr.head.sha })
+      console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed on another machine — skipping`))
+      return
+    }
+    if (!await claimRemoteLock(octokit, owner, repo, pr.head.sha)) {
+      lockHeld = false
+      releasePRLock(owner, repo, number, pr.head.sha)
+      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'lost_remote_claim', sha: pr.head.sha })
+      console.log(chalk.yellow(`⚠  PR #${number} was claimed by another crosscheck instance — skipping`))
+      return
+    }
+  } catch (err: unknown) {
+    lockHeld = false
+    releasePRLock(owner, repo, number, pr.head.sha)
+    logError({ repo: `${owner}/${repo}`, pr: number, phase: 'lock' }, err)
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(2)
+  }
+  heartbeat.stop = startRemoteLockHeartbeat(octokit, owner, repo, pr.head.sha)
+
   // Clone the repo into a temp dir
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
   const skillSession = config.skills.enabled.length > 0
@@ -124,10 +204,11 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   try {
     const { baseRefStatus } = await clonePRForReview({
       owner, repo, prNumber: number, baseRef: pr.base.ref, baseSha: pr.base.sha,
-      tmpDir, token, protocol: config.clone_protocol,
+      tmpDir, token, protocol: config.clone_protocol, repositoryCache: config.repository_cache,
       onProgress: line => { spinner2.text = `Cloning repo for review... ${line}` },
       onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref }),
       onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref, via: status }),
+      onCacheFailed: message => fileLog({ level: 'warn', event: 'repository_cache_failed', repo: `${owner}/${repo}`, pr: number, error: message }),
     })
     spinner2.succeed('Repo ready')
     if (baseRefStatus === 'unavailable') {
@@ -138,6 +219,32 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       console.log(chalk.yellow(`  base ref origin/${pr.base.ref} was missing — recovered ${baseRefStatus === 'recovered_by_sha' ? 'from the PR base commit' : "from the PR's merge ref"}`))
     }
 
+    // Classified from the clone through the same functions as run and watch, so
+    // this review runs at the tier and effort the PR's class earns. Null under
+    // `quality.mode: fixed` or when the diff cannot be read, and then the
+    // configured tier applies unchanged.
+    const strategy = resolveStrategyForPR({ tmpDir, pr, config })
+    logStrategyResolution(config.quality, strategy, `${owner}/${repo}`, number)
+    // A null tier means the class would skip this PR. This command is an explicit
+    // request for one review, so it runs anyway at the configured tier — the call
+    // `run --steps` makes too — and says so, or it would look unclassified.
+    if (strategy && strategy.tier === null) {
+      console.log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} would skip this PR (${strategy.reason}) — honouring the explicit review`))
+      fileLog({ level: 'info', event: 'strategy_class_skip_bypassed', repo: `${owner}/${repo}`, pr: number, pr_class: strategy.classId, strategy_version: strategy.version })
+    }
+    // Round 1: this command has no fix loop, so nothing escalates.
+    const { strategy: appliedStrategy, quality, claudeVendor, codexVendor } = resolveRoundExecution(config, strategy, 1)
+    if (strategy && appliedStrategy) {
+      // Only the routed reviewer runs, so name the effort it was given.
+      const appliedEffort = reviewer === 'codex' ? codexVendor.effort : claudeVendor.effort
+      console.log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${appliedStrategy.tier ?? 'skip'} tier (${appliedEffort})`))
+    }
+
+    const memoryPlan = config.quality.review_memory ? prepareReviewPlan({
+      repoDir: tmpDir, subject: `${owner}/${repo}#${number}`, baseBranch: pr.base.ref,
+      instructions: DEFAULT_REVIEW_INSTRUCTIONS, policy: JSON.stringify(config.quality),
+    }) : undefined
+    if (memoryPlan) fileLog({ level: 'info', event: 'review_memory_plan', repo: `${owner}/${repo}`, pr: number, mode: memoryPlan.mode, reason: memoryPlan.reason })
     let reviewText: string
     let tokensUsed: number | undefined
     let model = 'default'
@@ -158,9 +265,9 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           tmpDir,
           pr.base.ref,
           pr.title,
-          config.quality,
-          config.vendors.codex,
-          undefined,
+          quality,
+          codexVendor,
+          memoryPlan?.instructions,
           msg => { reviewSpinner!.text = msg },
           codexTimeoutMs,
           undefined,
@@ -173,10 +280,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           tmpDir,
           pr.base.ref,
           pr.title,
-          config.quality,
-          config.vendors.claude,
+          quality,
+          claudeVendor,
           config.budget.per_review_usd,
-          undefined,
+          memoryPlan?.instructions,
           msg => { reviewSpinner!.text = msg },
           claudeTimeoutMs,
           undefined,
@@ -192,6 +299,15 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     reviewSpinner.succeed(`Review complete (${elapsed}s)`)
     const activatedSkills = skillSession?.activations() ?? []
     if (activatedSkills.length > 0) console.log(chalk.dim(`  skills: ${formatSkillAttribution(activatedSkills)}`))
+    const structured = memoryPlan ? finishReviewOrFallback(memoryPlan, reviewText) : undefined
+    if (structured) reviewText = structured.text
+    if (structured?.adjustments?.length) {
+      fileLog({ level: 'info', event: 'structured_review_reconciled', repo: `${owner}/${repo}`, pr: number, reviewer, adjustments: structured.adjustments })
+    }
+    if (structured?.fallbackReason) {
+      fileLog({ level: 'warn', event: 'structured_review_fallback', repo: `${owner}/${repo}`, pr: number, reviewer, reason: structured.fallbackReason })
+      console.log(chalk.yellow(`  structured review unusable (${structured.fallbackReason}) — posting raw output without a verdict`))
+    }
     const parsed = parseVerdict(reviewText)
     const { clean } = parsed
     if (parsed.verdict === null) {
@@ -223,7 +339,22 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     const reviewBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
       : prependVerdictToComment(gate.downgraded ? `${gateNote}\n\n${clean}` : clean, verdict)
-    await postReviewComment(octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort)
+    if (memoryPlan) {
+      const { data: current } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
+      assertReviewFresh(memoryPlan, current, pr.head.sha, pr.head.sha, pr.state)
+    }
+    await postReviewComment(
+      octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort,
+      strategyCitation(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, strategy, appliedStrategy, model),
+    )
+    if (memoryPlan && structured?.snapshot) {
+      // The review is already posted; a memory write failure only costs the next review its delta.
+      try {
+        if (!await savePublishedReview(memoryPlan, structured.snapshot)) fileLog({ level: 'info', event: 'review_memory_superseded', repo: `${owner}/${repo}`, pr: number })
+      } catch (err) {
+        fileLog({ level: 'warn', event: 'review_memory_save_failed', repo: `${owner}/${repo}`, pr: number, error: err instanceof Error ? err.message : String(err) })
+      }
+    }
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 
@@ -260,9 +391,14 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     reviewSpinner?.fail()
     const message = err instanceof Error ? err.message : String(err)
     logError({ repo: `${owner}/${repo}`, pr: number, phase: 'review' }, err)
+    // Released as `failure`, not `success`: this SHA was not reviewed, and
+    // `crosscheck/review` is a status a repo can require for merge — a green one
+    // here would let an unreviewed HEAD satisfy branch protection.
+    await releaseLocks('failure')
     console.error(chalk.red(`\n✗ ${message}`))
     process.exit(2)
   } finally {
+    await releaseLocks('success')
     skillSession?.close()
     rmSync(tmpDir, { force: true, recursive: true })
   }
@@ -271,12 +407,15 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 export interface ReviewSpecOpts extends ConcurrencyOpts {
   config?: string
   reviewer?: string
+  /** Review this commit even when it is already approved. */
+  force?: boolean
 }
 
 export function buildReviewChildArgs(ref: PRRef, opts: ReviewSpecOpts): string[] {
   const args = ['review', ref.url]
   if (opts.config) args.push('-c', opts.config)
   if (opts.reviewer) args.push('--reviewer', opts.reviewer)
+  if (opts.force) args.push('--force')
   return args
 }
 
@@ -298,7 +437,7 @@ export async function runReviewSpec(spec: string, opts: ReviewSpecOpts = {}): Pr
   }
 
   if (refs.length === 1) {
-    await runReview(refs[0].url, opts.config, opts.reviewer)
+    await runReview(refs[0].url, opts.config, opts.reviewer, opts.force)
     return
   }
 

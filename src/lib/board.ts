@@ -2,6 +2,7 @@ import chalk from 'chalk'
 import type { Config, DisplayTheme } from '../config/schema.js'
 import type { WorkflowStep } from './workflow.js'
 import { selectTip } from './tips.js'
+import { oneLine } from './vendor-error-summary.js'
 
 // ── Phase state ───────────────────────────────────────────────────────────────
 
@@ -24,6 +25,7 @@ interface Theme {
   warning: ChalkFn
   error: ChalkFn
   dim: ChalkFn
+  muted: ChalkFn  // fainter than dim: controls that do nothing in the current state
   accent: ChalkFn
   barPRFill: ChalkFn
   barEmpty: ChalkFn
@@ -40,7 +42,7 @@ interface PRSlot {
   branch: string
   label: string
   startedAt: number
-  completedAt?: number      // set by completePR — slot stays in workspace until overflow eviction
+  completedAt?: number      // set by completePR — the slot stays in the session history
   url?: string              // PR URL, set on completion
   prLoc?: number
   phase?: PRPhase
@@ -56,6 +58,8 @@ interface PRSlot {
   recheckReviewer?: string  // vendor that ran the recheck step
   qualityTier?: string      // quality tier used for this run
   stickyFolded?: boolean    // once folded on the count threshold, stays folded (see renderPRWorkspace)
+  superseded?: boolean      // a later round replaced this slot: kept in history, hidden from the live page
+  error?: string            // set by failPR — the slot settles in the workspace instead of being deleted
 }
 
 export interface PRUpdate {
@@ -83,6 +87,16 @@ export interface PRCompletionData {
   label?: string
 }
 
+/**
+ * The terminal state of one settled slot, for the session outcome distribution.
+ * `skipped` is a PR that settled without any verdict at all — the review
+ * strategy short-circuited it (lockfile-only, doc-only) — as distinct from
+ * `no verdict`, where a reviewer ran and returned nothing parseable.
+ */
+export type Outcome = 'APPROVE' | 'NEEDS WORK' | 'BLOCK' | 'no verdict' | 'skipped' | 'error'
+
+const OUTCOME_ORDER: readonly Outcome[] = ['APPROVE', 'NEEDS WORK', 'BLOCK', 'no verdict', 'skipped', 'error']
+
 interface Stats {
   prsReceived: number
   crsCompleted: number
@@ -90,6 +104,8 @@ interface Stats {
   errorsOccurred: number
   crTotalMs: number
   sessionStart: number
+  /** Cumulative over the session: survives the HISTORY_MAX slot cap. */
+  outcomes: Record<Outcome, number>
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -119,9 +135,59 @@ function fmtDuration(ms: number): string {
   return `${s}s`
 }
 
+// When a PR entered the board, in the operator's locale: "09/22, 03:50 PM" in
+// en-US. Every part is 2-digit so the column keeps one width within a session.
+export function fmtEnteredAt(epochMs: number): string {
+  return new Date(epochMs).toLocaleString(undefined, {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  })
+}
+
 // Short HH:MM timestamp (no seconds) for the "started" label
 function fmtStartTime(epochMs: number): string {
   return new Date(epochMs).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
+}
+
+// Session age in hours and minutes: "3h32m", or "12m" under the hour. Deliberately
+// not fmtDuration: that renders MM:SS shaped output under an hour, which reads as
+// hours:minutes on a long-running watch and understates the session by 60x.
+export function fmtUptime(ms: number): string {
+  const totalMin = Math.max(0, Math.floor(ms / 60_000))
+  const h = Math.floor(totalMin / 60)
+  const m = totalMin % 60
+  return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`
+}
+
+/**
+ * Whole percentages summing to exactly 100, by the largest-remainder method.
+ * Plain rounding drifts — three equal shares render as 33/33/33 — and a
+ * distribution that visibly fails to add up reads as a bug in the numbers.
+ *
+ * A non-zero count too small to earn a point comes back as 0; the caller
+ * renders those as "<1%" rather than claiming the outcome never happened.
+ */
+export function distribute(counts: readonly number[]): number[] {
+  const total = counts.reduce((a, b) => a + b, 0)
+  if (total === 0) return counts.map(() => 0)
+
+  const exact = counts.map(c => (c * 100) / total)
+  const out = exact.map(Math.floor)
+  // Exact shares sum to 100, so the floors leave fewer whole points than there
+  // are entries: one pass in remainder order always places every last one.
+  let remaining = 100 - out.reduce((a, b) => a + b, 0)
+
+  const byRemainder = exact
+    .map((e, i) => ({ i, rem: e - Math.floor(e) }))
+    .filter(({ i }) => counts[i] > 0)
+    .sort((a, b) => b.rem - a.rem)
+
+  for (const { i } of byRemainder) {
+    if (remaining <= 0) break
+    out[i]++
+    remaining--
+  }
+
+  return out
 }
 
 // Format token count as a compact suffix: "(900)", "(1.2K)", "(1.5M)". Returns '' when undefined.
@@ -148,6 +214,90 @@ function stripAnsi(s: string): string {
 
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max - 1) + '…'
+}
+
+// Cut a rendered line to `max` visible columns, keeping the ANSI sequences it
+// passes over (they have no width) and closing with a reset so a cut mid-colour
+// cannot bleed into the next line. Folded rows are clamped with this so they
+// always occupy exactly one terminal row — history pagination counts on it.
+function truncateVisible(s: string, max: number): string {
+  if (max <= 0) return ''
+  if (stripAnsi(s).length <= max) return s
+  let out = ''
+  let width = 0
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (ch === '\x1B') {
+      const end = s.indexOf('m', i)
+      if (end === -1) break
+      out += s.slice(i, end + 1)
+      i = end
+      continue
+    }
+    if (width >= max - 1) break
+    out += ch
+    width++
+  }
+  return out + '…\x1B[0m'
+}
+
+// Lines the runner hands to its log callback are prefixed ⚠ or ✗ when they
+// report something an operator must act on. Everything else is progress
+// narration that the board's own PR rows already carry, and a multi-line
+// message is a dump (an unposted review, a dry-run comment) that always
+// follows one of those notices. Only these earn a line of terminal scrollback
+// beside the board; the rest goes to the file log.
+// eslint-disable-next-line no-control-regex -- matching the ESC byte is the point
+const NOTICE_PREFIX = /^(?:\x1B\[[0-9;]*m)*\s*[⚠✗]/
+
+export function isNoticeLine(msg: string): boolean {
+  return NOTICE_PREFIX.test(msg) || msg.includes('\n')
+}
+
+// ── Page keys ─────────────────────────────────────────────────────────────────
+
+export type PageKey = 'older' | 'newer' | null
+
+// ← / → are the only page keys, on Windows, Linux and macOS alike: every
+// terminal forwards a bare arrow, where modifier and punctuation combinations
+// arrive inconsistently or not at all (macOS never forwards cmd). Each arrow has
+// two encodings: normal cursor mode (`ESC [ D`) and application cursor mode
+// (`ESC O D`), which Terminal.app emits while an alternate-screen app owns the tty.
+// ← moves toward newer PRs (the live page), → toward older history.
+const PAGE_NEWER_KEYS = new Set(['\u001b[D', '\u001bOD'])
+const PAGE_OLDER_KEYS = new Set(['\u001b[C', '\u001bOC'])
+
+/** Map a raw stdin key sequence to a page direction, or null when it is not a page key. */
+export function pageKeyAction(seq: string): PageKey {
+  if (PAGE_OLDER_KEYS.has(seq)) return 'older'
+  if (PAGE_NEWER_KEYS.has(seq)) return 'newer'
+  return null
+}
+
+// Keep every active slot plus the newest `budget` settled ones. Anything older
+// cannot fit the live page (one row minimum per slot), so the fitting loop need
+// never consider it.
+function trimToBudget(pool: PRSlot[], budget: number): PRSlot[] {
+  const settled = pool.filter(s => s.completedAt !== undefined)
+  if (settled.length <= budget) return pool.slice()
+  const keep = new Set(settled.slice(settled.length - budget))
+  return pool.filter(s => s.completedAt === undefined || keep.has(s))
+}
+
+/**
+ * The one outcome a settled slot counts toward. A recheck verdict supersedes
+ * the review verdict — it is the later word on the same PR — and `null` from
+ * either step means a reviewer ran but returned nothing parseable, which is a
+ * different event from never having run at all.
+ */
+function outcomeOf(slot: PRSlot): Outcome {
+  if (slot.error !== undefined) return 'error'
+  const final = typeof slot.recheckVerdict === 'string'
+    ? slot.recheckVerdict
+    : typeof slot.verdict === 'string' ? slot.verdict : null
+  if (final === 'APPROVE' || final === 'NEEDS WORK' || final === 'BLOCK') return final
+  if (slot.recheckVerdict === null || slot.verdict === null) return 'no verdict'
+  return 'skipped'
 }
 
 function makeBar(filled: number, total: number, fillFn: ChalkFn, emptyFn: ChalkFn): string {
@@ -213,6 +363,7 @@ function buildTheme(cfg: DisplayTheme): Theme {
     warning: chalk.yellow,
     error: chalk.red,
     dim: chalk.dim,
+    muted: chalk.gray.dim,
     accent: chalk.cyan,
     barPRFill: resolveColor(cfg.bar_fill),
     barEmpty: empty,
@@ -229,7 +380,7 @@ function buildTheme(cfg: DisplayTheme): Theme {
 const CONN_LOG_MAX = 6  // max connectivity log lines kept in memory
 const COMPACT_CONN_LOG_LINES = 2  // conn log lines shown when the live block must shrink to fit the viewport
 const FOLD_THRESHOLD = 3  // when completed count exceeds this, fold all completed PRs to 1 line
-const WORKSPACE_MAX = 25  // when total slots exceed this, evict oldest completed to scrollback
+const HISTORY_MAX = 2000  // hard cap on retained slots — oldest settled rows drop out beyond it
 
 interface LayoutOpts {
   foldAll: boolean        // fold every completed slot regardless of FOLD_THRESHOLD
@@ -248,6 +399,10 @@ export class PRBoard {
   private liveContent = ''
   private readonly isTTY: boolean = Boolean(process.stdout.isTTY)
   private connLog: string[] = []
+  private page = 0        // 0 = live page (newest); higher = further back in history
+  private pageCount = 1   // recomputed every render; page keys clamp against it
+  private keyHandler: ((data: Buffer) => void) | null = null
+  private stdinWasRaw = false
 
   private stats: Stats = {
     prsReceived: 0,
@@ -256,6 +411,7 @@ export class PRBoard {
     errorsOccurred: 0,
     crTotalMs: 0,
     sessionStart: Date.now(),
+    outcomes: { 'APPROVE': 0, 'NEEDS WORK': 0, 'BLOCK': 0, 'no verdict': 0, 'skipped': 0, 'error': 0 },
   }
 
   private tunnel: { type: string; url: string | null; alive: boolean } = {
@@ -284,6 +440,7 @@ export class PRBoard {
 
   start(): void {
     if (!this.isTTY) return
+    this.attachKeys()
     this.timer = setInterval(() => {
       this.frameIdx = (this.frameIdx + 1) % FRAMES.length
       this.redraw()
@@ -292,19 +449,35 @@ export class PRBoard {
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null }
+    this.detachKeys()
     this.eraseLive()
+  }
+
+  /** Flip one page toward older history. No-op when already at the oldest page. */
+  pageOlder(): void {
+    const next = Math.min(this.page + 1, Math.max(0, this.pageCount - 1))
+    if (next === this.page) return
+    this.page = next
+    this.redraw()
+  }
+
+  /** Flip one page toward the live page. No-op when already on it. */
+  pageNewer(): void {
+    if (this.page === 0) return
+    this.page--
+    this.redraw()
   }
 
   addPR(key: string, prNumber: number, repo: string, branch: string, round?: number): void {
     // When a new round starts for a PR that already has a completed slot in the
-    // workspace, evict the prior-round slot to scrollback so only the current
-    // round is shown. Prior-round slots always have a different key (different
-    // SHA suffix) but the same prNumber + repo combination.
+    // workspace, mark the prior-round slot superseded so only the current round
+    // shows on the live page. It stays in the map: history pages still carry it.
+    // Prior-round slots always have a different key (different SHA suffix) but
+    // the same prNumber + repo combination.
     if ((round ?? 1) >= 2) {
       for (const [existingKey, slot] of this.slots) {
         if (existingKey !== key && slot.prNumber === prNumber && slot.repo === repo && slot.completedAt !== undefined) {
-          this.printStatic(this.renderPRSlotFolded(slot))
-          this.slots.delete(existingKey)
+          slot.superseded = true
         }
       }
     }
@@ -347,6 +520,7 @@ export class PRBoard {
       this.stats.crTotalMs += data.elapsedMs
     }
     if (fixCount !== undefined && fixCount > 0) this.stats.fixesApplied++
+    this.stats.outcomes[outcomeOf(slot)]++
 
     // Non-TTY has no live block to re-render — emit the folded line to scrollback and drop the slot.
     if (!this.isTTY) {
@@ -355,13 +529,31 @@ export class PRBoard {
     }
   }
 
+  /**
+   * Settle a slot that ended in an error. The slot stays in the workspace as a
+   * settled row, the same as a completed one: a failed run is a session record,
+   * and deleting it here was what pushed reviewer timeouts out of the table and
+   * into raw scrollback, where a long watch session showed 43 errors above an
+   * empty workspace reading "no PRs yet".
+   */
   failPR(key: string, error: string): void {
     const slot = this.slots.get(key)
-    this.slots.delete(key)
     this.stats.errorsOccurred++
-    if (slot) {
-      const ts = fmtTime()
-      this.printStatic(`${chalk.dim(ts)}  PR #${slot.prNumber}  ${chalk.red('✗')} ${error}`)
+    if (!slot || slot.completedAt !== undefined) return
+
+    slot.completedAt = Date.now()
+    // A failure message is whatever the thrower had — a subprocess dump can
+    // arrive with embedded newlines and hundreds of columns. The folded row is
+    // clamped to one terminal row and history pagination counts on that, so the
+    // text is flattened here rather than at render time. The untouched error is
+    // in the file log.
+    slot.error = oneLine(error, 160)
+    slot.label = 'failed'
+    this.stats.outcomes.error++
+
+    if (!this.isTTY) {
+      process.stdout.write(this.renderPRSlotFolded(slot) + '\n')
+      this.slots.delete(key)
     }
   }
 
@@ -436,13 +628,44 @@ export class PRBoard {
 
   // ── Private: render ────────────────────────────────────────────────────────
 
-  private uptime(): string {
-    const totalSec = Math.floor((Date.now() - this.stats.sessionStart) / 1000)
-    const h = Math.floor(totalSec / 3600)
-    const m = Math.floor((totalSec % 3600) / 60)
-    const s = totalSec % 60
-    if (h > 0) return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
-    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  /** "since 08:25 PM · up 3h32m" — when watch started, and how long it has run. */
+  private sessionRow(): string {
+    const t = this.theme
+    const started = fmtStartTime(this.stats.sessionStart)
+    const age = fmtUptime(Date.now() - this.stats.sessionStart)
+    return `${t.dim('since')} ${started}  ${t.dim('·')}  ${t.dim('up')} ${age}`
+  }
+
+  /**
+   * Outcome shares across every PR that settled this session, e.g.
+   * "APPROVE 45% · BLOCK 30% · error 25%". Empty when nothing has settled yet.
+   */
+  private outcomeRow(): string {
+    const t = this.theme
+    const counts = OUTCOME_ORDER.map(o => this.stats.outcomes[o])
+    const total = counts.reduce((a, b) => a + b, 0)
+    if (total === 0) return ''
+
+    const pcts = distribute(counts)
+    const mixed = counts.filter(c => c > 0).length > 1
+    const parts = OUTCOME_ORDER.map((outcome, i) => {
+      if (counts[i] === 0) return null
+      // A share too small to earn a whole point still happened; "<1%" says so
+      // where "0%" would read as never. Its complement is then not a whole 100
+      // either — "error 100%" beside "APPROVE <1%" contradicts itself — so the
+      // rounded-up bucket reads ">99%" whenever some other outcome is non-zero.
+      const pct = pcts[i] === 0 ? '<1%'
+        : pcts[i] === 100 && mixed ? '>99%'
+        : `${pcts[i]}%`
+      const paint = outcome === 'APPROVE' ? t.barCRApprove
+        : outcome === 'BLOCK' ? t.barCRBlock
+        : outcome === 'NEEDS WORK' ? t.barCRNeedsWork
+        : outcome === 'error' ? t.error
+        : t.dim
+      return `${paint(outcome)} ${t.dim(pct)}`
+    }).filter((p): p is string => p !== null)
+
+    return parts.join(t.dim(' · '))
   }
 
   private statsRow(): string {
@@ -456,7 +679,7 @@ export class PRBoard {
     return `PRs: ${prsReceived} · CRs: ${crsCompleted}${errorPart} · fixes: ${fixesApplied}${avgCr}`
   }
 
-  private renderPRSlot(slot: PRSlot, frame: string): string {
+  private renderPRSlot(slot: PRSlot, frame: string, numWidth = 0): string {
     const t = this.theme
     const w = process.stdout.columns || 80
     const isCompleted = slot.completedAt !== undefined
@@ -469,15 +692,15 @@ export class PRBoard {
     const branch = truncate(slot.branch, 22)
     const icon = isCompleted ? t.success('✓') : t.spinner(frame)
     const phaseLabel = this.phaseLine1Label(slot, frame)
-    const timePart = isCompleted
-      ? t.dim(eSuffix)
-      : `${t.dim('started ' + fmtStartTime(slot.startedAt))}  ${t.dim(eSuffix)}`
-    const rightPart = `${timePart}  ${phaseLabel}`
-    const identityPlain = `   #${slot.prNumber}  ${slot.repo}  ${branch}`
+    // The entered-at column after the PR number already says when it started.
+    const rightPart = `${t.dim(eSuffix)}  ${phaseLabel}`
+    const numText = `#${slot.prNumber}`.padEnd(numWidth)
+    const entered = fmtEnteredAt(slot.startedAt)
+    const identityPlain = `   ${numText}  ${entered}  ${slot.repo}  ${branch}`
     const l1Pad = Math.max(2, w - stripAnsi(identityPlain).length - stripAnsi(rightPart).length - 2)
-    const prNum = isCompleted ? t.dim(`#${slot.prNumber}`) : chalk.bold(`#${slot.prNumber}`)
+    const prNum = isCompleted ? t.dim(numText) : chalk.bold(numText)
     const repoStr = isCompleted ? t.dim(slot.repo) : chalk.white(slot.repo)
-    const l1 = `  ${icon} ${prNum}  ${repoStr}  ${t.dim(branch)}` +
+    const l1 = `  ${icon} ${prNum}  ${t.dim(entered)}  ${repoStr}  ${t.dim(branch)}` +
       ' '.repeat(l1Pad) + rightPart
 
     // ── Line 2: PR | CR | Fix | Recheck pipeline ────────────────────────────────
@@ -617,8 +840,7 @@ export class PRBoard {
   private render(): string {
     if (!this.config) return ''
 
-    // When the workspace overflows, evict oldest completed slots to scrollback.
-    this.evictOverflow()
+    this.trimHistory()
 
     const w = process.stdout.columns || 80
     // The live block must never be taller than the viewport: lines that scroll
@@ -626,23 +848,64 @@ export class PRBoard {
     // viewport top), leaving permanent duplicates in scrollback. Reserve one
     // row for the trailing newline writeLive appends.
     const budget = (process.stdout.rows || 24) - 1
+    const entries = [...this.slots.values()]
 
-    const normal = this.renderLayout(w, LAYOUT_NORMAL)
-    if (this.countRenderedLines(normal, w) <= budget) return normal
+    // The live page carries every active slot plus the newest settled ones that
+    // fit. What it cannot show is not dropped — it moves into the history pages.
+    const live = this.fitLivePage(entries.filter(s => s.superseded !== true), w, budget)
+    const onLivePage = new Set(live.visible)
+    const history = entries.filter(s => !onLivePage.has(s))  // oldest → newest
 
-    let compact = this.renderLayout(w, LAYOUT_COMPACT)
-    // Still too tall: flush oldest completed slots to scrollback until it fits.
-    while (this.countRenderedLines(compact, w) > budget && this.evictOldestCompleted()) {
-      compact = this.renderLayout(w, LAYOUT_COMPACT)
-    }
-    if (this.countRenderedLines(compact, w) <= budget) return compact
+    // History rows are always folded, and a folded row is clamped to one
+    // terminal row, so a history page holds exactly the rows the panels leave.
+    const perPage = Math.max(1, budget - this.chromeRows(w, LAYOUT_COMPACT))
+    this.pageCount = 1 + Math.ceil(history.length / perPage)
+    this.page = Math.max(0, Math.min(this.page, this.pageCount - 1))
 
-    // Only active slots remain and they still overflow (tiny terminal):
-    // drop rows from the top, keeping the most recent activity visible.
-    return this.truncateTop(compact, w, budget)
+    if (this.page === 0) return this.fitToBudget(this.renderLayout(w, live.opts, live.visible, entries.length), w, budget)
+
+    // Page 1 is the newest history page, so it ends where the live page begins.
+    const end = history.length - (this.page - 1) * perPage
+    const slice = history.slice(Math.max(0, end - perPage), end)
+    return this.fitToBudget(this.renderLayout(w, LAYOUT_COMPACT, slice, entries.length), w, budget)
   }
 
-  private renderLayout(w: number, opts: LayoutOpts): string {
+  /**
+   * Pick the slots the live page shows: the expanded layout when it fits, then
+   * the compact one, then compact with the oldest settled slots handed over to
+   * history until the block fits the viewport. Active slots are never handed
+   * over — a running review must stay on screen.
+   */
+  private fitLivePage(pool: PRSlot[], w: number, budget: number): { visible: PRSlot[]; opts: LayoutOpts } {
+    // Bound the work: a slot costs at least one row, so a settled slot older
+    // than the last `budget` of them can never fit on the live page anyway.
+    const visible = trimToBudget(pool, budget)
+
+    const fits = (opts: LayoutOpts): boolean =>
+      this.countRenderedLines(this.renderLayout(w, opts, visible, pool.length), w) <= budget
+
+    if (fits(LAYOUT_NORMAL)) return { visible, opts: LAYOUT_NORMAL }
+
+    while (!fits(LAYOUT_COMPACT)) {
+      const oldestSettled = visible.findIndex(s => s.completedAt !== undefined)
+      if (oldestSettled === -1) break  // only active slots left — truncateTop takes it from here
+      visible.splice(oldestSettled, 1)
+    }
+    return { visible, opts: LAYOUT_COMPACT }
+  }
+
+  /** Rows the panels and footer cost, i.e. everything but the PR rows. */
+  private chromeRows(w: number, opts: LayoutOpts): number {
+    return this.countRenderedLines(this.renderLayout(w, opts, [], this.slots.size), w)
+  }
+
+  private fitToBudget(content: string, w: number, budget: number): string {
+    return this.countRenderedLines(content, w) <= budget
+      ? content
+      : this.truncateTop(content, w, budget)
+  }
+
+  private renderLayout(w: number, opts: LayoutOpts, visible: PRSlot[], total: number): string {
     const t = this.theme
     // Use w-1 to prevent the exact-terminal-width cursor wrap ambiguity that
     // causes the first char of the next line to appear at the end of the separator.
@@ -653,20 +916,23 @@ export class PRBoard {
       sep,
       ...this.renderStatsPanel(opts.connLogLines, opts.showTip),
       sep,
-      ...this.renderPRWorkspace(opts.foldAll),
+      ...this.renderPRWorkspace(visible, opts.foldAll, w),
       sep,
+      // Clamped: the footer is counted as exactly one row when sizing a page.
+      truncateVisible(this.renderFooter(visible.length, total), w - 1),
     ].join('\n')
   }
 
-  /** Evict the oldest completed slot to scrollback. Returns false when none left. */
-  private evictOldestCompleted(): boolean {
+  /** Drop the oldest settled slots once the session history outgrows the cap. */
+  private trimHistory(): void {
+    if (this.slots.size <= HISTORY_MAX) return
+    let excess = this.slots.size - HISTORY_MAX
     for (const [key, slot] of this.slots) {
-      if (slot.completedAt === undefined) continue
-      this.printStatic(this.renderPRSlotFolded(slot))
+      if (excess <= 0) break
+      if (slot.completedAt === undefined) continue  // never drop an active slot
       this.slots.delete(key)
-      return true
+      excess--
     }
-    return false
   }
 
   /** Drop rows from the top until the content (plus an indicator line) fits the budget. */
@@ -706,7 +972,12 @@ export class PRBoard {
     const t = this.theme
     const lines: string[] = []
 
-    lines.push(`  ${this.statsRow()}  ${t.dim('│')}  ${t.dim('↑')} ${this.uptime()}`)
+    lines.push(`  ${this.statsRow()}`)
+
+    // Session line: start time + age, and the outcome split when anything has
+    // settled. One row, because every row here costs a PR row on the live page.
+    const outcomes = this.outcomeRow()
+    lines.push(`  ${this.sessionRow()}${outcomes ? `  ${t.dim('│')}  ${outcomes}` : ''}`)
 
     const { type: tunnelType, url, alive } = this.tunnel
     if (tunnelType !== 'none') {
@@ -743,25 +1014,28 @@ export class PRBoard {
     return `  ${badge}${formatted}`
   }
 
-  private renderPRWorkspace(foldAll: boolean): string[] {
+  private renderPRWorkspace(visible: PRSlot[], foldAll: boolean, w: number): string[] {
     const t = this.theme
     const frame = FRAMES[this.frameIdx]
 
-    if (this.slots.size === 0) {
-      return [t.dim('  waiting for PRs...')]
+    if (visible.length === 0) {
+      return this.slots.size === 0 ? [t.dim('  waiting for PRs...')] : []
     }
 
     let completedCount = 0
-    for (const slot of this.slots.values()) {
+    for (const slot of visible) {
       if (slot.completedAt !== undefined) completedCount++
     }
     const foldByCount = completedCount > FOLD_THRESHOLD
+
+    // Pad the PR number to the page's widest so the entered-at column lines up.
+    const numWidth = Math.max(...visible.map(s => `#${s.prNumber}`.length))
 
     const lines: string[] = []
     let prevWasExpanded = false
     let first = true
 
-    for (const slot of this.slots.values()) {
+    for (const slot of visible) {
       const isCompleted = slot.completedAt !== undefined
       // Sticky fold: once a completed slot folds because the count crossed
       // FOLD_THRESHOLD, keep it folded. Otherwise a later recheck round drops
@@ -770,14 +1044,19 @@ export class PRBoard {
       // height-driven foldAll is deliberately NOT sticky — a taller terminal
       // should re-expand.
       if (isCompleted && foldByCount) slot.stickyFolded = true
-      const useFolded = isCompleted && (foldAll || slot.stickyFolded === true)
+      // A failed slot is always folded: its pipeline bars are frozen wherever the
+      // run died ("CR queued", "Fix queued"), which describes work that will
+      // never happen. The folded row carries the error instead.
+      const useFolded = isCompleted && (foldAll || slot.stickyFolded === true || slot.error !== undefined)
 
       if (useFolded) {
-        lines.push(this.renderPRSlotFolded(slot))
+        // Clamped so the row never wraps: history pagination sizes a page by
+        // counting one terminal row per folded slot.
+        lines.push(truncateVisible(this.renderPRSlotFolded(slot, numWidth), w - 1))
         prevWasExpanded = false
       } else {
         if (!first && prevWasExpanded) lines.push('')
-        lines.push(this.renderPRSlot(slot, frame))
+        lines.push(this.renderPRSlot(slot, frame, numWidth))
         prevWasExpanded = true
       }
       first = false
@@ -786,9 +1065,31 @@ export class PRBoard {
     return lines
   }
 
+  /** Footer: where in the retained history this page sits, and how to move. */
+  private renderFooter(shown: number, total: number): string {
+    const t = this.theme
+    if (total === 0) return t.dim('  no PRs yet')
+
+    const position = this.page === 0
+      ? `${t.success('live')}${this.pageCount > 1 ? t.dim(` · page 1/${this.pageCount}`) : ''}`
+      : t.dim(`history · page ${this.page + 1}/${this.pageCount}`)
+    // "shown of retained", not of stats.prsReceived: rounds add rows, and the
+    // history cap eventually drops the oldest, so the two counts diverge.
+    const counts = t.dim(`showing ${shown} of ${total}`)
+    // A key with nowhere to go fades to the muted colour: ← on the live page,
+    // → on the oldest history page.
+    const key = (arrow: string, label: string, live: boolean): string =>
+      live ? `${t.accent(arrow)} ${t.dim(label)}` : t.muted(`${arrow} ${label}`)
+    const keys = this.pageCount > 1
+      ? `  ${t.dim('│')}  ${key('←', 'newer', this.page > 0)}  ${key('→', 'older', this.page < this.pageCount - 1)}`
+      : ''
+
+    return `  ${position}  ${t.dim('│')}  ${counts}${keys}`
+  }
+
   // ── Folded PR slot ─────────────────────────────────────────────────────────
 
-  private renderPRSlotFolded(slot: PRSlot): string {
+  private renderPRSlotFolded(slot: PRSlot, numWidth = 0): string {
     const t = this.theme
     const elapsedMs = (slot.completedAt ?? Date.now()) - slot.startedAt
     const elapsed = fmtDuration(elapsedMs)
@@ -817,28 +1118,57 @@ export class PRBoard {
       parts.push(`recheck ${rFn(slot.recheckVerdict)}`)
     }
 
+    // A failed run reports the error in place of the verdict trail: whatever the
+    // pipeline had reached is what it never got to finish, and the reason it
+    // stopped is the only thing worth the row.
+    if (slot.error !== undefined) {
+      parts.push(t.error(slot.error))
+    }
+
     const urlPart = slot.url ? `  ${t.dim('→')} ${t.accent(slot.url)}` : ''
     const partsStr = parts.length > 0 ? parts.join(t.dim(' · ')) : t.dim('—')
+    const icon = slot.error !== undefined ? t.error('✗') : t.success('✓')
 
-    return `  ${t.success('✓')} ${t.dim(`#${slot.prNumber}`)}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(`(${elapsed})`)}${urlPart}`
-  }
-
-  // ── Overflow eviction ──────────────────────────────────────────────────────
-
-  private evictOverflow(): void {
-    if (this.slots.size <= WORKSPACE_MAX) return
-    let toEvict = this.slots.size - WORKSPACE_MAX
-    for (const [key, slot] of this.slots) {
-      if (toEvict <= 0) break
-      if (slot.completedAt === undefined) continue  // never evict active
-      this.printStatic(this.renderPRSlotFolded(slot))
-      this.slots.delete(key)
-      toEvict--
-    }
+    const numText = `#${slot.prNumber}`.padEnd(numWidth)
+    return `  ${icon} ${t.dim(numText)}  ${t.dim(fmtEnteredAt(slot.startedAt))}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(`(${elapsed})`)}${urlPart}`
   }
 
   private redraw(): void {
     const content = this.render()
     if (content) this.writeLive(content)
+  }
+
+  // ── Private: key input ─────────────────────────────────────────────────────
+
+  private attachKeys(): void {
+    const stdin = process.stdin
+    if (this.keyHandler || !stdin.isTTY) return
+
+    this.stdinWasRaw = stdin.isRaw === true
+    stdin.setRawMode(true)
+    stdin.resume()
+
+    const handler = (data: Buffer): void => {
+      const seq = data.toString('utf8')
+      // Raw mode suppresses the terminal's own ctrl-c → SIGINT translation, so
+      // the board has to raise it itself or the daemon becomes unkillable.
+      if (seq === '\u0003') { process.kill(process.pid, 'SIGINT'); return }
+      const action = pageKeyAction(seq)
+      if (action === 'older') this.pageOlder()
+      else if (action === 'newer') this.pageNewer()
+    }
+
+    stdin.on('data', handler)
+    this.keyHandler = handler
+  }
+
+  private detachKeys(): void {
+    if (!this.keyHandler) return
+    process.stdin.off('data', this.keyHandler)
+    this.keyHandler = null
+    // Hand the terminal back the way it was found: the idle-issue flow and the
+    // interactive prompts read stdin themselves while the board is stopped.
+    if (process.stdin.isTTY && !this.stdinWasRaw) process.stdin.setRawMode(false)
+    process.stdin.pause()
   }
 }

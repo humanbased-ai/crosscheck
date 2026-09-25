@@ -42,7 +42,8 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
 
 export const QualityConfigSchema = z.object({
   // The tier when `mode: fixed`, and the fallback under `mode: smart` whenever a
-  // PR's file list cannot be read (one-shot commands, API failures).
+  // PR's file list cannot be read from its clone, or when an explicit request
+  // (`crosscheck review`, `run --steps`) overrides a class that would skip the PR.
   tier: z.enum(['fast', 'balanced', 'thorough']).default('balanced'),
   // smart (default): dynamically adjust model + effort based on task type. The
   //   PR is classified from its changed-file list against the versioned policy
@@ -63,6 +64,7 @@ export const QualityConfigSchema = z.object({
   mode: z.enum(['fixed', 'smart']).default('smart'),
   focus: z.array(z.string()).default([]),
   custom_prompt: z.string().optional(),
+  review_memory: z.boolean().default(true),
 })
 
 export const SkillsConfigSchema = z.object({
@@ -225,6 +227,14 @@ export const BacktraceConfigSchema = z.object({
   // Scan for open PRs without a [crosscheck] comment on startup.
   // Off by default — pass --backtrace (watch/serve) or set enabled: true in config to opt in.
   enabled: z.boolean().default(false),
+  // Re-run the scan every N minutes while watch is up. 0 = startup only.
+  // Webhook delivery is best-effort: a PR opened while watch was down, a smee
+  // reconnect gap, or an org-hook registration failure all leave a PR that no
+  // event will ever mention again. The recurring sweep is the safety net.
+  interval_min: z.number().int().min(0).default(0),
+  // Max reviews the sweep starts at once. Unbounded fan-out is what exhausts a
+  // reviewer subscription and drives the 600s diff timeouts.
+  concurrency: z.number().int().min(1).default(2),
 })
 
 export const WatchIdleIssueSchema = z.object({
@@ -349,6 +359,7 @@ export const ConfigSchema = z.object({
   // Pick https if you have multi-account SSH setup or your default SSH key cannot
   // access target repos. Independent of `gh config get git_protocol`.
   clone_protocol: z.enum(['ssh', 'https']).default('ssh'),
+  repository_cache: z.boolean().default(true),
   vendors: z.object({
     codex: CodexVendorConfigSchema.default({}),
     claude: VendorConfigSchema.default({}),
