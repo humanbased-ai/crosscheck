@@ -263,8 +263,9 @@ export type PageKey = 'older' | 'newer' | null
 // arrive inconsistently or not at all (macOS never forwards cmd). Each arrow has
 // two encodings: normal cursor mode (`ESC [ D`) and application cursor mode
 // (`ESC O D`), which Terminal.app emits while an alternate-screen app owns the tty.
-const PAGE_OLDER_KEYS = new Set(['\u001b[D', '\u001bOD'])
-const PAGE_NEWER_KEYS = new Set(['\u001b[C', '\u001bOC'])
+// ← moves toward newer PRs (the live page), → toward older history.
+const PAGE_NEWER_KEYS = new Set(['\u001b[D', '\u001bOD'])
+const PAGE_OLDER_KEYS = new Set(['\u001b[C', '\u001bOC'])
 
 /** Map a raw stdin key sequence to a page direction, or null when it is not a page key. */
 export function pageKeyAction(seq: string): PageKey {
@@ -1075,12 +1076,12 @@ export class PRBoard {
     // "shown of retained", not of stats.prsReceived: rounds add rows, and the
     // history cap eventually drops the oldest, so the two counts diverge.
     const counts = t.dim(`showing ${shown} of ${total}`)
-    // A key with nowhere to go fades to the muted colour: → on the live page,
-    // ← on the oldest history page.
+    // A key with nowhere to go fades to the muted colour: ← on the live page,
+    // → on the oldest history page.
     const key = (arrow: string, label: string, live: boolean): string =>
       live ? `${t.accent(arrow)} ${t.dim(label)}` : t.muted(`${arrow} ${label}`)
     const keys = this.pageCount > 1
-      ? `  ${t.dim('│')}  ${key('←', 'older', this.page < this.pageCount - 1)}  ${key('→', 'newer', this.page > 0)}`
+      ? `  ${t.dim('│')}  ${key('←', 'newer', this.page > 0)}  ${key('→', 'older', this.page < this.pageCount - 1)}`
       : ''
 
     return `  ${position}  ${t.dim('│')}  ${counts}${keys}`

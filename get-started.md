@@ -327,12 +327,13 @@ When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned 
 handled, not just the ones on screen. The footer says where you are:
 
 ```
-  live · page 1/4  │  showing 18 of 61  │  ← older  → newer
+  live · page 1/4  │  showing 18 of 61  │  ← newer  → older
 ```
 
-Press `←` to page back through the history and `→` to return to the live page.
+Press `→` to page back through older history and `←` to return toward the newer
+PRs on the live page.
 The arrows are the only page keys, on Windows, Linux and macOS alike. A key with
-nowhere to go is shown in a muted colour: `→` on the live page, `←` on the
+nowhere to go is shown in a muted colour: `←` on the live page, `→` on the
 oldest page. The live page keeps its place while
 you browse: new PR events land on it without yanking you forward. Per-event
 narration (routing decisions, strategy picks) is no longer printed between the

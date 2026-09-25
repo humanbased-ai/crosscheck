@@ -497,7 +497,7 @@ describe('PRBoard — history pagination', () => {
     board.pageOlder()
     const older = footerOf(invokeRender())
     expect(older).toContain('history · page 2/')
-    expect(older).toContain('←')
+    expect(older).toContain('→')
   })
 
   it('keeps a history page inside the viewport', () => {
@@ -517,17 +517,17 @@ describe('PRBoard — history pagination', () => {
       const rawFooter = () => invokeRender().split('\n').at(-1) ?? ''
       const muted = (k: string) => chalk.gray.dim(k)
 
-      // Live page: nothing newer, so → fades; ← still leads somewhere.
-      expect(rawFooter()).toContain(muted('→ newer'))
-      expect(rawFooter()).not.toContain(muted('← older'))
+      // Live page: nothing newer, so ← fades; → still leads somewhere.
+      expect(rawFooter()).toContain(muted('← newer'))
+      expect(rawFooter()).not.toContain(muted('→ older'))
 
       board.pageOlder()
-      expect(rawFooter()).not.toContain(muted('→ newer'))
-      expect(rawFooter()).not.toContain(muted('← older'))
+      expect(rawFooter()).not.toContain(muted('← newer'))
+      expect(rawFooter()).not.toContain(muted('→ older'))
 
       for (let i = 0; i < 50; i++) board.pageOlder()
-      expect(rawFooter()).toContain(muted('← older'))
-      expect(rawFooter()).not.toContain(muted('→ newer'))
+      expect(rawFooter()).toContain(muted('→ older'))
+      expect(rawFooter()).not.toContain(muted('← newer'))
     } finally {
       chalk.level = level
     }
@@ -632,17 +632,17 @@ describe('PRBoard — key input', () => {
     board.start()
     expect(fake.isRaw).toBe(true)
 
-    fake.emit('data', Buffer.from('\u001b[D'))
-    expect(page()).toBe(1)
-    fake.emit('data', Buffer.from('\u001b[D'))
-    expect(page()).toBe(2)
     fake.emit('data', Buffer.from('\u001b[C'))
+    expect(page()).toBe(1)
+    fake.emit('data', Buffer.from('\u001b[C'))
+    expect(page()).toBe(2)
+    fake.emit('data', Buffer.from('\u001b[D'))
     expect(page()).toBe(1)
 
     board.stop()
     expect(fake.isRaw).toBe(false)          // terminal handed back
     expect(fake.listenerCount('data')).toBe(0)
-    fake.emit('data', Buffer.from('\u001b[D'))
+    fake.emit('data', Buffer.from('\u001b[C'))
     expect(page()).toBe(1)                  // no longer listening
   })
 
@@ -665,10 +665,10 @@ describe('PRBoard — key input', () => {
 
 describe('pageKeyAction', () => {
   it('maps the left and right arrows, in normal and application cursor mode', () => {
-    expect(pageKeyAction('\u001b[D')).toBe('older')
-    expect(pageKeyAction('\u001b[C')).toBe('newer')
-    expect(pageKeyAction('\u001bOD')).toBe('older')
-    expect(pageKeyAction('\u001bOC')).toBe('newer')
+    expect(pageKeyAction('\u001b[D')).toBe('newer')
+    expect(pageKeyAction('\u001b[C')).toBe('older')
+    expect(pageKeyAction('\u001bOD')).toBe('newer')
+    expect(pageKeyAction('\u001bOC')).toBe('older')
   })
 
   it('ignores every other key, including the retired < > , . and modified-arrow bindings', () => {
