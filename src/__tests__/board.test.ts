@@ -497,7 +497,7 @@ describe('PRBoard — history pagination', () => {
     board.pageOlder()
     const older = footerOf(invokeRender())
     expect(older).toContain('history · page 2/')
-    expect(older).toContain('←')
+    expect(older).toContain('→')
   })
 
   it('keeps a history page inside the viewport', () => {
@@ -517,17 +517,17 @@ describe('PRBoard — history pagination', () => {
       const rawFooter = () => invokeRender().split('\n').at(-1) ?? ''
       const muted = (k: string) => chalk.gray.dim(k)
 
-      // Live page: nothing newer, so → fades; ← still leads somewhere.
-      expect(rawFooter()).toContain(muted('→ newer'))
-      expect(rawFooter()).not.toContain(muted('← older'))
+      // Live page: nothing newer, so ← fades; → still leads somewhere.
+      expect(rawFooter()).toContain(muted('← newer'))
+      expect(rawFooter()).not.toContain(muted('→ older'))
 
       board.pageOlder()
-      expect(rawFooter()).not.toContain(muted('→ newer'))
-      expect(rawFooter()).not.toContain(muted('← older'))
+      expect(rawFooter()).not.toContain(muted('← newer'))
+      expect(rawFooter()).not.toContain(muted('→ older'))
 
       for (let i = 0; i < 50; i++) board.pageOlder()
-      expect(rawFooter()).toContain(muted('← older'))
-      expect(rawFooter()).not.toContain(muted('→ newer'))
+      expect(rawFooter()).toContain(muted('→ older'))
+      expect(rawFooter()).not.toContain(muted('← newer'))
     } finally {
       chalk.level = level
     }
@@ -632,17 +632,17 @@ describe('PRBoard — key input', () => {
     board.start()
     expect(fake.isRaw).toBe(true)
 
-    fake.emit('data', Buffer.from('<'))
+    fake.emit('data', Buffer.from('\u001b[C'))
     expect(page()).toBe(1)
-    fake.emit('data', Buffer.from('<'))
+    fake.emit('data', Buffer.from('\u001b[C'))
     expect(page()).toBe(2)
-    fake.emit('data', Buffer.from('>'))
+    fake.emit('data', Buffer.from('\u001b[D'))
     expect(page()).toBe(1)
 
     board.stop()
     expect(fake.isRaw).toBe(false)          // terminal handed back
     expect(fake.listenerCount('data')).toBe(0)
-    fake.emit('data', Buffer.from('<'))
+    fake.emit('data', Buffer.from('\u001b[C'))
     expect(page()).toBe(1)                  // no longer listening
   })
 
@@ -664,41 +664,18 @@ describe('PRBoard — key input', () => {
 })
 
 describe('pageKeyAction', () => {
-  it('maps bare < and > and their unshifted keys', () => {
-    expect(pageKeyAction('<')).toBe('older')
-    expect(pageKeyAction(',')).toBe('older')
-    expect(pageKeyAction('>')).toBe('newer')
-    expect(pageKeyAction('.')).toBe('newer')
+  it('maps the left and right arrows, in normal and application cursor mode', () => {
+    expect(pageKeyAction('\u001b[D')).toBe('newer')
+    expect(pageKeyAction('\u001b[C')).toBe('older')
+    expect(pageKeyAction('\u001bOD')).toBe('newer')
+    expect(pageKeyAction('\u001bOC')).toBe('older')
   })
 
-  it('maps the CSI-u encodings terminals use for ctrl/cmd + punctuation', () => {
-    expect(pageKeyAction('\u001b[44;5u')).toBe('older')   // ctrl+,
-    expect(pageKeyAction('\u001b[46;5u')).toBe('newer')   // ctrl+.
-    expect(pageKeyAction('\u001b[60;9u')).toBe('older')   // cmd+<
-    expect(pageKeyAction('\u001b[62;9u')).toBe('newer')   // cmd+>
-  })
-
-  it('maps plain and modified arrows', () => {
-    expect(pageKeyAction('\u001b[D')).toBe('older')
-    expect(pageKeyAction('\u001b[C')).toBe('newer')
-    expect(pageKeyAction('\u001b[1;5D')).toBe('older')
-    expect(pageKeyAction('\u001b[1;5C')).toBe('newer')
-  })
-
-  it('maps the option+arrow and application-cursor forms macOS terminals send', () => {
-    expect(pageKeyAction('\u001bb')).toBe('older')          // Terminal.app option+left
-    expect(pageKeyAction('\u001bf')).toBe('newer')          // Terminal.app option+right
-    expect(pageKeyAction('\u001b\u001b[D')).toBe('older')   // iTerm2 option+left
-    expect(pageKeyAction('\u001b\u001b[C')).toBe('newer')   // iTerm2 option+right
-    expect(pageKeyAction('\u001bOD')).toBe('older')         // application-cursor left
-    expect(pageKeyAction('\u001bOC')).toBe('newer')         // application-cursor right
-  })
-
-  it('ignores everything else', () => {
-    expect(pageKeyAction('a')).toBe(null)
-    expect(pageKeyAction('\u0003')).toBe(null)
-    expect(pageKeyAction('\u001b[A')).toBe(null)
-    expect(pageKeyAction('\u001b[48;5u')).toBe(null)
+  it('ignores every other key, including the retired < > , . and modified-arrow bindings', () => {
+    for (const seq of ['<', '>', ',', '.', '\u001b[1;5D', '\u001b[1;5C', '\u001bb', '\u001bf',
+      '\u001b\u001b[D', '\u001b[44;5u', '\u001b[5~', '\u001b[6~', 'a', '\u0003', '\u001b[A']) {
+      expect(pageKeyAction(seq)).toBe(null)
+    }
   })
 })
 
