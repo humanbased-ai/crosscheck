@@ -16,7 +16,7 @@ import { ConfigSchema, CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../conf
 import { buildReviewCommentBody } from '../github/client.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { filterStepsByTypes } from '../lib/repo-workflow.js'
-import { strategyDeterminedModel, strategyVendor, resolveRoundExecution } from '../lib/runner.js'
+import { strategyDeterminedModel, strategyVendor, resolveRoundExecution, strategyCitation } from '../lib/runner.js'
 import { claudeEffort } from '../reviewers/claude.js'
 import { codexReasoningEffort } from '../reviewers/codex.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
@@ -393,6 +393,80 @@ describe('one round, one set of tier and effort decisions', () => {
   })
 })
 
+// `crosscheck review` derives its tier and effort from round 1 of the same
+// function run and watch use, so these pin the cases that command can reach.
+describe('round 1, as the one-shot review runs it', () => {
+  const config = (over: Record<string, unknown> = {}) => ConfigSchema.parse({ quality: { tier: 'balanced', mode: 'smart' }, ...over })
+  const strat = (tier: string | null, effort: string | null) =>
+    ({ version: '1.0.0', classId: 'c', reason: 'r', tier, effort, steps: ['review'], domain: 'backend' }) as never
+
+  it('applies the class tier and effort to both vendors', () => {
+    const exec = resolveRoundExecution(config(), strat('thorough', 'high'), 1)
+    expect(exec.quality.tier).toBe('thorough')
+    expect(exec.claudeVendor.effort).toBe('high')
+    expect(exec.codexVendor.effort).toBe('high')
+    expect(exec.escalated).toBe(false)
+  })
+
+  // Each vendor gets the class effort clamped to its own CLI's vocabulary: codex
+  // has an `xhigh` flag and the claude CLI does not.
+  it('clamps the class effort separately per vendor', () => {
+    const exec = resolveRoundExecution(config(), strat('balanced', 'xhigh'), 1)
+    expect(exec.codexVendor.effort).toBe('xhigh')
+    expect(exec.claudeVendor.effort).toBe('high')
+  })
+
+  it('leaves quality and both vendors untouched with no strategy', () => {
+    const cfg = config({ quality: { tier: 'fast', mode: 'fixed' } })
+    const exec = resolveRoundExecution(cfg, null, 1)
+    expect(exec.quality).toBe(cfg.quality)
+    expect(exec.claudeVendor).toBe(cfg.vendors.claude)
+    expect(exec.codexVendor).toBe(cfg.vendors.codex)
+    expect(exec.strategy).toBeNull()
+  })
+
+  // A skip class (null tier) that an explicit request overrides runs at the
+  // configured tier and effort, not at some tier the class never named.
+  it('falls back to the configured tier and effort on a null-tier class', () => {
+    const cfg = config({ quality: { tier: 'fast', mode: 'smart' }, vendors: { claude: { effort: 'low' }, codex: { effort: 'max' } } })
+    const exec = resolveRoundExecution(cfg, strat(null, null), 1)
+    expect(exec.quality.tier).toBe('fast')
+    expect(exec.claudeVendor.effort).toBe('low')
+    expect(exec.codexVendor.effort).toBe('max')
+  })
+})
+
+describe('strategyCitation', () => {
+  const strat = { version: '1.2.0', classId: 'risky', classLabel: 'Risky', reason: 'security path', tier: 'thorough' as const, effort: 'high', steps: [], domain: 'backend' as const }
+
+  it('cites version, class, tier, and reason when the strategy picked the model', () => {
+    expect(strategyCitation({ model: null }, strat, strat, 'claude-opus-5'))
+      .toEqual({ version: '1.2.0', classId: 'risky', tier: 'thorough', reason: 'security path' })
+  })
+
+  // An escalated round ran a promoted tier; the comment names the tier that ran.
+  it('cites the round tier, not the class tier, once a round escalates', () => {
+    const promoted = { ...strat, tier: 'thorough' as const }
+    expect(strategyCitation({ model: null }, { ...strat, tier: 'balanced' }, promoted, 'claude-opus-5')?.tier).toBe('thorough')
+  })
+
+  it('cites nothing when a pinned model, fixed mode, or the CLI default decided', () => {
+    expect(strategyCitation({ model: 'claude-sonnet-5' }, strat, strat, 'claude-sonnet-5')).toBeUndefined()
+    expect(strategyCitation({ model: null }, null, null, 'claude-opus-5')).toBeUndefined()
+    expect(strategyCitation({ model: null }, strat, strat, 'default')).toBeUndefined()
+  })
+
+  // resolveRoundExecution fills a null class tier from quality.tier, so the round
+  // strategy carries `fast` here. That tier is the config's, not the class's, and
+  // citing it would claim the generated class chose it.
+  it('cites the class without a tier when the class named none', () => {
+    const generated = { ...strat, classId: 'generated', reason: 'generated only', tier: null }
+    const filled = { ...generated, tier: 'fast' as const }
+    expect(strategyCitation({ model: null }, generated, filled, 'claude-haiku-4-5-20251001'))
+      .toEqual({ version: '1.2.0', classId: 'generated', tier: null, reason: 'generated only' })
+  })
+})
+
 describe('annotation round-trips the citation', () => {
   it('parses strategy, class, and tier back out', () => {
     const body = buildReviewCommentBody({
@@ -404,6 +478,19 @@ describe('annotation round-trips the citation', () => {
     expect(parsed?.strategy).toBe('1.0.0')
     expect(parsed?.class).toBe('risky')
     expect(parsed?.tier).toBe('thorough')
+  })
+
+  it('names the class but no tier when the class selects none', () => {
+    const body = buildReviewCommentBody({
+      body: 'findings', reviewer: 'claude', origin: 'codex', verdict: 'APPROVE',
+      model: 'claude-haiku-4-5-20251001', stepType: 'review', round: 1,
+      strategy: { version: '1.2.0', classId: 'generated', tier: null, reason: 'generated only' },
+    })
+    const parsed = parseAnnotation(body)
+    expect(parsed?.class).toBe('generated')
+    expect(parsed?.tier).toBeUndefined()
+    expect(body).not.toMatch(/tier=/)
+    expect(body).toContain('_generated only · strategy v1.2.0_')
   })
 })
 

@@ -12,13 +12,16 @@
 
 Status: **adopted and active**. This document is the evidence behind
 [`review-strategy.json`](../src/config/review-strategy.json); the JSON is what
-crosscheck reads at runtime. The runner classifies every PR from its cloned
-working copy, folds the result into the quality config the reviewers receive,
-and stamps the version, class, and tier into each annotation. When they disagree, the JSON wins and this document is
+crosscheck reads at runtime. The runner and `crosscheck review` classify every PR from its cloned
+working copy, fold the result into the quality config the reviewers receive,
+and stamp the version, class, and tier into each annotation. When they disagree, the JSON wins and this document is
 stale — the weekly `Review Strategy` workflow files an issue when either drifts.
 
 **Enforced today:** the `Tier`, `Effort`, and `Steps` columns below all reach the
-run. A class resolving to a null tier (class 1) skips the workflow outright; the
+run. A class resolving to a null tier (class 1) skips the workflow outright,
+unless an explicit request (`crosscheck review`, `run --steps`) overrides it and
+the step runs at the configured tier, with a comment that cites the class and its
+reason but no tier, since the class chose none; the
 per-class step set narrows the configured pipeline (never widens it — a repo
 pinned to review-only stays review-only); and rounds past the first escalate via
 `escalate()`, raising effort where the model supports it and promoting the tier

@@ -30,6 +30,7 @@ import { filterStepsByTypes, readRepoWorkflowStepTypes } from '../lib/repo-workf
 import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession } from '../skills/broker.js'
 import { formatSkillAttribution } from '../skills/attribution.js'
+import { resolveStrategyForPR, logStrategyResolution, resolveRoundExecution, strategyCitation } from '../lib/runner.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -218,6 +219,27 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       console.log(chalk.yellow(`  base ref origin/${pr.base.ref} was missing — recovered ${baseRefStatus === 'recovered_by_sha' ? 'from the PR base commit' : "from the PR's merge ref"}`))
     }
 
+    // Classified from the clone through the same functions as run and watch, so
+    // this review runs at the tier and effort the PR's class earns. Null under
+    // `quality.mode: fixed` or when the diff cannot be read, and then the
+    // configured tier applies unchanged.
+    const strategy = resolveStrategyForPR({ tmpDir, pr, config })
+    logStrategyResolution(config.quality, strategy, `${owner}/${repo}`, number)
+    // A null tier means the class would skip this PR. This command is an explicit
+    // request for one review, so it runs anyway at the configured tier — the call
+    // `run --steps` makes too — and says so, or it would look unclassified.
+    if (strategy && strategy.tier === null) {
+      console.log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} would skip this PR (${strategy.reason}) — honouring the explicit review`))
+      fileLog({ level: 'info', event: 'strategy_class_skip_bypassed', repo: `${owner}/${repo}`, pr: number, pr_class: strategy.classId, strategy_version: strategy.version })
+    }
+    // Round 1: this command has no fix loop, so nothing escalates.
+    const { strategy: appliedStrategy, quality, claudeVendor, codexVendor } = resolveRoundExecution(config, strategy, 1)
+    if (strategy && appliedStrategy) {
+      // Only the routed reviewer runs, so name the effort it was given.
+      const appliedEffort = reviewer === 'codex' ? codexVendor.effort : claudeVendor.effort
+      console.log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${appliedStrategy.tier ?? 'skip'} tier (${appliedEffort})`))
+    }
+
     const memoryPlan = config.quality.review_memory ? prepareReviewPlan({
       repoDir: tmpDir, subject: `${owner}/${repo}#${number}`, baseBranch: pr.base.ref,
       instructions: DEFAULT_REVIEW_INSTRUCTIONS, policy: JSON.stringify(config.quality),
@@ -243,8 +265,8 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           tmpDir,
           pr.base.ref,
           pr.title,
-          config.quality,
-          config.vendors.codex,
+          quality,
+          codexVendor,
           memoryPlan?.instructions,
           msg => { reviewSpinner!.text = msg },
           codexTimeoutMs,
@@ -258,8 +280,8 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           tmpDir,
           pr.base.ref,
           pr.title,
-          config.quality,
-          config.vendors.claude,
+          quality,
+          claudeVendor,
           config.budget.per_review_usd,
           memoryPlan?.instructions,
           msg => { reviewSpinner!.text = msg },
@@ -318,7 +340,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       const { data: current } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
       assertReviewFresh(memoryPlan, current, pr.head.sha, pr.head.sha, pr.state)
     }
-    await postReviewComment(octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort)
+    await postReviewComment(
+      octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort,
+      strategyCitation(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, strategy, appliedStrategy, model),
+    )
     if (memoryPlan && structured?.snapshot) {
       // The review is already posted; a memory write failure only costs the next review its delta.
       try {

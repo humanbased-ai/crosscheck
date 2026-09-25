@@ -42,7 +42,8 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
 
 export const QualityConfigSchema = z.object({
   // The tier when `mode: fixed`, and the fallback under `mode: smart` whenever a
-  // PR's file list cannot be read (one-shot commands, API failures).
+  // PR's file list cannot be read from its clone, or when an explicit request
+  // (`crosscheck review`, `run --steps`) overrides a class that would skip the PR.
   tier: z.enum(['fast', 'balanced', 'thorough']).default('balanced'),
   // smart (default): dynamically adjust model + effort based on task type. The
   //   PR is classified from its changed-file list against the versioned policy
