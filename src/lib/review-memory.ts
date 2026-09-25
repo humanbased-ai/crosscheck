@@ -146,8 +146,40 @@ function extractJson(raw: string): unknown {
   throw new Error('Structured review output is not valid JSON')
 }
 
-export function finishReview(plan: ReviewPlan, raw: string): { text: string; snapshot: Snapshot } {
-  const report = Report.parse(extractJson(raw))
+/**
+ * Lines up closed findings with the prior report before it is validated. A model
+ * that resolves a prior finding often cites the file where the fix landed, which
+ * changes the path half of its identity. Matched by key alone, when exactly one
+ * prior finding has that key and nothing else already claims it, it keeps the
+ * prior identity and location. A closed finding with no prior finding to close
+ * cannot change the verdict, which counts only open findings, so it is dropped
+ * instead of discarding the whole review. Open findings are left untouched.
+ */
+function reconcileClosedFindings(findings: Finding[], prior: Finding[]): { findings: Finding[]; adjustments: string[] } {
+  const priorIds = new Set(prior.map(findingId))
+  const claimed = new Set(findings.map(findingId))
+  const adjustments: string[] = []
+  const kept: Finding[] = []
+  for (const finding of findings) {
+    if (finding.status === 'open' || priorIds.has(findingId(finding))) { kept.push(finding); continue }
+    const sameKey = prior.filter(f => f.key === finding.key)
+    const target = sameKey.length === 1 ? sameKey[0] : undefined
+    const remappable = target && target.status === 'open' && target.priority !== 'P0' && target.priority !== 'P1'
+    if (target && remappable && !claimed.has(findingId(target))) {
+      claimed.add(findingId(target))
+      kept.push({ ...finding, path: target.path, line: target.line })
+      adjustments.push(`${finding.status} finding ${finding.key} reported at ${finding.path} matched the prior finding at ${target.path}`)
+    } else {
+      adjustments.push(`dropped ${finding.status} finding ${finding.key} at ${finding.path}: no prior finding to close`)
+    }
+  }
+  return { findings: kept, adjustments }
+}
+
+export function finishReview(plan: ReviewPlan, raw: string): { text: string; snapshot: Snapshot; adjustments: string[] } {
+  const parsed = Report.parse(extractJson(raw))
+  const { findings, adjustments } = reconcileClosedFindings(parsed.findings, plan.prior?.report.findings ?? [])
+  const report = { ...parsed, findings }
   const ids = report.findings.map(findingId)
   if (new Set(ids).size !== ids.length) throw new Error('Duplicate structured finding identity')
   const previous = new Map((plan.prior?.report.findings ?? []).map(f => [findingId(f), f]))
@@ -171,9 +203,10 @@ export function finishReview(plan: ReviewPlan, raw: string): { text: string; sna
     '## Findings',
     ...report.findings.map(f => `- **${f.status === 'open' ? `[${f.priority}] ` : ''}${f.title}** — ${f.path}:${f.line}\n  ID: ${findingId(f)} · ${f.status}\n  Trigger: ${f.trigger}\n  Impact: ${f.impact}\n  Evidence: ${f.evidence}`),
     ...(report.findings.length ? [] : ['None.']),
+    ...(adjustments.length ? [`Note: crosscheck adjusted the reviewer's closed findings: ${adjustments.join('; ')}.`] : []),
     `VERDICT: ${verdict}`,
   ].join('\n\n')
-  return { text, snapshot: { ...plan.snapshot, report } }
+  return { text, snapshot: { ...plan.snapshot, report }, adjustments }
 }
 
 export const STRUCTURED_FALLBACK_WARNING =
@@ -183,7 +216,7 @@ export const STRUCTURED_FALLBACK_WARNING =
  * finishReview, but a malformed or contract-violating report degrades to the raw
  * output with every VERDICT line removed, so it can never be posted as an approval.
  */
-export function finishReviewOrFallback(plan: ReviewPlan, raw: string): { text: string; snapshot?: Snapshot; fallbackReason?: string } {
+export function finishReviewOrFallback(plan: ReviewPlan, raw: string): { text: string; snapshot?: Snapshot; fallbackReason?: string; adjustments?: string[] } {
   try {
     return finishReview(plan, raw)
   } catch (err) {

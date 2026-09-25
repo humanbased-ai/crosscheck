@@ -1419,6 +1419,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const structured = memoryPlan ? finishReviewOrFallback(memoryPlan, rawReview) : undefined
       if (structured) rawReview = structured.text
+      if (structured?.adjustments?.length) {
+        fileLog({ level: 'info', event: 'structured_review_reconciled', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, adjustments: structured.adjustments })
+      }
       if (structured?.fallbackReason) {
         fileLog({ level: 'warn', event: 'structured_review_fallback', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, reason: structured.fallbackReason })
         log(chalk.yellow(`  structured review unusable (${structured.fallbackReason}) — posting raw output without a verdict`))
