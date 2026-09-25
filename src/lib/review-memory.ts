@@ -164,7 +164,8 @@ function reconcileClosedFindings(findings: Finding[], prior: Finding[]): { findi
     if (finding.status === 'open' || priorIds.has(findingId(finding))) { kept.push(finding); continue }
     const sameKey = prior.filter(f => f.key === finding.key)
     const target = sameKey.length === 1 ? sameKey[0] : undefined
-    if (target && !claimed.has(findingId(target))) {
+    const remappable = target && target.status === 'open' && target.priority !== 'P0' && target.priority !== 'P1'
+    if (target && remappable && !claimed.has(findingId(target))) {
       claimed.add(findingId(target))
       kept.push({ ...finding, path: target.path, line: target.line })
       adjustments.push(`${finding.status} finding ${finding.key} reported at ${finding.path} matched the prior finding at ${target.path}`)
@@ -202,6 +203,7 @@ export function finishReview(plan: ReviewPlan, raw: string): { text: string; sna
     '## Findings',
     ...report.findings.map(f => `- **${f.status === 'open' ? `[${f.priority}] ` : ''}${f.title}** — ${f.path}:${f.line}\n  ID: ${findingId(f)} · ${f.status}\n  Trigger: ${f.trigger}\n  Impact: ${f.impact}\n  Evidence: ${f.evidence}`),
     ...(report.findings.length ? [] : ['None.']),
+    ...(adjustments.length ? [`Note: crosscheck adjusted the reviewer's closed findings: ${adjustments.join('; ')}.`] : []),
     `VERDICT: ${verdict}`,
   ].join('\n\n')
   return { text, snapshot: { ...plan.snapshot, report }, adjustments }

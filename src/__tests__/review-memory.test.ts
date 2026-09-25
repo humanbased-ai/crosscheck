@@ -93,8 +93,8 @@ describe('review memory', () => {
     expect(review.adjustments).toEqual([expect.stringContaining('dropped resolved finding new')])
   })
   it('matches a resolved finding to its prior by key when the fix landed in another file', async () => {
-    await published([{ ...issue, priority: 'P1' }]); commit('screen.ts', 'export const label = "third"'); const p = plan()
-    const moved = { ...issue, priority: 'P1', path: 'main.ts', line: 268, status: 'resolved', evidence: 'main.ts now assigns the label' }
+    await published([{ ...issue, priority: 'P2' }]); commit('screen.ts', 'export const label = "third"'); const p = plan()
+    const moved = { ...issue, priority: 'P2', path: 'main.ts', line: 268, status: 'resolved', evidence: 'main.ts now assigns the label' }
     const fresh = { ...issue, key: 'secret-leak', path: 'chain.ts', line: 715, priority: 'P1', title: 'Error body leaks the RPC key' }
     const review = finishReview(p, report([moved, fresh]))
     expect(review.text).toContain('VERDICT: BLOCK')
