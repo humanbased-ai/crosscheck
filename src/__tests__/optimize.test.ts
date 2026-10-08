@@ -126,6 +126,12 @@ describe('selectOptimizeAgent', () => {
     expect(agent).toBe('claude')
   })
 
+  it('does not return a disabled vendor as the default fallback', () => {
+    // claude disabled, codex + opencode enabled — the fallback must not pick claude.
+    const { agent } = selectOptimizeAgent(makeConfig(false, true, true), makeReport())
+    expect(agent).toBe('codex')
+  })
+
   it('reason string mentions source when only one vendor enabled', () => {
     const { reason } = selectOptimizeAgent(makeConfig(true, false), makeReport())
     expect(reason).toMatch(/only enabled vendor/)

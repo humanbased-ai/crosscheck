@@ -176,11 +176,25 @@ async function promptVendorMode(
   let codexEnabled: boolean
 
   if (!bothAvailable) {
-    const vendor = claudeOk ? 'claude' : 'codex'
-    console.log(`  Mode: ${chalk.cyan('single-vendor')} (only ${chalk.bold(vendor)} is available)`)
-    mode = 'single-vendor'
-    claudeEnabled = claudeOk
-    codexEnabled = codexOk
+    if (claudeOk) {
+      console.log(`  Mode: ${chalk.cyan('single-vendor')} (only ${chalk.bold('claude')} is available)`)
+      mode = 'single-vendor'
+      claudeEnabled = true
+      codexEnabled = false
+    } else if (codexOk) {
+      console.log(`  Mode: ${chalk.cyan('single-vendor')} (only ${chalk.bold('codex')} is available)`)
+      mode = 'single-vendor'
+      claudeEnabled = false
+      codexEnabled = true
+    } else {
+      // Neither claude nor codex is available — only OpenCode (opt-in) remains.
+      // Keep the claude/codex defaults so enabling OpenCode below works; the
+      // mode is cosmetic here since neither primary vendor can actually run.
+      console.log(`  Mode: ${chalk.cyan('cross-vendor')} (${chalk.yellow('no claude/codex available — enable OpenCode below')})`)
+      mode = 'cross-vendor'
+      claudeEnabled = true
+      codexEnabled = true
+    }
   } else if (opts.yes) {
     mode = (existingMode ?? 'cross-vendor') as 'cross-vendor' | 'single-vendor'
     claudeEnabled = existingClaudeEnabled

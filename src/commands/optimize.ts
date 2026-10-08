@@ -11,6 +11,7 @@ import type { Config } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { buildDiagnoseReport, type DiagnoseReport } from './diagnose.js'
 import { parseOpenCodeOutput } from '../reviewers/opencode.js'
+import { buildOpenCodeEnv } from '../reviewers/opencode-env.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -34,21 +35,25 @@ export function selectOptimizeAgent(
   if (enabled.length === 0) throw new Error('No vendors enabled in config — enable claude, codex, or opencode under vendors.')
   if (enabled.length === 1) return { agent: enabled[0], reason: `only enabled vendor in config` }
 
-  // Both enabled — pick by success rate from log data. OpenCode is opt-in and
-  // does not take part in the default success-rate race: diagnose's
+  // Pick by success rate from log data, but only among the vendors actually
+  // enabled — a disabled vendor must never be selected or named. OpenCode is
+  // opt-in and stays out of the default success-rate race: diagnose's
   // reviewer_performance is keyed to claude/codex, and opencode only runs when
   // it is the sole enabled vendor or explicitly requested with --agent.
+  const claudeEnabled = config.vendors.claude.enabled
+  const codexEnabled = config.vendors.codex.enabled
   const cp = report.reviewer_performance['claude']
   const xp = report.reviewer_performance['codex']
 
-  if (cp?.attempts > 0 && xp?.attempts > 0) {
+  if (claudeEnabled && codexEnabled && cp?.attempts > 0 && xp?.attempts > 0) {
     const cr = cp.successes / cp.attempts
     const xr = xp.successes / xp.attempts
     if (xr > cr) return { agent: 'codex', reason: `codex success rate ${Math.round(xr * 100)}% > claude ${Math.round(cr * 100)}%` }
     if (cr > xr) return { agent: 'claude', reason: `claude success rate ${Math.round(cr * 100)}% > codex ${Math.round(xr * 100)}%` }
   }
 
-  return { agent: 'claude', reason: 'default (both enabled, no data or equal rates)' }
+  // Fall back to the first enabled vendor (claude, then codex, then opencode).
+  return { agent: enabled[0], reason: 'default (multiple enabled, no data or equal rates)' }
 }
 
 // ── ProposedChange ────────────────────────────────────────────────────────────
@@ -240,7 +245,10 @@ async function runWithOpenCode(prompt: string): Promise<string> {
     ], {
       cwd: tmpDir,
       timeout: 180_000,
-      env: { ...process.env },
+      // Same posture as the review/fix paths: --auto lets the agent run tools, so
+      // hand it an allowlisted env rather than the operator's full process env.
+      extendEnv: false,
+      env: buildOpenCodeEnv({ PATH: `${process.env.PATH ?? ''}` }),
     })
     return parseOpenCodeOutput(result.stdout ?? '').review.trim()
   } finally {

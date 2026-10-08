@@ -224,8 +224,16 @@ export async function runOpenCodeReview(
 
 export async function checkOpenCodeAuth(): Promise<{ ok: boolean; detail: string }> {
   try {
-    const { stdout } = await execa('opencode', ['--version'], { timeout: 10_000 })
-    return { ok: true, detail: stdout.trim() }
+    // `opencode --version` only proves the CLI is installed, not that a provider
+    // is configured — a review against an unconfigured opencode fails at run
+    // time. `opencode auth list` lists stored provider credentials, so a non-empty
+    // list is the availability signal onboarding/status/init report.
+    const { stdout } = await execa('opencode', ['auth', 'list'], { timeout: 10_000 })
+    const providers = stdout.trim().split('\n').map(l => l.trim()).filter(Boolean)
+    if (providers.length === 0) {
+      return { ok: false, detail: 'no providers configured — run: opencode auth login' }
+    }
+    return { ok: true, detail: `${providers.length} provider(s) configured` }
   } catch (err: unknown) {
     const error = err as { stderr?: string; message?: string }
     return { ok: false, detail: error.stderr ?? error.message ?? 'not found' }
