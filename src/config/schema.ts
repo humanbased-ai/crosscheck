@@ -38,7 +38,7 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   // Optional per-tier model overrides, honored under both auth modes. When unset:
   // api-key auth falls back to the built-in tier mapping, subscription auth lets
   // the Codex CLI pick its default model.
-  // Example: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol' }
+  // Example: { fast: 'gpt-6-luna', balanced: 'gpt-6.1-sol', thorough: 'gpt-6-astra' }
   model_tiers: z.object({
     fast: z.string().optional(),
     balanced: z.string().optional(),

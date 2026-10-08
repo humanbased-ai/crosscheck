@@ -58,17 +58,17 @@ const QUALITY_TIERS = {
   fast: {
     description: 'quick scan, top issues only  (~$0.24 per review)',
     claude: { model: 'haiku', effort: 'low' as const },
-    codex:  { model: 'gpt-5.6-luna', effort: 'low' as const },
+    codex:  { model: 'gpt-6-luna', effort: 'low' as const },
   },
   balanced: {
     description: 'full review, all issues with explanations  (~$0.72 per review)',
     claude: { model: 'sonnet', effort: 'medium' as const },
-    codex:  { model: 'gpt-5.6-terra', effort: 'medium' as const },
+    codex:  { model: 'gpt-6.1-sol', effort: 'medium' as const },
   },
   thorough: {
     description: 'deep multi-pass, security + architecture  (~$1.20 per review)',
     claude: { model: 'opus', effort: 'max' as const },
-    codex:  { model: 'gpt-5.6-sol', effort: 'high' as const },
+    codex:  { model: 'gpt-6-astra', effort: 'high' as const },
   },
 } as const
 
