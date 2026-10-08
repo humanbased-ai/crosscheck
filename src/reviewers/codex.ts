@@ -14,6 +14,7 @@ import { codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructio
 import { buildCodexEnv } from './codex-env.js'
 import { CompromisedCloneError, withCredentialFreeOrigin } from '../lib/clone.js'
 import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
+import { isTransientVendorError } from '../lib/smart-switch.js'
 
 // Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
 // Infer the verdict from the highest severity present and append it so parseVerdict() can
@@ -112,9 +113,8 @@ export function parseCodexTokensUsed(output: string): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed
 }
 
-// Detect transient Codex API errors that should be retried (socket disconnects, rate limits)
 function isRetryableCodexError(message: string): boolean {
-  return /socket.*closed|429|rate limit|connection.*reset|econnreset/i.test(message)
+  return isTransientVendorError(message)
 }
 
 const MAX_CODEX_RETRIES = 2

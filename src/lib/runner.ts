@@ -36,7 +36,7 @@ import { buildAttributionFooter, buildFixAppliedCommentBody, buildFixFailedComme
 import { linearWritePossible, loadWorkflow, loadHarnessSection, evaluateWhen, DEFAULT_REVIEW_INSTRUCTIONS, type StepResult, type WorkflowStep } from '../lib/workflow.js'
 import { prepareReviewPlan, finishReviewOrFallback, savePublishedReview, assertReviewFresh } from '../lib/review-memory.js'
 import type { PRPhase } from '../lib/board.js'
-import { isSubscriptionLimitError, isVendorUnavailableError } from '../lib/smart-switch.js'
+import { isSubscriptionLimitError, isTransientVendorError, isVendorFailoverError } from '../lib/smart-switch.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession, type SkillActivationSession } from '../skills/broker.js'
@@ -63,13 +63,14 @@ export function isRetryableFixError(err: unknown): boolean {
   return !/auth failure|not logged in|claude auth/i.test(msg) && !isSubscriptionLimitError(err)
 }
 
-// Transient model API errors (rate-limit 429, overloaded 529) are safe to retry
+// Transient model API errors (rate-limit, provider 5xx, overloaded, transport
+// failures) are safe to retry
 // with a delay. Auth, budget, and subscription-limit errors are operator/capacity
 // issues that don't self-heal and should surface immediately.
 function isTransientApiError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err)
   if (/quota|credit|plan.?limit/i.test(msg)) return false
-  return /\b429\b|rate.?limit|\b529\b|overloaded/i.test(msg)
+  return isTransientVendorError(err)
 }
 
 // When a PR has already been reviewed, subsequent webhook runs treat every
@@ -334,9 +335,12 @@ export interface WorkflowContext {
   // Injected into review/recheck prompts so the reviewer judges against the
   // stated goal; undefined when enrichment is off or the issue didn't resolve.
   issueContext?: string
-  // Called when a vendor hits a quota/credit limit and the runner can identify
-  // an immediate same-step fallback. Long-lived commands use this to activate
-  // smart-switch without failing the current PR first.
+  // Called when a vendor failure is eligible for an immediate same-step
+  // fallback. Long-lived commands use this to activate smart-switch without
+  // failing the current PR first.
+  onVendorFailure?: (failedVendor: Vendor, fallbackVendor: Vendor | null, reason: string, stepName: string) => void
+  // Backward-compatible alias for integrations compiled against the earlier
+  // quota-only callback name.
   onVendorLimit?: (failedVendor: Vendor, fallbackVendor: Vendor | null, reason: string, stepName: string) => void
 }
 
@@ -552,6 +556,17 @@ function supportsStep(vendor: Vendor, stepType: string): boolean {
 function resolveLimitFallbackVendor(failedVendor: Vendor, stepType: string, config: Config): Vendor | null {
   const fallback: Vendor = failedVendor === 'claude' ? 'codex' : 'claude'
   return config.vendors[fallback].enabled && supportsStep(fallback, stepType) ? fallback : null
+}
+
+function notifyVendorFailure(
+  ctx: WorkflowContext,
+  failedVendor: Vendor,
+  fallbackVendor: Vendor | null,
+  reason: string,
+  stepName: string,
+): void {
+  const handler = ctx.onVendorFailure ?? ctx.onVendorLimit
+  handler?.(failedVendor, fallbackVendor, reason, stepName)
 }
 
 // ─── commit subjects ──────────────────────────────────────────────────────────
@@ -1379,12 +1394,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           }
 
           if (fallbackErr !== null) {
-            if (!isSubscriptionLimitError(fallbackErr) && !isVendorUnavailableError(fallbackErr)) throw fallbackErr
+            if (!isVendorFailoverError(fallbackErr)) throw fallbackErr
 
             const failedVendor = reviewer
             const fallbackVendor = resolveLimitFallbackVendor(failedVendor, effectiveType, config)
             const reason = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
-            ctx.onVendorLimit?.(failedVendor, fallbackVendor, reason, step.name)
+            notifyVendorFailure(ctx, failedVendor, fallbackVendor, reason, step.name)
 
             if (!fallbackVendor) throw fallbackErr
 
@@ -1746,13 +1761,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         if (err instanceof CompromisedCloneError) throw err
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor }, err)
         const fallbackVendor = resolveLimitFallbackVendor(vendor, effectiveType, config)
-        if (isSubscriptionLimitError(err)) {
+        if (isVendorFailoverError(err)) {
           const reason = err instanceof Error ? err.message : String(err)
-          ctx.onVendorLimit?.(vendor, fallbackVendor, reason, step.name)
+          notifyVendorFailure(ctx, vendor, fallbackVendor, reason, step.name)
         }
-        if (fallbackVendor !== null && (isRetryableFixError(err) || isSubscriptionLimitError(err))) {
+        if (fallbackVendor !== null && (isRetryableFixError(err) || isVendorFailoverError(err))) {
           log(chalk.yellow(`⚠  ${vendor} fix failed — falling back to ${fallbackVendor}...`))
-          fileLog({ level: 'warn', event: 'fix_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: vendor, to: fallbackVendor, ...(isSubscriptionLimitError(err) && { reason: 'vendor_limit' }) })
+          fileLog({ level: 'warn', event: 'fix_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: vendor, to: fallbackVendor, ...(isVendorFailoverError(err) && { reason: 'vendor_unavailable' }) })
           try {
             ;({ appliedCount, changedFiles: fixChangedFiles, tokensUsed: fixTokensUsed, effort: fixEffort } = await runFix(fallbackVendor))
             activeVendor = fallbackVendor

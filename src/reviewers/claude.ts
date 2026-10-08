@@ -7,6 +7,7 @@ import { vendorFailureSummary } from '../lib/vendor-error-summary.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
+import { isTransientVendorError } from '../lib/smart-switch.js'
 
 const EFFORT_MAP: Record<string, string> = {
   low: 'low',
@@ -23,11 +24,8 @@ export function claudeEffort(effort?: string): string {
   return (effort && EFFORT_MAP[effort]) ?? 'medium'
 }
 
-// Detect transient Claude API errors that should be retried:
-// - 429 session limit: "You've hit your session limit"
-// - Socket disconnect: "socket connection was closed unexpectedly"
 function isRetryableClaudeError(message: string): boolean {
-  return /session limit|socket.*closed|429|rate limit/i.test(message)
+  return isTransientVendorError(message) || /session limit/i.test(message)
 }
 
 const MAX_CLAUDE_RETRIES = 2

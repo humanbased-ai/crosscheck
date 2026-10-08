@@ -2,6 +2,10 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import {
   getSmartSwitch,
   isSubscriptionLimitError,
+  isVendorUnavailableError,
+  isTransientVendorError,
+  isVendorFailoverError,
+  classifyVendorFailure,
   detectFailedVendor,
   triggerSwitch,
   notifyReviewSuccess,
@@ -38,6 +42,42 @@ describe('isSubscriptionLimitError', () => {
     expect(isSubscriptionLimitError(new Error('git clone failed'))).toBe(false)
     expect(isSubscriptionLimitError(new Error('timeout after 300s'))).toBe(false)
     expect(isSubscriptionLimitError(new Error('provider overloaded'))).toBe(false)
+  })
+})
+
+describe('vendor failover classification', () => {
+  it('recognizes organization-disabled subscription access as vendor authentication failure', () => {
+    const err = new Error('claude: API error 403 — Your organization has disabled Claude subscription access for Claude Code')
+    expect(isVendorUnavailableError(err)).toBe(true)
+    expect(isVendorFailoverError(err)).toBe(true)
+    expect(classifyVendorFailure(err)).toBe('authentication')
+  })
+
+  it.each([
+    'codex: API error 401 — authentication required',
+    'claude: model not found: claude-fable-5',
+    'codex: requires a newer version of the CLI',
+    'claude: command not found',
+    'codex: API error 503 — service unavailable',
+    'claude: socket connection was closed unexpectedly',
+  ])('recognizes %s as a vendor failure eligible for failover', message => {
+    expect(isVendorFailoverError(new Error(message))).toBe(true)
+  })
+
+  it('recognizes a timed-out reviewer after its own retries are exhausted', () => {
+    const err = Object.assign(new Error('codex: timed out after 600s'), { timedOut: true })
+    expect(isVendorFailoverError(err)).toBe(true)
+    expect(classifyVendorFailure(err)).toBe('timeout')
+  })
+
+  it('keeps local checkout failures and arbitrary crashes out of vendor failover', () => {
+    expect(isVendorUnavailableError(new Error('codex: permission denied'))).toBe(false)
+    expect(isVendorFailoverError(new Error('claude: internal crash'))).toBe(false)
+  })
+
+  it('marks provider outages as transient for the short retry path', () => {
+    expect(isTransientVendorError(new Error('claude: API error 502 — bad gateway'))).toBe(true)
+    expect(isTransientVendorError(new Error('codex: API error 403 — forbidden'))).toBe(false)
   })
 })
 
@@ -83,6 +123,13 @@ describe('triggerSwitch', () => {
     const lines: string[] = []
     triggerSwitch('codex', 'codex: 429', (l1) => lines.push(l1))
     expect(lines[0]).toMatch(/SMART-SWITCH.*codex/)
+  })
+
+  it('announces an access failure without calling it a subscription limit', () => {
+    const lines: string[] = []
+    triggerSwitch('claude', 'claude: API error 403 — organization access disabled', (l) => lines.push(l))
+    expect(lines[0]).toContain('credentials or organization access')
+    expect(lines[0]).not.toContain('subscription limit')
   })
 
   it('does not double-announce when the same vendor is still down', () => {
