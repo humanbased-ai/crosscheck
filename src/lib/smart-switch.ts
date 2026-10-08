@@ -41,6 +41,7 @@ interface ErrorLike {
   message?: unknown
   stderr?: unknown
   stdout?: unknown
+  code?: unknown
   timedOut?: unknown
 }
 
@@ -48,23 +49,22 @@ function errorText(err: unknown): string {
   if (typeof err === 'string') return err.toLowerCase()
   if (err instanceof Error) {
     const value = err as Error & ErrorLike
-    return [value.message, value.stderr, value.stdout]
-      .filter((part): part is string => typeof part === 'string')
-      .join('\n')
-      .toLowerCase()
+    return typeof value.message === 'string' ? value.message.toLowerCase() : String(err).toLowerCase()
   }
   if (err && typeof err === 'object') {
     const value = err as ErrorLike
-    return [value.message, value.stderr, value.stdout]
-      .filter((part): part is string => typeof part === 'string')
-      .join('\n')
-      .toLowerCase()
+    return typeof value.message === 'string' ? value.message.toLowerCase() : String(err).toLowerCase()
   }
   return String(err).toLowerCase()
 }
 
 function hasVendorPrefix(msg: string): boolean {
   return /^(?:claude|codex)(?::|\s)/i.test(msg)
+}
+
+function isMissingVendorExecutable(err: unknown, msg: string): boolean {
+  const code = err && typeof err === 'object' ? (err as ErrorLike).code : undefined
+  return code === 'ENOENT' || /^(?:claude|codex):\s*(?:command not found|not found)\b/i.test(msg)
 }
 
 function errorTimedOut(err: unknown): boolean {
@@ -91,9 +91,10 @@ export function isSubscriptionLimitError(err: unknown): boolean {
  */
 export function isVendorUnavailableError(err: unknown): boolean {
   const msg = errorText(err)
-  const providerFailure = /\b(?:401|403|408|500|502|503|504|529)\b|requires a newer version|unsupported\s+(?:model|version|feature)|model\s+(?:not found|unavailable|unsupported|does not exist)|not logged in|auth(?:entication)?\s+(?:failure|required|expired)|unauthori[sz]ed|access denied|bad credentials|organization[^\n]*(?:disabled|not enabled)|subscription access[^\n]*(?:disabled|forbidden|not enabled)|command not found|\benoent\b|no such file or directory|internal server error|bad gateway|gateway timeout|service unavailable|temporarily unavailable|provider\s+(?:unavailable|overloaded)|overloaded|capacity exceeded/.test(msg)
+  const providerStatus = /\b(?:api|http)\s+(?:error\s+)?(?:401|403|408|500|502|503|504|529)\b/.test(msg)
+  const providerFailure = providerStatus || /requires a newer version|unsupported\s+(?:model|version|feature)|model\s+(?:not found|unavailable|unsupported|does not exist)|not logged in|auth(?:entication)?\s+(?:failure|required|expired)|unauthori[sz]ed|access denied|bad credentials|organization[^\n]*(?:disabled|not enabled)|subscription access[^\n]*(?:disabled|forbidden|not enabled)|internal server error|bad gateway|gateway timeout|service unavailable|temporarily unavailable|provider\s+(?:unavailable|overloaded)|overloaded|capacity exceeded/.test(msg)
   const vendorTransportFailure = /connection\s+(?:reset|refused|closed)|socket.*(?:hang|closed)|econn(?:reset|refused)|etimedout|eai_again|network\s+(?:unreachable|timeout|error)/.test(msg)
-  return providerFailure || (hasVendorPrefix(msg) && vendorTransportFailure)
+  return providerFailure || isMissingVendorExecutable(err, msg) || (hasVendorPrefix(msg) && vendorTransportFailure)
 }
 
 /**

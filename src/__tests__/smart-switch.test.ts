@@ -75,6 +75,19 @@ describe('vendor failover classification', () => {
     expect(isVendorFailoverError(new Error('claude: internal crash'))).toBe(false)
   })
 
+  it('does not inspect incidental stderr when classifying a reviewer failure', () => {
+    const err = Object.assign(new Error('codex: reviewer subprocess failed'), {
+      stderr: '500\nno such file or directory',
+    })
+    expect(isVendorFailoverError(err)).toBe(false)
+  })
+
+  it('recognizes a structured missing-vendor executable error', () => {
+    const err = Object.assign(new Error('codex: failed to start reviewer'), { code: 'ENOENT' })
+    expect(isVendorUnavailableError(err)).toBe(true)
+    expect(isVendorFailoverError(err)).toBe(true)
+  })
+
   it('marks provider outages as transient for the short retry path', () => {
     expect(isTransientVendorError(new Error('claude: API error 502 — bad gateway'))).toBe(true)
     expect(isTransientVendorError(new Error('codex: API error 403 — forbidden'))).toBe(false)

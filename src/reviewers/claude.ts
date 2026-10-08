@@ -166,7 +166,7 @@ export async function runClaudeReview(
         return { review: raw, model, effort, retried }
       }
     } catch (err: unknown) {
-      const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
+      const execa = err as { stdout?: string; stderr?: string; message?: string; code?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
       const rawStderr = execa.stderr?.trim() ?? ''
       const fullMessage = rawStderr || execa.message || ''
       
@@ -187,6 +187,7 @@ export async function runClaudeReview(
         : vendorFailureSummary(execa)
       const thrown = Object.assign(new Error(`claude: ${summary}`), {
         exitCode: execa.exitCode,
+        code: execa.code,
         timedOut: execa.timedOut,
         stderr: rawStderr,
         effectiveTimeoutMs: effectiveMs,

@@ -257,7 +257,7 @@ export async function runCodexReview(
       }
     } catch (err: unknown) {
       if (err instanceof CompromisedCloneError) throw err
-      const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
+      const execa = err as { stdout?: string; stderr?: string; message?: string; code?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
       const rawStderr = execa.stderr ?? ''
       const fullMessage = rawStderr || execa.message || ''
 
@@ -278,6 +278,7 @@ export async function runCodexReview(
         : vendorFailureSummary(execa, extractErrorSummary)
       const thrown = Object.assign(new Error(`codex: ${summary}`), {
         exitCode: execa.exitCode,
+        code: execa.code,
         timedOut: execa.timedOut,
         stderr: rawStderr,
         effectiveTimeoutMs: effectiveMs,
