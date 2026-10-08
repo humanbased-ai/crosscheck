@@ -34,6 +34,7 @@ jobs:
       new_version: ${{ steps.ver.outputs.new_version }}
       new_tag:     ${{ steps.ver.outputs.new_tag }}
       changelog:   ${{ steps.ver.outputs.changelog }}
+      source_sha:  ${{ github.sha }}
       should_release: ${{ steps.ver.outputs.new_tag != '' }}
 
     steps:
@@ -124,6 +125,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           RELEASE_BRANCH: ci/release-${{ needs.compute.outputs.new_tag }}
+          SOURCE_SHA: ${{ needs.compute.outputs.source_sha }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
@@ -132,7 +134,12 @@ jobs:
           # main is protected and rejects direct pushes. Put the version bump
           # in a disposable PR, merge it, then tag the resulting main commit.
           git fetch origin main --tags
-          git switch --create "$RELEASE_BRANCH" origin/main
+          CURRENT_MAIN_SHA=$(git rev-parse origin/main)
+          if [ "$CURRENT_MAIN_SHA" != "$SOURCE_SHA" ]; then
+            echo "::error::main advanced from $SOURCE_SHA to $CURRENT_MAIN_SHA while this release waited for approval; refusing to publish a stale release."
+            exit 1
+          fi
+          git switch --create "$RELEASE_BRANCH" "$SOURCE_SHA"
           CURRENT=$(node -p "require('./package.json').version")
           if [ "$CURRENT" != "${{ needs.compute.outputs.new_version }}" ]; then
             npm version "${{ needs.compute.outputs.new_version }}" --no-git-tag-version
@@ -158,22 +165,22 @@ jobs:
               gh pr merge "$PR_URL" --merge --auto --delete-branch || true
             fi
 
-            MERGED_AT=""
+            MERGED_SHA=""
             for attempt in $(seq 1 30); do
-              MERGED_AT=$(gh pr view "$PR_URL" --json state,mergedAt --jq \
-                'select(.state == "MERGED") | .mergedAt')
-              if [ -n "$MERGED_AT" ]; then
+              MERGED_SHA=$(gh pr view "$PR_URL" --json state,mergeCommit --jq \
+                'select(.state == "MERGED" and .mergeCommit != null) | .mergeCommit.oid')
+              if [ -n "$MERGED_SHA" ]; then
                 break
               fi
               sleep 2
             done
-            if [ -z "$MERGED_AT" ]; then
+            if [ -z "$MERGED_SHA" ]; then
               echo "::error::Version bump PR was not merged; refusing to publish a tag from an unversioned main."
               exit 1
             fi
 
             git fetch origin main --tags
-            git checkout --detach origin/main
+            git checkout --detach "$MERGED_SHA"
           fi
 
           CURRENT=$(node -p "require('./package.json').version")
