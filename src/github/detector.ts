@@ -158,8 +158,14 @@ export async function assignReviewer(origin: PROrigin, config: Config): Promise<
     if (config.vendors.opencode.enabled) return 'opencode'
     return null
   }
-  if (origin === 'claude' && config.vendors.codex.enabled) return 'codex'
-  if (origin === 'codex' && config.vendors.claude.enabled) return 'claude'
+  if (origin === 'claude') {
+    if (config.vendors.codex.enabled) return 'codex'
+    if (config.vendors.opencode.enabled) return 'opencode'
+  }
+  if (origin === 'codex') {
+    if (config.vendors.claude.enabled) return 'claude'
+    if (config.vendors.opencode.enabled) return 'opencode'
+  }
   if (origin === 'opencode') {
     if (config.vendors.claude.enabled) return 'claude'
     if (config.vendors.codex.enabled) return 'codex'

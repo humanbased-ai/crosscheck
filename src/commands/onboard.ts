@@ -174,6 +174,7 @@ async function promptVendorMode(
   let mode: 'cross-vendor' | 'single-vendor'
   let claudeEnabled: boolean
   let codexEnabled: boolean
+  let opencodePickedAsSingleVendor = false
 
   if (!bothAvailable) {
     if (claudeOk) {
@@ -223,6 +224,7 @@ async function promptVendorMode(
       const vendorItems: PickerItem[] = [
         { label: 'claude', description: 'Claude Code reviews all PRs' },
         { label: 'codex', description: 'OpenAI Codex reviews all PRs' },
+        ...(opencodeOk ? [{ label: 'opencode', description: 'OpenCode reviews all PRs' }] : []),
       ]
       const vendorIdx = await promptSinglePicker(vendorItems, {
         title: 'Which AI should review all PRs?',
@@ -233,6 +235,9 @@ async function promptVendorMode(
       mode = 'single-vendor'
       claudeEnabled = vendorIdx === 0
       codexEnabled = vendorIdx === 1
+      // OpenCode chosen as the single vendor — the opt-in decision below must
+      // not turn it back off.
+      if (vendorIdx === 2) opencodePickedAsSingleVendor = true
     }
   }
 
@@ -242,7 +247,7 @@ async function promptVendorMode(
   // available) — there it is the only vendor that can run, so it is enabled
   // without asking (including under --yes) rather than leaving every vendor off.
   const opencodeIsOnlyVendor = opencodeOk && !claudeOk && !codexOk
-  let opencodeEnabled = opencodeIsOnlyVendor || existingOpenCodeEnabled
+  let opencodeEnabled = opencodeIsOnlyVendor || opencodePickedAsSingleVendor || existingOpenCodeEnabled
   if (opencodeOk && !opts.yes && !opencodeIsOnlyVendor) {
     const items: PickerItem[] = [
       { label: 'no', description: 'leave OpenCode disabled (default)' },

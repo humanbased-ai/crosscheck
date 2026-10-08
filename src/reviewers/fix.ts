@@ -6,7 +6,7 @@ import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeEffort } from './claude.js'
 import { codexReasoningEffort } from './codex.js'
-import { opencodeEffort, stripCheckoutOpenCodeConfig } from './opencode.js'
+import { opencodeEffort, isolateCheckoutOpenCodeConfig } from './opencode.js'
 import { claudeSkillBrokerArgs, codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { buildCodexEnv } from './codex-env.js'
 import { buildOpenCodeEnv } from './opencode-env.js'
@@ -348,10 +348,8 @@ export async function runOpenCodeFixStep(
   _skillSession?: SkillActivationSession,
   configuredEffort?: string,
   humanFeedback?: string,
-): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort: string }> {
+): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort?: string }> {
   const effort = opencodeEffort(configuredEffort ?? 'high')
-  // Drop any OpenCode config the untrusted checkout carries before the run.
-  stripCheckoutOpenCodeConfig(tmpDir)
   let diff = ''
   try {
     diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
@@ -374,17 +372,22 @@ export async function runOpenCodeFixStep(
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
 
   try {
-    await withCredentialFreeOrigin(tmpDir, () => execa(
-      'opencode',
-      ['run', '--auto', '--standalone', ...modelArgs],
-      {
-        cwd: tmpDir,
-        timeout: resolvedTimeout,
-        input: prompt,
-        extendEnv: false,
-        env: buildOpenCodeEnv({}),
-      },
-    ))
+    await withCredentialFreeOrigin(tmpDir, () => {
+      // Hide any OpenCode config the untrusted checkout carries while the agent
+      // runs; restore it after so the fix's git add -A cannot stage the deletion.
+      const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true)
+      return execa(
+        'opencode',
+        ['run', '--auto', '--standalone', ...modelArgs],
+        {
+          cwd: tmpDir,
+          timeout: resolvedTimeout,
+          input: prompt,
+          extendEnv: false,
+          env: buildOpenCodeEnv({}),
+        },
+      ).finally(restoreConfig)
+    })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (/not logged in|auth|credential/i.test(msg)) {
@@ -400,5 +403,6 @@ export async function runOpenCodeFixStep(
     ...(changedOutput ? changedOutput.split('\n').filter(Boolean) : []),
     ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
   ]
-  return { appliedCount: changedFiles.length, changedFiles, effort }
+  // Report effort only when a pinned model actually carried the #variant.
+  return { appliedCount: changedFiles.length, changedFiles, effort: model ? effort : undefined }
 }

@@ -1205,8 +1205,8 @@ vendors:
   codex:
     enabled: true
     auth: subscription      # subscription | api-key
-    model: gpt-5.6-terra    # pins the review model; unset = tier model (api-key) / CLI default (subscription)
-    effort: medium          # low | medium | high | xhigh | max | ultra (ultra: terra/sol only)
+    model: gpt-6.1-sol      # pins the review model; unset = tier model (api-key) / CLI default (subscription)
+    effort: medium          # low | medium | high | xhigh | max | ultra
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
@@ -1214,6 +1214,16 @@ vendors:
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
+
+  # Opt-in third harness; disabled by default. Its model/provider come from
+  # `opencode auth login` / opencode.json, not from a crosscheck catalog.
+  # Reasoning effort rides the `--model provider/model#variant` suffix, so
+  # `effort` applies only when `model` is also set.
+  opencode:
+    enabled: false
+    # model: provider/model   # e.g. alibaba-cn/deepseek-v4-pro; unset = opencode.json default
+    effort: high              # none | high | max
+    # timeout_sec: 1200       # max seconds per CLI call; unset = tier-based (300/600/1200)
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:
@@ -1298,12 +1308,18 @@ routing:
   claude_reviews_patterns:
     - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
     - "Co-Authored-By: codex"               # commit trailer
+  opencode_reviews_patterns:
+    - "Generated with \\[OpenCode\\]"       # OpenCode attribution footer
+    - "Co-Authored-By: opencode"            # commit trailer
 
-  # Branch prefix detection (signal 3). Claude Code uses claude/, Codex uses codex/.
+  # Branch prefix detection (signal 3). Claude Code uses claude/, Codex uses
+  # codex/, OpenCode uses opencode/.
   claude_branch_prefixes:
     - "claude/"
   codex_branch_prefixes:
     - "codex/"
+  opencode_branch_prefixes:
+    - "opencode/"
 
   # Restrict reviews to PRs opened by these GitHub logins.
   # Auto-filled with your GitHub login by `crosscheck init` or first `crosscheck watch`.

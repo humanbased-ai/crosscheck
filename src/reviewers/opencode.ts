@@ -1,6 +1,7 @@
 import { execa } from 'execa'
-import { rmSync } from 'fs'
+import { rmSync, mkdtempSync, renameSync, existsSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { tmpdir } from 'os'
 import type { QualityConfig, OpenCodeVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveOpenCodeModel } from '../lib/review-models.js'
@@ -110,9 +111,48 @@ function extractOpenCodeErrorSummary(stderr: string): string | undefined {
 // prompt, and OpenCode v2 has no `--pure` / config override flag to suppress it.
 // Remove them before the run so only the operator's global config applies. The
 // clone is a throwaway and a review reads the diff, not these files.
-export function stripCheckoutOpenCodeConfig(repoDir: string): void {
+// A restrictive permission policy for the untrusted run. OpenCode v2 has no
+// sandbox flag, so this is the tool-denial layer: a review inspects the diff by
+// running read-only git, so allow exactly those shell commands and deny every
+// other one. `--auto` auto-approves `ask` but cannot widen a `deny`.
+// `allowEdit` is left for the fix step, which must write files.
+function opencodePolicy(allowEdit: boolean): unknown {
+  return {
+    permissions: [
+      { action: 'shell', resource: '*', effect: 'deny' },
+      { action: 'shell', resource: 'git status *', effect: 'allow' },
+      { action: 'shell', resource: 'git diff *', effect: 'allow' },
+      { action: 'shell', resource: 'git log *', effect: 'allow' },
+      { action: 'shell', resource: 'git show *', effect: 'allow' },
+      ...(allowEdit ? [] : [{ action: 'edit', resource: '*', effect: 'deny' }]),
+    ],
+  }
+}
+
+export function isolateCheckoutOpenCodeConfig(repoDir: string, allowEdit = false): () => void {
+  const backupDir = mkdtempSync(join(tmpdir(), 'crosscheck-oc-config-'))
+  const moved: Array<{ from: string; to: string }> = []
   for (const rel of ['opencode.json', 'opencode.jsonc', '.opencode']) {
-    try { rmSync(join(repoDir, rel), { recursive: true, force: true }) } catch { /* best effort */ }
+    const from = join(repoDir, rel)
+    if (!existsSync(from)) continue
+    const to = join(backupDir, rel.replace(/[/\\]/g, '_'))
+    try { renameSync(from, to); moved.push({ from, to }) } catch { /* best effort */ }
+  }
+  // Install the policy as the project config this run will load; remove it on
+  // restore so a later fix's `git add -A` cannot stage it.
+  let policyWritten = false
+  try {
+    writeFileSync(join(repoDir, 'opencode.json'), JSON.stringify(opencodePolicy(allowEdit), null, 2))
+    policyWritten = true
+  } catch { /* best effort */ }
+  // Restore the checkout's own config so a later fix step does not stage these
+  // tracked deletions as changed files (git add -A would then commit and push).
+  return () => {
+    if (policyWritten) { try { rmSync(join(repoDir, 'opencode.json'), { force: true }) } catch { /* best effort */ } }
+    for (const { from, to } of moved.reverse()) {
+      try { renameSync(to, from) } catch { /* best effort */ }
+    }
+    try { rmSync(backupDir, { recursive: true, force: true }) } catch { /* best effort */ }
   }
 }
 
@@ -129,8 +169,6 @@ export async function runOpenCodeReview(
   issueContext?: string,
   _skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
-  // Drop any OpenCode config the untrusted checkout carries before the run.
-  stripCheckoutOpenCodeConfig(repoDir)
   const model = resolveOpenCodeModel(quality, vendor)
   const effort = opencodeEffort(vendor.effort)
   const tierTimeout = tierTimeoutMs(quality.tier)
@@ -182,31 +220,38 @@ export async function runOpenCodeReview(
   let lastErr: unknown = undefined
   for (let attempt = 1; attempt <= MAX_OPENCODE_RETRIES; attempt++) {
     try {
-      const { result: { stdout }, retried } = await withCredentialFreeOrigin(repoDir, () => withTimeoutRetry(
-        resolvedTimeout,
-        (t) => execa('opencode', args, {
-          cwd: repoDir,
-          timeout: t,
-          input: prompt,
-          // extendEnv: false or execa merges process.env back in and the
-          // allowlist means nothing.
-          extendEnv: false,
-          // No `${repoDir}/node_modules/.bin` on PATH: the checkout is untrusted
-          // and a committed `node_modules/.bin/opencode` would shadow the real
-          // executable. A review only reads the diff, so repo-local tools are
-          // not needed the way codex.ts assumed they were.
-          env: buildOpenCodeEnv(),
-        }),
-        {
-          onRetry: (effectiveMs, delayMs) =>
-            (onRetry ?? onLog)?.(`  ⏱ opencode timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),
-        },
-      ))
+      const { result: { stdout }, retried } = await withCredentialFreeOrigin(repoDir, () => {
+        // Hide any OpenCode config the untrusted checkout carries while the agent
+        // runs; restore it after so a later fix step cannot stage the deletion.
+        const restoreConfig = isolateCheckoutOpenCodeConfig(repoDir)
+        return withTimeoutRetry(
+          resolvedTimeout,
+          (t) => execa('opencode', args, {
+            cwd: repoDir,
+            timeout: t,
+            input: prompt,
+            // extendEnv: false or execa merges process.env back in and the
+            // allowlist means nothing.
+            extendEnv: false,
+            // No `${repoDir}/node_modules/.bin` on PATH: the checkout is untrusted
+            // and a committed `node_modules/.bin/opencode` would shadow the real
+            // executable. A review only reads the diff, so repo-local tools are
+            // not needed the way codex.ts assumed they were.
+            env: buildOpenCodeEnv(),
+          }),
+          {
+            onRetry: (effectiveMs, delayMs) =>
+              (onRetry ?? onLog)?.(`  ⏱ opencode timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),
+          },
+        ).finally(restoreConfig)
+      })
 
       const { review: parsedReview, tokensUsed } = parseOpenCodeOutput(stdout ?? '')
       const rawReview = parsedReview.trim()
       const review = inferVerdictFromOpenCodeOutput(rawReview)
-      return { review, tokensUsed, model: model ?? 'default', effort, retried }
+      // Report effort only when a pinned model actually carried the #variant;
+      // with no model there is no suffix, so claiming a level would be false.
+      return { review, tokensUsed, model: model ?? 'default', effort: model ? effort : undefined, retried }
     } catch (err: unknown) {
       const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
       const rawStderr = execa.stderr ?? ''

@@ -535,7 +535,9 @@ function resolveReviewer(
   }
   if (reviewer === 'auto') {
     if (origin === 'claude' && config.vendors.codex.enabled) return 'codex'
+    if (origin === 'claude' && config.vendors.opencode.enabled) return 'opencode'
     if (origin === 'codex' && config.vendors.claude.enabled) return 'claude'
+    if (origin === 'codex' && config.vendors.opencode.enabled) return 'opencode'
     if (origin === 'opencode' && config.vendors.claude.enabled) return 'claude'
     if (origin === 'opencode' && config.vendors.codex.enabled) return 'codex'
     if (config.vendors.codex.enabled) return 'codex'
@@ -1567,7 +1569,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           // Withheld when an explicit vendors.*.model overrode the tier map:
           // citing a tier the run did not use would assert a routing decision
           // that never happened.
-          strategyCitation(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, strategy, roundStrategy, model),
+          strategyCitation(reviewer === 'codex' ? config.vendors.codex : reviewer === 'opencode' ? config.vendors.opencode : config.vendors.claude, strategy, roundStrategy, model),
         )
         if (memoryPlan && structured?.snapshot) {
           // The review is already posted; a memory write failure only costs the next review its delta.
