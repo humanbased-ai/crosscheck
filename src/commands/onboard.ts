@@ -13,6 +13,7 @@ import {
 import { listUserOrgs, listOrgRepos, fetchActiveRepos, type RepoActivity } from '../github/client.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
+import { checkOpenCodeAuth } from '../reviewers/opencode.js'
 import { execSync } from 'child_process'
 import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/repo-picker.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS } from '../lib/workflow.js'
@@ -38,6 +39,7 @@ interface EnvCheckResult {
   ok: boolean
   claudeOk: boolean
   codexOk: boolean
+  opencodeOk: boolean
 }
 
 type WorkflowPreset = 'review-only' | 'review-fix' | 'review-fix-recheck'
@@ -46,6 +48,7 @@ type VendorModeConfig = {
   mode: 'cross-vendor' | 'single-vendor'
   claudeEnabled: boolean
   codexEnabled: boolean
+  opencodeEnabled: boolean
 }
 
 // Effort settings and display hints per quality tier.
@@ -93,6 +96,7 @@ function formatAge(date: Date): string {
 async function checkEnv(): Promise<EnvCheckResult> {
   let codexOk = false
   let claudeOk = false
+  let opencodeOk = false
 
   try {
     execSync('codex --version 2>&1', { encoding: 'utf8' })
@@ -117,6 +121,18 @@ async function checkEnv(): Promise<EnvCheckResult> {
     console.log(`      ${chalk.dim('→')} ${chalk.yellow('Install: npm install -g @anthropic-ai/claude-code')}`)
   }
 
+  try {
+    execSync('opencode --version 2>&1', { encoding: 'utf8' })
+    const auth = await checkOpenCodeAuth()
+    opencodeOk = auth.ok
+    const icon = auth.ok ? chalk.green('✓') : chalk.red('✗')
+    console.log(`  ${icon} ${'opencode CLI'.padEnd(20)} ${auth.detail}`)
+    if (!auth.ok) console.log(`      ${chalk.dim('→')} ${chalk.yellow('Run: opencode auth login')}`)
+  } catch {
+    console.log(`  ${chalk.red('✗')} ${'opencode CLI'.padEnd(20)} not found`)
+    console.log(`      ${chalk.dim('→')} ${chalk.yellow('Install: npm install -g opencode-ai')}`)
+  }
+
   const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
   let ghAuthed = false
   try {
@@ -132,81 +148,112 @@ async function checkEnv(): Promise<EnvCheckResult> {
     console.log(`      ${chalk.dim('→')} ${chalk.yellow('Install: brew install gh && gh auth login')}`)
   }
 
-  if (!claudeOk && !codexOk) {
-    console.log(chalk.red('\nAt least one AI CLI (codex or claude) must be authenticated.\n'))
-    return { ok: false, claudeOk, codexOk }
+  if (!claudeOk && !codexOk && !opencodeOk) {
+    console.log(chalk.red('\nAt least one AI CLI (codex, claude, or opencode) must be authenticated.\n'))
+    return { ok: false, claudeOk, codexOk, opencodeOk }
   }
   if (!ghAuthed) {
     console.log(chalk.red('\nGitHub auth is required to fetch repos and register webhooks.\n'))
-    return { ok: false, claudeOk, codexOk }
+    return { ok: false, claudeOk, codexOk, opencodeOk }
   }
-  return { ok: true, claudeOk, codexOk }
+  return { ok: true, claudeOk, codexOk, opencodeOk }
 }
 
 async function promptVendorMode(
   claudeOk: boolean,
   codexOk: boolean,
+  opencodeOk: boolean,
   existingMode: string | undefined,
   existingClaudeEnabled: boolean,
   existingCodexEnabled: boolean,
+  existingOpenCodeEnabled: boolean,
   opts: OnboardOpts,
 ): Promise<VendorModeConfig> {
   const bothAvailable = claudeOk && codexOk
 
+  let mode: 'cross-vendor' | 'single-vendor'
+  let claudeEnabled: boolean
+  let codexEnabled: boolean
+
   if (!bothAvailable) {
     const vendor = claudeOk ? 'claude' : 'codex'
     console.log(`  Mode: ${chalk.cyan('single-vendor')} (only ${chalk.bold(vendor)} is available)`)
-    return { mode: 'single-vendor', claudeEnabled: claudeOk, codexEnabled: codexOk }
-  }
-
-  if (opts.yes) {
-    const mode = (existingMode ?? 'cross-vendor') as 'cross-vendor' | 'single-vendor'
+    mode = 'single-vendor'
+    claudeEnabled = claudeOk
+    codexEnabled = codexOk
+  } else if (opts.yes) {
+    mode = (existingMode ?? 'cross-vendor') as 'cross-vendor' | 'single-vendor'
+    claudeEnabled = existingClaudeEnabled
+    codexEnabled = existingCodexEnabled
     console.log(`  Mode: ${chalk.cyan(mode)}`)
-    return { mode, claudeEnabled: existingClaudeEnabled, codexEnabled: existingCodexEnabled }
+  } else {
+    const modeItems: PickerItem[] = [
+      { label: 'cross-vendor', description: 'Claude reviews Codex PRs; Codex reviews Claude PRs' },
+      { label: 'single-vendor', description: 'one AI reviews all PRs' },
+    ]
+    const defaultModeIdx = existingMode === 'single-vendor' ? 1 : 0
+    const modeIdx = await promptSinglePicker(modeItems, {
+      title: 'How should reviews be assigned?',
+      defaultIndex: defaultModeIdx,
+    })
+    console.log()
+
+    if (modeIdx === 0) {
+      mode = 'cross-vendor'
+      claudeEnabled = true
+      codexEnabled = true
+    } else {
+      // Single-vendor: ask which one
+      const defaultVendorIdx = (existingMode === 'single-vendor' && existingCodexEnabled && !existingClaudeEnabled) ? 1 : 0
+      const vendorItems: PickerItem[] = [
+        { label: 'claude', description: 'Claude Code reviews all PRs' },
+        { label: 'codex', description: 'OpenAI Codex reviews all PRs' },
+      ]
+      const vendorIdx = await promptSinglePicker(vendorItems, {
+        title: 'Which AI should review all PRs?',
+        defaultIndex: defaultVendorIdx,
+      })
+      console.log()
+
+      mode = 'single-vendor'
+      claudeEnabled = vendorIdx === 0
+      codexEnabled = vendorIdx === 1
+    }
   }
 
-  const modeItems: PickerItem[] = [
-    { label: 'cross-vendor', description: 'Claude reviews Codex PRs; Codex reviews Claude PRs' },
-    { label: 'single-vendor', description: 'one AI reviews all PRs' },
-  ]
-  const defaultModeIdx = existingMode === 'single-vendor' ? 1 : 0
-  const modeIdx = await promptSinglePicker(modeItems, {
-    title: 'How should reviews be assigned?',
-    defaultIndex: defaultModeIdx,
-  })
-  console.log()
-
-  if (modeIdx === 0) {
-    return { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true }
+  // OpenCode is opt-in (vendors.opencode.enabled defaults to false): it is asked
+  // only when the CLI is authenticated, and never silently flipped on for an
+  // existing install. It reviews as an additional vendor (explicit --reviewer
+  // opencode or a fallback), not as the single-vendor primary — that stays
+  // claude/codex so the cross-vendor independence property is preserved.
+  let opencodeEnabled = existingOpenCodeEnabled
+  if (opencodeOk && !opts.yes) {
+    const items: PickerItem[] = [
+      { label: 'no', description: 'leave OpenCode disabled (default)' },
+      { label: 'yes', description: 'enable OpenCode as an additional reviewer' },
+    ]
+    const idx = await promptSinglePicker(items, {
+      title: 'Enable OpenCode as an additional coding agent?',
+      defaultIndex: existingOpenCodeEnabled ? 1 : 0,
+    })
+    console.log()
+    opencodeEnabled = idx === 1
+  }
+  if (opencodeOk && opts.yes) {
+    console.log(`  OpenCode: ${chalk.cyan(opencodeEnabled ? 'enabled' : 'disabled')}`)
   }
 
-  // Single-vendor: ask which one
-  const defaultVendorIdx = (existingMode === 'single-vendor' && existingCodexEnabled && !existingClaudeEnabled) ? 1 : 0
-  const vendorItems: PickerItem[] = [
-    { label: 'claude', description: 'Claude Code reviews all PRs' },
-    { label: 'codex', description: 'OpenAI Codex reviews all PRs' },
-  ]
-  const vendorIdx = await promptSinglePicker(vendorItems, {
-    title: 'Which AI should review all PRs?',
-    defaultIndex: defaultVendorIdx,
-  })
-  console.log()
-
-  return {
-    mode: 'single-vendor',
-    claudeEnabled: vendorIdx === 0,
-    codexEnabled: vendorIdx === 1,
-  }
+  return { mode, claudeEnabled, codexEnabled, opencodeEnabled }
 }
 
 async function promptAuthorVendor(
   login: string,
   existingAuthorRoutes: Record<string, string> | null,
   opts: OnboardOpts,
-): Promise<'claude' | 'codex' | 'both'> {
+): Promise<'claude' | 'codex' | 'opencode' | 'both'> {
   const existing = existingAuthorRoutes?.[login]
-  const current: 'claude' | 'codex' | 'both' =
-    existing === 'codex' ? 'codex' : existing === 'claude' ? 'claude' : 'both'
+  const current: 'claude' | 'codex' | 'opencode' | 'both' =
+    existing === 'codex' ? 'codex' : existing === 'claude' ? 'claude' : existing === 'opencode' ? 'opencode' : 'both'
 
   if (opts.yes) {
     console.log(`  Primary author: ${chalk.cyan(current)}`)
@@ -216,16 +263,17 @@ async function promptAuthorVendor(
   const items: PickerItem[] = [
     { label: 'claude', description: 'my PRs without explicit attribution → Codex reviews them' },
     { label: 'codex',  description: 'my PRs without explicit attribution → Claude reviews them' },
+    { label: 'opencode', description: 'my PRs without explicit attribution → Claude reviews them' },
     { label: 'both',   description: 'my PRs without explicit attribution → use fallback_reviewer' },
   ]
-  const defaultIdx = current === 'codex' ? 1 : current === 'claude' ? 0 : 2
+  const defaultIdx = current === 'codex' ? 1 : current === 'claude' ? 0 : current === 'opencode' ? 2 : 3
   const idx = await promptSinglePicker(items, {
     title: 'Which AI do you primarily use to write code?',
     defaultIndex: defaultIdx,
   })
   console.log()
 
-  return idx === 1 ? 'codex' : idx === 2 ? 'both' : 'claude'
+  return idx === 1 ? 'codex' : idx === 2 ? 'opencode' : idx === 3 ? 'both' : 'claude'
 }
 
 export interface ThoroughnessChoice {
@@ -516,7 +564,7 @@ export interface OnboardDecisions {
   selectedRepos: string[]
   selectedOrgs: string[]
   vendorConfig: VendorModeConfig
-  authorVendor: 'claude' | 'codex' | 'both'
+  authorVendor: 'claude' | 'codex' | 'opencode' | 'both'
   qualityTier: QualityTier
   qualityMode: 'smart' | 'fixed'
   enabledSkills: string[]
@@ -656,8 +704,10 @@ export function applyOnboardConfig(
   const vendors = raw.vendors as Record<string, Record<string, unknown>>
   if (!vendors.claude) vendors.claude = {}
   if (!vendors.codex) vendors.codex = {}
+  if (!vendors.opencode) vendors.opencode = {}
   vendors.claude.enabled = vendorConfig.claudeEnabled
   vendors.codex.enabled = vendorConfig.codexEnabled
+  vendors.opencode.enabled = vendorConfig.opencodeEnabled
 
   // ── Tunnel ──────────────────────────────────────────────────────────────────
   if (!raw.tunnel || typeof raw.tunnel !== 'object') raw.tunnel = {}
@@ -1043,9 +1093,11 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   const vendorConfig = await promptVendorMode(
     env.claudeOk,
     env.codexOk,
+    env.opencodeOk,
     existingConfig?.mode,
     existingConfig?.vendors?.claude?.enabled ?? true,
     existingConfig?.vendors?.codex?.enabled ?? true,
+    existingConfig?.vendors?.opencode?.enabled ?? false,
     opts,
   )
   console.log()
@@ -1053,7 +1105,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   // ── Step 5: Primary author (cross-vendor + personal only) ───────────────────
   // Header and description live inside the branch: printing them unconditionally
   // and then skipping the prompt left a heading describing a question never asked.
-  let authorVendor: 'claude' | 'codex' | 'both' = 'both'
+  let authorVendor: 'claude' | 'codex' | 'opencode' | 'both' = 'both'
   if (vendorConfig.mode === 'cross-vendor' && deployment === 'personal') {
     console.log(chalk.bold('Step 5 — your coding agent'))
     console.log(chalk.dim('  Routes your PRs to the other vendor even when the attribution footer is missing.'))

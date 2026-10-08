@@ -11,7 +11,7 @@ const BASE_DECISIONS: OnboardDecisions = {
   login: 'alice',
   selectedRepos: ['alice/myapp'],
   selectedOrgs: [],
-  vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true },
+  vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true, opencodeEnabled: false },
   authorVendor: 'claude',
   qualityTier: 'balanced',
   qualityMode: 'smart' as const,
@@ -73,6 +73,16 @@ describe('applyOnboardConfig — first run', () => {
     const routing = cfg.routing as Record<string, unknown>
     expect(routing.allowed_authors).toEqual(['alice'])
     expect(routing.fallback_reviewer).toBe('auto')
+  })
+
+  it('writes vendors.opencode.enabled from the vendor decision', () => {
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true, opencodeEnabled: true },
+    }, workflowDir)
+
+    const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
+    expect(vendors.opencode.enabled).toBe(true)
   })
 
   it('pins the codex model under fixed mode', () => {
@@ -222,7 +232,7 @@ describe('applyOnboardConfig — authorVendor routing', () => {
     }))
     applyOnboardConfig(configPath, {
       ...BASE_DECISIONS,
-      vendorConfig: { mode: 'single-vendor', claudeEnabled: true, codexEnabled: false },
+      vendorConfig: { mode: 'single-vendor', claudeEnabled: true, codexEnabled: false, opencodeEnabled: false },
       authorVendor: 'both',  // default when step is skipped
     }, workflowDir)
     const routing = (readConfig().routing as Record<string, unknown>)

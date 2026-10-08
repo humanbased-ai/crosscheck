@@ -37,7 +37,7 @@
 
 ## Prerequisites
 
-You need GitHub CLI and at least one authenticated AI reviewer CLI before crosscheck can run a one-shot review. Install both Claude Code and Codex only if you want cross-vendor review routing.
+You need GitHub CLI and at least one authenticated AI reviewer CLI before crosscheck can run a one-shot review. Install both Claude Code and Codex only if you want cross-vendor review routing. OpenCode is an optional third harness, disabled by default.
 
 ### Claude Code
 
@@ -64,6 +64,15 @@ printenv OPENAI_API_KEY | codex login --with-api-key
 ```
 
 Then set `auth: api-key` in your config to enable model selection.
+
+### OpenCode
+
+```bash
+npm install -g opencode-ai
+opencode auth login   # sign in to a provider (e.g. DeepSeek, Anthropic, OpenAI)
+```
+
+OpenCode is **opt-in**: enable it with `vendors.opencode.enabled: true` (or `crosscheck onboard`). Its model and provider come from your OpenCode config (`opencode auth login` / `opencode.json`) — crosscheck pins no model by default, so reviews run against whichever model OpenCode is configured to use. Reasoning effort is carried as the `#variant` suffix on `--model provider/model#variant`, so `vendors.opencode.effort` (none | high | max) applies only when `vendors.opencode.model` is also set.
 
 ### GitHub CLI
 
@@ -794,6 +803,7 @@ crosscheck status
   Auth
   ✓ codex                  authenticated
   ✓ claude                 2.1.x (Claude Code)
+  ✓ opencode               v2.x
   ✓ GITHUB_TOKEN           via gh auth login
   ✓ WEBHOOK_SECRET         auto-managed at ~/.crosscheck/webhook-secret
 
@@ -804,6 +814,8 @@ crosscheck status
     enabled skills         code-review-skill (by @awesome-skills, MIT), diagnosing-bugs (by @mattpocock, MIT)
     codex auth             subscription
     claude model           sonnet
+    opencode enabled       false
+    opencode model         configured in opencode.json
     per-review budget      $2.00/review
 
   Impact
@@ -817,6 +829,7 @@ crosscheck status
   CLIs
     codex                  codex-cli 0.128.0
     claude                 2.1.x (Claude Code)
+    opencode               v2.x
 ```
 
 | Flag | Description |

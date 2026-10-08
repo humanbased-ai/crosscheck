@@ -5,6 +5,7 @@ import { homedir } from 'os'
 import chalk from 'chalk'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
+import { checkOpenCodeAuth } from '../reviewers/opencode.js'
 import { getWebhookSecret, getWebhookSecretPath, detectGitHubLogin, patchAllowedAuthors, loadConfig, resolveConfigPath } from '../config/loader.js'
 
 export interface CheckResult {
@@ -35,6 +36,17 @@ export async function runChecks(): Promise<{ results: CheckResult[]; aiCliCount:
     results.push({ label: 'claude CLI', ok: auth.ok, detail: auth.detail, fix: auth.ok ? undefined : 'Run: claude auth login' })
   } catch {
     results.push({ label: 'claude CLI', ok: false, detail: 'not found', fix: 'Install: npm install -g @anthropic-ai/claude-code' })
+  }
+
+  // Check opencode CLI — opt-in (vendors.opencode.enabled defaults to false), so
+  // this is reported for availability rather than counted as a required vendor.
+  try {
+    const version = execSync('opencode --version 2>&1', { encoding: 'utf8' }).trim()
+    const auth = await checkOpenCodeAuth()
+    if (auth.ok) aiCliCount++
+    results.push({ label: 'opencode CLI', ok: auth.ok, detail: `${version} — ${auth.detail}`, fix: auth.ok ? undefined : 'Run: opencode auth login' })
+  } catch {
+    results.push({ label: 'opencode CLI', ok: false, detail: 'not found', fix: 'Install: npm install -g opencode-ai' })
   }
 
   // Check gh CLI — authenticated if stored credentials OR GITHUB_TOKEN env var is set
@@ -105,7 +117,7 @@ export async function runInit(configPath?: string) {
   for (const check of checks) printCheck(check)
 
   // AI CLI checks: only BOTH missing is a hard blocker. One CLI = single-vendor mode (still usable).
-  const aiChecks = checks.filter(c => c.label === 'codex CLI' || c.label === 'claude CLI')
+  const aiChecks = checks.filter(c => c.label === 'codex CLI' || c.label === 'claude CLI' || c.label === 'opencode CLI')
   const nonAiFailures = checks.filter(c => !aiChecks.includes(c) && !c.ok && c.fix)
 
   if (aiCliCount === 0) {

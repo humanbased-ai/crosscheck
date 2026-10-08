@@ -368,7 +368,7 @@ export async function runIssue(opts: {
     const candidates: Array<'claude' | 'codex'> = []
     try {
       const sel = selectOptimizeAgent(config, buildDiagnoseReport(since, LOG_DIR))
-      candidates.push(sel.agent)
+      candidates.push(sel.agent === 'opencode' ? 'claude' : sel.agent)
     } catch {
       candidates.push('claude')
     }
@@ -410,7 +410,7 @@ export async function runIssue(opts: {
     const candidates: Array<'claude' | 'codex'> = []
     try {
       const sel = selectOptimizeAgent(config, buildDiagnoseReport(since, LOG_DIR))
-      candidates.push(sel.agent)
+      candidates.push(sel.agent === 'opencode' ? 'claude' : sel.agent)
     } catch {
       candidates.push('claude')
     }
@@ -512,7 +512,7 @@ export async function runIssue(opts: {
   let primaryReason = 'default'
   try {
     const sel = selectOptimizeAgent(config, report)
-    candidates.push(sel.agent)
+    candidates.push(sel.agent === 'opencode' ? 'claude' : sel.agent)
     primaryReason = sel.reason
   } catch {
     candidates.push('claude')
@@ -698,7 +698,7 @@ export async function runIssueFromWatchIdle(opts: {
   const candidates: Array<'claude' | 'codex'> = []
   try {
     const sel = selectOptimizeAgent(config, buildDiagnoseReport(since, LOG_DIR))
-    candidates.push(sel.agent)
+    candidates.push(sel.agent === 'opencode' ? 'claude' : sel.agent)
   } catch {
     candidates.push('claude')
   }
