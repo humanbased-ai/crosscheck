@@ -46,7 +46,7 @@ export async function runChecks(): Promise<{ results: CheckResult[]; aiCliCount:
     if (auth.ok) aiCliCount++
     results.push({ label: 'opencode CLI', ok: auth.ok, detail: `${version} — ${auth.detail}`, fix: auth.ok ? undefined : 'Run: opencode auth login' })
   } catch {
-    results.push({ label: 'opencode CLI', ok: false, detail: 'not found', fix: 'Install: npm install -g opencode-ai' })
+    results.push({ label: 'opencode CLI', ok: false, detail: 'not found', fix: 'Install: npm install -g @opencode/cli' })
   }
 
   // Check gh CLI — authenticated if stored credentials OR GITHUB_TOKEN env var is set

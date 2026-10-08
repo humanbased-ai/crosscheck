@@ -47,7 +47,7 @@
   "models": {
     "claude-opus-5":             { "vendor": "claude", "license": "closed", "in_usd_mtok": 5,    "out_usd_mtok": 25,   "context": 1000000, "swe_bench_verified": 0.960, "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
     "claude-sonnet-5":           { "vendor": "claude", "license": "closed", "in_usd_mtok": 3,    "out_usd_mtok": 15,   "context": 1000000, "swe_bench_verified": 0.852, "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
-    "claude-haiku-5-5":          { "vendor": "claude", "license": "closed", "in_usd_mtok": 0.1,  "out_usd_mtok": 0.5,  "context": 1000000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": [] },
+    "claude-haiku-5-5":          { "vendor": "claude", "license": "closed", "in_usd_mtok": 0.1,  "out_usd_mtok": 0.5,  "context": 1000000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
     "gpt-6-astra":               { "vendor": "codex",  "license": "closed", "in_usd_mtok": 10,   "out_usd_mtok": 50,   "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
     "gpt-6.1-sol":               { "vendor": "codex",  "license": "closed", "in_usd_mtok": 2,    "out_usd_mtok": 10,   "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
     "gpt-6-luna":                { "vendor": "codex",  "license": "closed", "in_usd_mtok": 0.1,  "out_usd_mtok": 0.5,  "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["none","low","medium","high","xhigh","max"] },

@@ -130,7 +130,7 @@ async function checkEnv(): Promise<EnvCheckResult> {
     if (!auth.ok) console.log(`      ${chalk.dim('→')} ${chalk.yellow('Run: opencode auth login')}`)
   } catch {
     console.log(`  ${chalk.red('✗')} ${'opencode CLI'.padEnd(20)} not found`)
-    console.log(`      ${chalk.dim('→')} ${chalk.yellow('Install: npm install -g opencode-ai')}`)
+    console.log(`      ${chalk.dim('→')} ${chalk.yellow('Install: npm install -g @opencode/cli')}`)
   }
 
   const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
@@ -169,7 +169,8 @@ async function promptVendorMode(
   existingOpenCodeEnabled: boolean,
   opts: OnboardOpts,
 ): Promise<VendorModeConfig> {
-  const bothAvailable = claudeOk && codexOk
+  const availableVendors = [claudeOk, codexOk, opencodeOk].filter(Boolean).length
+  const bothAvailable = availableVendors >= 2
 
   let mode: 'cross-vendor' | 'single-vendor'
   let claudeEnabled: boolean
@@ -216,8 +217,10 @@ async function promptVendorMode(
 
     if (modeIdx === 0) {
       mode = 'cross-vendor'
-      claudeEnabled = true
-      codexEnabled = true
+      // Enable exactly the claude/codex vendors that are available; OpenCode is
+      // handled by the additional-agent decision below.
+      claudeEnabled = claudeOk
+      codexEnabled = codexOk
     } else {
       // Single-vendor: ask which one
       const defaultVendorIdx = (existingMode === 'single-vendor' && existingCodexEnabled && !existingClaudeEnabled) ? 1 : 0
@@ -248,7 +251,7 @@ async function promptVendorMode(
   // without asking (including under --yes) rather than leaving every vendor off.
   const opencodeIsOnlyVendor = opencodeOk && !claudeOk && !codexOk
   let opencodeEnabled = opencodeIsOnlyVendor || opencodePickedAsSingleVendor || existingOpenCodeEnabled
-  if (opencodeOk && !opts.yes && !opencodeIsOnlyVendor) {
+  if (opencodeOk && !opts.yes && !opencodeIsOnlyVendor && !opencodePickedAsSingleVendor) {
     const items: PickerItem[] = [
       { label: 'no', description: 'leave OpenCode disabled (default)' },
       { label: 'yes', description: 'enable OpenCode as an additional reviewer' },

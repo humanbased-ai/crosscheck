@@ -157,13 +157,13 @@ describe('escalation ladder', () => {
   // The OpenCode case: most open-weight models expose no effort ladder, so the
   // effort step has to degrade to a model step or escalation silently no-ops.
   it('promotes a tier when the model has no effort control', () => {
-    expect(effortLevelsFor('claude-haiku-5-5')).toEqual([])
-    expect(escalate({ tier: 'fast', effort: null }, 2, 'claude-haiku-5-5'))
+    expect(effortLevelsFor('kimi-k3')).toEqual([])
+    expect(escalate({ tier: 'fast', effort: null }, 2, 'kimi-k3'))
       .toEqual({ tier: 'balanced', effort: null })
   })
 
   it('caps tier promotion at thorough', () => {
-    expect(escalate({ tier: 'thorough', effort: null }, 3, 'claude-haiku-5-5').tier)
+    expect(escalate({ tier: 'thorough', effort: null }, 3, 'kimi-k3').tier)
       .toBe('thorough')
   })
 })
@@ -174,7 +174,7 @@ describe('effort clamping', () => {
   })
 
   it('returns null for a model with no effort parameter', () => {
-    expect(clampEffort('claude-haiku-5-5', 'high')).toBeNull()
+    expect(clampEffort('kimi-k3', 'high')).toBeNull()
   })
 
   it('snaps down to the nearest supported level', () => {
@@ -531,7 +531,7 @@ describe('rounds escalate on measured non-convergence', () => {
   })
 
   it('promotes the tier instead when the model has no effort ladder', () => {
-    expect(escalate({ tier: 'fast', effort: null }, 2, 'claude-haiku-5-5'))
+    expect(escalate({ tier: 'fast', effort: null }, 2, 'kimi-k3'))
       .toEqual({ tier: 'balanced', effort: null })
   })
 })

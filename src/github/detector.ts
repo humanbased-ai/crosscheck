@@ -112,14 +112,16 @@ export async function detectOriginFull(
   if (fromBranch !== null) return { origin: fromBranch, method: 'branch' }
 
   if (author && config.routing.author_routes[author]) {
-    const bothEnabled = config.mode === 'cross-vendor'
-      && config.vendors.claude.enabled
-      && config.vendors.codex.enabled
-    if (!bothEnabled) {
+    // Any two vendors enabled in cross-vendor mode defeat a static author→vendor
+    // map (the author may write via either), not just the claude+codex pair.
+    const enabledVendors = [config.vendors.claude, config.vendors.codex, config.vendors.opencode]
+      .filter(v => v.enabled).length
+    const bypassed = config.mode === 'cross-vendor' && enabledVendors >= 2
+    if (!bypassed) {
       return { origin: config.routing.author_routes[author], method: 'author_routes' }
     }
-    // Cross-vendor with both vendors enabled: log the bypass so users can spot it
-    // in logs without changing reviewer selection silently.
+    // Cross-vendor with multiple vendors enabled: log the bypass so users can spot
+    // it in logs without changing reviewer selection silently.
     return { origin: 'human', method: 'author_routes_bypassed' }
   }
 

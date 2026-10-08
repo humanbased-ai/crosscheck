@@ -10,7 +10,7 @@ import { loadConfig, resolveConfigPath } from '../config/loader.js'
 import type { Config } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { buildDiagnoseReport, type DiagnoseReport } from './diagnose.js'
-import { parseOpenCodeOutput } from '../reviewers/opencode.js'
+import { parseOpenCodeOutput, opencodePolicy } from '../reviewers/opencode.js'
 import { buildOpenCodeEnv } from '../reviewers/opencode-env.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -239,6 +239,9 @@ async function runWithOpenCode(prompt: string): Promise<string> {
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-optimize-'))
   try {
     writeFileSync(join(tmpDir, 'OPTIMIZE_PROMPT.md'), prompt)
+    // No host sandbox in OpenCode v2 — deny shell/edits so a prompt-injected
+    // optimize run cannot execute commands or mutate files.
+    writeFileSync(join(tmpDir, 'opencode.json'), JSON.stringify(opencodePolicy(false), null, 2))
     const result = await execa('opencode', [
       'run', '--format', 'json', '--auto', '--standalone',
       'Read OPTIMIZE_PROMPT.md and produce the new instructions.md content. Output only the file content — no explanation, no markdown fences.',

@@ -47,8 +47,10 @@ interface OpenCodeEvent {
 
 export function parseOpenCodeOutput(raw: string): { review: string; tokensUsed?: number } {
   let review = ''
-  let inputTokens: number | undefined
-  let outputTokens: number | undefined
+  let inputTokens = 0
+  let outputTokens = 0
+  let reasoningTokens = 0
+  let sawTokens = false
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue
     let event: OpenCodeEvent
@@ -60,14 +62,16 @@ export function parseOpenCodeOutput(raw: string): { review: string; tokensUsed?:
     }
     if (event.type === 'text' && event.part?.text) review += event.part.text
     if (event.type === 'step_finish' && event.part?.tokens) {
-      inputTokens = event.part.tokens.input
-      outputTokens = event.part.tokens.output
+      // Each model step emits its own payload; accumulate rather than overwrite,
+      // and include reasoning so a multi-step run is not undercounted.
+      const t = event.part.tokens
+      if (typeof t.input === 'number') inputTokens += t.input
+      if (typeof t.output === 'number') outputTokens += t.output
+      if (typeof t.reasoning === 'number') reasoningTokens += t.reasoning
+      sawTokens = true
     }
   }
-  const tokensUsed =
-    inputTokens !== undefined && outputTokens !== undefined
-      ? inputTokens + outputTokens
-      : undefined
+  const tokensUsed = sawTokens ? inputTokens + outputTokens + reasoningTokens : undefined
   return { review, tokensUsed }
 }
 
@@ -116,7 +120,7 @@ function extractOpenCodeErrorSummary(stderr: string): string | undefined {
 // running read-only git, so allow exactly those shell commands and deny every
 // other one. `--auto` auto-approves `ask` but cannot widen a `deny`.
 // `allowEdit` is left for the fix step, which must write files.
-function opencodePolicy(allowEdit: boolean): unknown {
+export function opencodePolicy(allowEdit: boolean): unknown {
   return {
     permissions: [
       { action: 'shell', resource: '*', effect: 'deny' },
@@ -149,8 +153,15 @@ export function isolateCheckoutOpenCodeConfig(repoDir: string, allowEdit = false
   // tracked deletions as changed files (git add -A would then commit and push).
   return () => {
     if (policyWritten) { try { rmSync(join(repoDir, 'opencode.json'), { force: true }) } catch { /* best effort */ } }
+    const failed: string[] = []
     for (const { from, to } of moved.reverse()) {
-      try { renameSync(to, from) } catch { /* best effort */ }
+      try { renameSync(to, from) } catch { failed.push(from) }
+    }
+    // Delete the backup only when every path was restored. If the agent recreated
+    // a conflicting path, keep the backup and fail loudly so the original tracked
+    // configuration is never silently lost.
+    if (failed.length > 0) {
+      throw new Error(`could not restore OpenCode config: ${failed.join(', ')} (backup kept at ${backupDir})`)
     }
     try { rmSync(backupDir, { recursive: true, force: true }) } catch { /* best effort */ }
   }

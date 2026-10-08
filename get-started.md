@@ -68,7 +68,7 @@ Then set `auth: api-key` in your config to enable model selection.
 ### OpenCode
 
 ```bash
-npm install -g opencode-ai
+npm install -g @opencode/cli
 opencode auth login   # sign in to a provider (e.g. DeepSeek, Anthropic, OpenAI)
 ```
 
@@ -1332,6 +1332,11 @@ routing:
   # the attribution footer (e.g. when creating PRs via gh CLI directly).
   author_routes:
     your-github-login: claude   # your PRs → treated as Claude-authored → Codex reviews
+
+  # Reviewer for PRs crosscheck cannot attribute (origin: human). 'auto' = the
+  # first authenticated vendor (codex, then claude, then opencode); an explicit
+  # 'codex' | 'claude' | 'opencode' always uses that vendor; null = skip the PR.
+  fallback_reviewer: auto
 
 # ── Tunnel (watch mode only) ──────────────────────────────────────────────────
 # localhost.run (default) — SSH tunnel, zero install, URL changes on reconnect.

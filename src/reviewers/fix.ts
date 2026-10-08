@@ -6,7 +6,7 @@ import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeEffort } from './claude.js'
 import { codexReasoningEffort } from './codex.js'
-import { opencodeEffort, isolateCheckoutOpenCodeConfig } from './opencode.js'
+import { opencodeEffort, isolateCheckoutOpenCodeConfig, parseOpenCodeOutput } from './opencode.js'
 import { claudeSkillBrokerArgs, codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { buildCodexEnv } from './codex-env.js'
 import { buildOpenCodeEnv } from './opencode-env.js'
@@ -371,14 +371,15 @@ export async function runOpenCodeFixStep(
   // variant cannot be sent, so `effort` is honoured only when `model` is set.
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
 
+  let tokensUsed: number | undefined
   try {
-    await withCredentialFreeOrigin(tmpDir, () => {
+    const result = await withCredentialFreeOrigin(tmpDir, () => {
       // Hide any OpenCode config the untrusted checkout carries while the agent
       // runs; restore it after so the fix's git add -A cannot stage the deletion.
       const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true)
       return execa(
         'opencode',
-        ['run', '--auto', '--standalone', ...modelArgs],
+        ['run', '--format', 'json', '--auto', '--standalone', ...modelArgs],
         {
           cwd: tmpDir,
           timeout: resolvedTimeout,
@@ -388,6 +389,7 @@ export async function runOpenCodeFixStep(
         },
       ).finally(restoreConfig)
     })
+    tokensUsed = parseOpenCodeOutput(result.stdout ?? '').tokensUsed
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (/not logged in|auth|credential/i.test(msg)) {
@@ -404,5 +406,5 @@ export async function runOpenCodeFixStep(
     ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
   ]
   // Report effort only when a pinned model actually carried the #variant.
-  return { appliedCount: changedFiles.length, changedFiles, effort: model ? effort : undefined }
+  return { appliedCount: changedFiles.length, changedFiles, tokensUsed, effort: model ? effort : undefined }
 }
