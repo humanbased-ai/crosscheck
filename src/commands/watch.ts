@@ -43,7 +43,7 @@ import { clonePRForReview, BaseRefUnavailableError } from '../lib/clone.js'
 import { resolveLinearAuth, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import {
   getSmartSwitch,
-  isSubscriptionLimitError,
+  isVendorFailoverError,
   detectFailedVendor,
   triggerSwitch,
   notifyReviewSuccess,
@@ -733,7 +733,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
           crosscheckShas,
           smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
-          onVendorLimit: (failedVendor, fallbackVendor, reason) => {
+          onVendorFailure: (failedVendor, fallbackVendor, reason) => {
             if (config.mode === 'cross-vendor' && fallbackVendor !== null && !getSmartSwitch().active) {
               triggerSwitch(failedVendor, reason, bLog)
             }
@@ -870,9 +870,10 @@ export async function runWatch(opts: WatchOpts = {}) {
           }
         }
         await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'failure')
-        // Smart-switch: when a reviewer hits a subscription limit in cross-vendor mode,
+        // Smart-switch: when a reviewer hits a failover-eligible vendor failure in
+        // cross-vendor mode,
         // degrade to single-vendor with the healthy vendor for the next 30 minutes.
-        if (config.mode === 'cross-vendor' && !getSmartSwitch().active && isSubscriptionLimitError(err)) {
+        if (config.mode === 'cross-vendor' && !getSmartSwitch().active && isVendorFailoverError(err)) {
           const failedVendor = detectFailedVendor(err)
           if (failedVendor) triggerSwitch(failedVendor, message, bLog)
         }

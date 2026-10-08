@@ -1,4 +1,6 @@
 import { execa } from 'execa'
+import { accessSync, constants as fsConstants } from 'node:fs'
+import { delimiter, join } from 'node:path'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { primaryModelFromUsage, resolveClaudeModel } from '../lib/review-models.js'
@@ -7,6 +9,7 @@ import { vendorFailureSummary } from '../lib/vendor-error-summary.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeSkillBrokerArgs, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
+import { isTransientVendorError } from '../lib/smart-switch.js'
 
 const EFFORT_MAP: Record<string, string> = {
   low: 'low',
@@ -23,11 +26,20 @@ export function claudeEffort(effort?: string): string {
   return (effort && EFFORT_MAP[effort]) ?? 'medium'
 }
 
-// Detect transient Claude API errors that should be retried:
-// - 429 session limit: "You've hit your session limit"
-// - Socket disconnect: "socket connection was closed unexpectedly"
 function isRetryableClaudeError(message: string): boolean {
-  return /session limit|socket.*closed|429|rate limit/i.test(message)
+  return isTransientVendorError(message) || /session limit/i.test(message)
+}
+
+function isClaudeExecutableMissing(code: string | undefined): boolean {
+  if (code !== 'ENOENT') return false
+  const pathEnv = process.env.PATH
+  if (!pathEnv) return false
+  const suffixes = process.platform === 'win32'
+    ? ['', ...(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')]
+    : ['']
+  return !pathEnv.split(delimiter).some(dir => suffixes.some(suffix => {
+    try { accessSync(join(dir || '.', `claude${suffix}`), fsConstants.X_OK); return true } catch { return false }
+  }))
 }
 
 const MAX_CLAUDE_RETRIES = 2
@@ -168,7 +180,7 @@ export async function runClaudeReview(
         return { review: raw, model, effort, retried }
       }
     } catch (err: unknown) {
-      const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
+      const execa = err as { stdout?: string; stderr?: string; message?: string; code?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
       const rawStderr = execa.stderr?.trim() ?? ''
       const fullMessage = rawStderr || execa.message || ''
       
@@ -189,6 +201,8 @@ export async function runClaudeReview(
         : vendorFailureSummary(execa)
       const thrown = Object.assign(new Error(`claude: ${summary}`), {
         exitCode: execa.exitCode,
+        code: execa.code,
+        vendorExecutableMissing: isClaudeExecutableMissing(execa.code),
         timedOut: execa.timedOut,
         stderr: rawStderr,
         effectiveTimeoutMs: effectiveMs,

@@ -1,8 +1,9 @@
 import { execa } from 'execa'
+import { accessSync, constants as fsConstants } from 'node:fs'
 import { readFileSync, realpathSync, rmSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { delimiter, join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveCodexModel } from '../lib/review-models.js'
@@ -14,6 +15,7 @@ import { codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructio
 import { buildCodexEnv } from './codex-env.js'
 import { CompromisedCloneError, withCredentialFreeOrigin } from '../lib/clone.js'
 import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
+import { isTransientVendorError } from '../lib/smart-switch.js'
 
 // Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
 // Infer the verdict from the highest severity present and append it so parseVerdict() can
@@ -112,9 +114,20 @@ export function parseCodexTokensUsed(output: string): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed
 }
 
-// Detect transient Codex API errors that should be retried (socket disconnects, rate limits)
 function isRetryableCodexError(message: string): boolean {
-  return /socket.*closed|429|rate limit|connection.*reset|econnreset/i.test(message)
+  return isTransientVendorError(message)
+}
+
+function isCodexExecutableMissing(code: string | undefined): boolean {
+  if (code !== 'ENOENT') return false
+  const pathEnv = process.env.PATH
+  if (!pathEnv) return false
+  const suffixes = process.platform === 'win32'
+    ? ['', ...(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')]
+    : ['']
+  return !pathEnv.split(delimiter).some(dir => suffixes.some(suffix => {
+    try { accessSync(join(dir || '.', `codex${suffix}`), fsConstants.X_OK); return true } catch { return false }
+  }))
 }
 
 const MAX_CODEX_RETRIES = 2
@@ -257,7 +270,7 @@ export async function runCodexReview(
       }
     } catch (err: unknown) {
       if (err instanceof CompromisedCloneError) throw err
-      const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
+      const execa = err as { stdout?: string; stderr?: string; message?: string; code?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
       const rawStderr = execa.stderr ?? ''
       const fullMessage = rawStderr || execa.message || ''
 
@@ -278,6 +291,8 @@ export async function runCodexReview(
         : vendorFailureSummary(execa, extractErrorSummary)
       const thrown = Object.assign(new Error(`codex: ${summary}`), {
         exitCode: execa.exitCode,
+        code: execa.code,
+        vendorExecutableMissing: isCodexExecutableMissing(execa.code),
         timedOut: execa.timedOut,
         stderr: rawStderr,
         effectiveTimeoutMs: effectiveMs,
