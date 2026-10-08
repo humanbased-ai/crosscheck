@@ -372,7 +372,7 @@ export async function runOpenCodeFixStep(
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
 
   try {
-    await execa(
+    await withCredentialFreeOrigin(tmpDir, () => execa(
       'opencode',
       ['run', '--auto', '--standalone', ...modelArgs],
       {
@@ -382,7 +382,7 @@ export async function runOpenCodeFixStep(
         extendEnv: false,
         env: buildOpenCodeEnv({}),
       },
-    )
+    ))
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (/not logged in|auth|credential/i.test(msg)) {

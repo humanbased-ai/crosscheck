@@ -142,10 +142,12 @@ async function resolveFallback(config: Config): Promise<'claude' | 'codex' | 'op
   if (fb === 'opencode') return config.vendors.opencode.enabled ? 'opencode' : null
   // 'auto': use runtime capability checks so a Claude-only install doesn't
   // attempt Codex just because both vendors are enabled in config by default.
+  // OpenCode is opt-in, so its auth check alone is not enough — a configured
+  // opt-out must never be overridden by an authenticated CLI.
   const [codexAuth, claudeAuth, opencodeAuth] = await Promise.all([checkCodexAuth(), checkClaudeAuth(), checkOpenCodeAuth()])
   if (codexAuth.ok) return 'codex'
   if (claudeAuth.ok) return 'claude'
-  if (opencodeAuth.ok) return 'opencode'
+  if (opencodeAuth.ok && config.vendors.opencode.enabled) return 'opencode'
   return null
 }
 

@@ -9,6 +9,7 @@ import { tierTimeoutMs } from './tier-timeouts.js'
 import { buildOpenCodeEnv } from './opencode-env.js'
 import type { SkillActivationSession } from '../skills/broker.js'
 import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
+import { withCredentialFreeOrigin } from '../lib/clone.js'
 
 // OpenCode's reasoning-effort ladder is the `#variant` suffix on
 // `--model provider/model#variant`. Variants are provider-defined, not one
@@ -163,7 +164,7 @@ export async function runOpenCodeReview(
   let lastErr: unknown = undefined
   for (let attempt = 1; attempt <= MAX_OPENCODE_RETRIES; attempt++) {
     try {
-      const { result: { stdout }, retried } = await withTimeoutRetry(
+      const { result: { stdout }, retried } = await withCredentialFreeOrigin(repoDir, () => withTimeoutRetry(
         resolvedTimeout,
         (t) => execa('opencode', args, {
           cwd: repoDir,
@@ -181,7 +182,7 @@ export async function runOpenCodeReview(
           onRetry: (effectiveMs, delayMs) =>
             (onRetry ?? onLog)?.(`  ⏱ opencode timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),
         },
-      )
+      ))
 
       const { review: parsedReview, tokensUsed } = parseOpenCodeOutput(stdout ?? '')
       const rawReview = parsedReview.trim()

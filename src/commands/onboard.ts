@@ -188,12 +188,13 @@ async function promptVendorMode(
       codexEnabled = true
     } else {
       // Neither claude nor codex is available — only OpenCode (opt-in) remains.
-      // Keep the claude/codex defaults so enabling OpenCode below works; the
-      // mode is cosmetic here since neither primary vendor can actually run.
-      console.log(`  Mode: ${chalk.cyan('cross-vendor')} (${chalk.yellow('no claude/codex available — enable OpenCode below')})`)
-      mode = 'cross-vendor'
-      claudeEnabled = true
-      codexEnabled = true
+      // Leave claude/codex disabled and run single-vendor so the assigned
+      // reviewer is OpenCode itself; enabling both would make the default
+      // workflow's `reviewer: auto` prefer an unavailable Codex.
+      console.log(`  Mode: ${chalk.cyan('single-vendor')} (${chalk.yellow('no claude/codex available — enable OpenCode below')})`)
+      mode = 'single-vendor'
+      claudeEnabled = false
+      codexEnabled = false
     }
   } else if (opts.yes) {
     mode = (existingMode ?? 'cross-vendor') as 'cross-vendor' | 'single-vendor'

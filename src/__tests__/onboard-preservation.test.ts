@@ -85,6 +85,22 @@ describe('applyOnboardConfig — first run', () => {
     expect(vendors.opencode.enabled).toBe(true)
   })
 
+  it('writes claude/codex disabled for the opencode-only path', () => {
+    // The neither-Claude-nor-Codex onboarding branch runs single-vendor with
+    // claude/codex disabled, so `reviewer: auto` cannot pick an unavailable Codex.
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      vendorConfig: { mode: 'single-vendor', claudeEnabled: false, codexEnabled: false, opencodeEnabled: true },
+    }, workflowDir)
+
+    const cfg = readConfig()
+    const vendors = cfg.vendors as Record<string, Record<string, unknown>>
+    expect(vendors.claude.enabled).toBe(false)
+    expect(vendors.codex.enabled).toBe(false)
+    expect(vendors.opencode.enabled).toBe(true)
+    expect(cfg.mode).toBe('single-vendor')
+  })
+
   it('pins the codex model under fixed mode', () => {
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityTier: 'thorough', qualityMode: 'fixed' }, workflowDir)
 

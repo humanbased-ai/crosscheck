@@ -17,6 +17,13 @@ vi.mock('../github/client.js', () => ({
   getPRCommits: vi.fn(async () => []),
 }))
 
+// resolveFallback's 'auto' path calls the vendors' auth probes. Pin them so the
+// opencode opt-out case is testable without depending on which CLIs happen to
+// be installed in the test environment.
+vi.mock('../reviewers/codex.js', () => ({ checkCodexAuth: vi.fn(async () => ({ ok: false, detail: 'not found' })) }))
+vi.mock('../reviewers/claude.js', () => ({ checkClaudeAuth: vi.fn(async () => ({ ok: false, detail: 'not found' })) }))
+vi.mock('../reviewers/opencode.js', () => ({ checkOpenCodeAuth: vi.fn(async () => ({ ok: true, detail: 'authenticated' })) }))
+
 describe('detectOriginFromBody', () => {
   it('detects claude origin from PR body footer', () => {
     expect(detectOriginFromBody('Generated with [Claude Code]', buildConfig())).toBe('claude')
@@ -227,5 +234,23 @@ describe('assignReviewer', () => {
       routing: { fallback_reviewer: null },
     })
     expect(await assignReviewer('human', cfg)).toBeNull()
+  })
+
+  it('auto fallback skips an authenticated-but-disabled opencode', async () => {
+    // The opencode auth probe returns ok (mocked above), but the config opt-out
+    // must win: 'auto' returns null rather than an explicitly disabled vendor.
+    const cfg = buildConfig({
+      vendors: { claude: { enabled: false }, codex: { enabled: false }, opencode: { enabled: false } },
+      routing: { fallback_reviewer: 'auto' },
+    })
+    expect(await assignReviewer('human', cfg)).toBeNull()
+  })
+
+  it('auto fallback selects opencode when it is enabled', async () => {
+    const cfg = buildConfig({
+      vendors: { claude: { enabled: false }, codex: { enabled: false }, opencode: { enabled: true } },
+      routing: { fallback_reviewer: 'auto' },
+    })
+    expect(await assignReviewer('human', cfg)).toBe('opencode')
   })
 })
