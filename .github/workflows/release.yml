@@ -125,6 +125,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           RELEASE_BRANCH: ci/release-${{ needs.compute.outputs.new_tag }}
+          NEW_VERSION: ${{ needs.compute.outputs.new_version }}
+          NEW_TAG: ${{ needs.compute.outputs.new_tag }}
           SOURCE_SHA: ${{ needs.compute.outputs.source_sha }}
         run: |
           set -euo pipefail
@@ -132,67 +134,111 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           # main is protected and rejects direct pushes. Put the version bump
-          # in a disposable PR, merge it, then tag the resulting main commit.
+          # in a disposable PR, merge it, then tag the exact merge commit. A
+          # rerun may find that PR already merged, so resume from that commit.
           git fetch origin main --tags
-          CURRENT_MAIN_SHA=$(git rev-parse origin/main)
-          if [ "$CURRENT_MAIN_SHA" != "$SOURCE_SHA" ]; then
-            echo "::error::main advanced from $SOURCE_SHA to $CURRENT_MAIN_SHA while this release waited for approval; refusing to publish a stale release."
-            exit 1
+          PR_URL=$(gh pr list \
+            --base main \
+            --head "$RELEASE_BRANCH" \
+            --state all \
+            --json url \
+            --jq '.[0].url // empty')
+          MERGED_SHA=""
+          RELEASE_SHA=""
+
+          if [ -n "$PR_URL" ]; then
+            PR_STATE=$(gh pr view "$PR_URL" --json state --jq '.state')
+            if [ "$PR_STATE" = "MERGED" ]; then
+              MERGED_SHA=$(gh pr view "$PR_URL" --json mergeCommit --jq \
+                '.mergeCommit.oid // empty')
+              RELEASE_SHA="$MERGED_SHA"
+            elif [ "$PR_STATE" != "OPEN" ]; then
+              PR_URL=""
+            fi
           fi
-          git switch --create "$RELEASE_BRANCH" "$SOURCE_SHA"
-          CURRENT=$(node -p "require('./package.json').version")
-          if [ "$CURRENT" != "${{ needs.compute.outputs.new_version }}" ]; then
-            npm version "${{ needs.compute.outputs.new_version }}" --no-git-tag-version
-            git add package.json package-lock.json
-            git commit -m "chore: release ${{ needs.compute.outputs.new_tag }}"
 
-            git push --force origin "$RELEASE_BRANCH"
-            PR_URL=$(gh pr list \
-              --base main \
-              --head "$RELEASE_BRANCH" \
-              --state open \
-              --json url \
-              --jq '.[0].url // empty')
-            if [ -z "$PR_URL" ]; then
-              PR_URL=$(gh pr create \
-                --base main \
-                --head "$RELEASE_BRANCH" \
-                --title "chore: release ${{ needs.compute.outputs.new_tag }}" \
-                --body "Automated version bump for ${{ needs.compute.outputs.new_tag }}. ⚡ Generated with [OpenAI Codex](https://openai.com/codex)")
-            fi
-
-            if ! gh pr merge "$PR_URL" --merge --delete-branch; then
-              gh pr merge "$PR_URL" --merge --auto --delete-branch || true
-            fi
-
-            MERGED_SHA=""
-            for attempt in $(seq 1 30); do
-              MERGED_SHA=$(gh pr view "$PR_URL" --json state,mergeCommit --jq \
-                'select(.state == "MERGED" and .mergeCommit != null) | .mergeCommit.oid')
-              if [ -n "$MERGED_SHA" ]; then
-                break
-              fi
-              sleep 2
-            done
-            if [ -z "$MERGED_SHA" ]; then
-              echo "::error::Version bump PR was not merged; refusing to publish a tag from an unversioned main."
+          if [ -n "$RELEASE_SHA" ]; then
+            PARENTS=$(git show -s --format=%P "$RELEASE_SHA")
+            FIRST_PARENT=${PARENTS%% *}
+            if [ "$FIRST_PARENT" != "$SOURCE_SHA" ]; then
+              echo "::error::The merged version bump PR was based on $FIRST_PARENT, not the release source $SOURCE_SHA; refusing to publish a mixed-source release."
               exit 1
             fi
+            CHANGED_FILES=$(git diff --name-only "$SOURCE_SHA" "$RELEASE_SHA" | sort)
+            EXPECTED_FILES=$'package-lock.json\npackage.json'
+            if [ "$CHANGED_FILES" != "$EXPECTED_FILES" ]; then
+              echo "::error::The version bump merge changed files outside package.json and package-lock.json; refusing to publish an unreviewed release tree."
+              exit 1
+            fi
+          else
+            CURRENT_MAIN_SHA=$(git rev-parse origin/main)
+            if [ "$CURRENT_MAIN_SHA" != "$SOURCE_SHA" ]; then
+              echo "::error::main advanced from $SOURCE_SHA to $CURRENT_MAIN_SHA while this release waited for approval; refusing to publish a stale release."
+              exit 1
+            fi
+            git switch --create "$RELEASE_BRANCH" "$SOURCE_SHA"
+            CURRENT=$(node -p "require('./package.json').version")
+            if [ "$CURRENT" != "$NEW_VERSION" ]; then
+              npm version "$NEW_VERSION" --no-git-tag-version
+              git add package.json package-lock.json
+              git commit -m "chore: release $NEW_TAG"
 
-            git fetch origin main --tags
-            git checkout --detach "$MERGED_SHA"
+              git push --force origin "$RELEASE_BRANCH"
+              if [ -z "$PR_URL" ]; then
+                PR_URL=$(gh pr create \
+                  --base main \
+                  --head "$RELEASE_BRANCH" \
+                  --title "chore: release $NEW_TAG" \
+                  --body "Automated version bump for $NEW_TAG. ⚡ Generated with [OpenAI Codex](https://openai.com/codex)")
+              fi
+
+              if ! gh pr merge "$PR_URL" --merge --delete-branch; then
+                gh pr merge "$PR_URL" --merge --auto --delete-branch || true
+              fi
+
+              for attempt in $(seq 1 30); do
+                MERGED_SHA=$(gh pr view "$PR_URL" --json state,mergeCommit --jq \
+                  'select(.state == "MERGED" and .mergeCommit != null) | .mergeCommit.oid')
+                if [ -n "$MERGED_SHA" ]; then
+                  break
+                fi
+                sleep 2
+              done
+              if [ -z "$MERGED_SHA" ]; then
+                echo "::error::Version bump PR was not merged; refusing to publish a tag from an unversioned main."
+                exit 1
+              fi
+              RELEASE_SHA="$MERGED_SHA"
+
+              git fetch origin main --tags
+              PARENTS=$(git show -s --format=%P "$RELEASE_SHA")
+              FIRST_PARENT=${PARENTS%% *}
+              if [ "$FIRST_PARENT" != "$SOURCE_SHA" ]; then
+                echo "::error::main advanced before the version bump PR merged; refusing to publish a mixed-source release."
+                exit 1
+              fi
+              CHANGED_FILES=$(git diff --name-only "$SOURCE_SHA" "$RELEASE_SHA" | sort)
+              EXPECTED_FILES=$'package-lock.json\npackage.json'
+              if [ "$CHANGED_FILES" != "$EXPECTED_FILES" ]; then
+                echo "::error::The version bump merge changed files outside package.json and package-lock.json; refusing to publish an unreviewed release tree."
+                exit 1
+              fi
+            else
+              RELEASE_SHA="$SOURCE_SHA"
+            fi
           fi
 
+          git checkout --detach "$RELEASE_SHA"
           CURRENT=$(node -p "require('./package.json').version")
-          if [ "$CURRENT" != "${{ needs.compute.outputs.new_version }}" ]; then
-            echo "::error::main still contains package version $CURRENT after the version bump PR merged."
+          if [ "$CURRENT" != "$NEW_VERSION" ]; then
+            echo "::error::release source $RELEASE_SHA contains package version $CURRENT, expected $NEW_VERSION."
             exit 1
           fi
-          if git rev-parse "${{ needs.compute.outputs.new_tag }}" >/dev/null 2>&1; then
-            echo "Tag ${{ needs.compute.outputs.new_tag }} already exists — skipping."
+          if git rev-parse "refs/tags/$NEW_TAG" >/dev/null 2>&1; then
+            echo "Tag $NEW_TAG already exists — skipping."
           else
-            git tag "${{ needs.compute.outputs.new_tag }}"
-            git push origin "${{ needs.compute.outputs.new_tag }}"
+            git tag "$NEW_TAG"
+            git push origin "$NEW_TAG"
           fi
 
       - name: Publish to npm @latest
