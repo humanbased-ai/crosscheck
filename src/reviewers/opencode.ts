@@ -1,4 +1,6 @@
 import { execa } from 'execa'
+import { rmSync } from 'fs'
+import { join } from 'path'
 import type { QualityConfig, OpenCodeVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveOpenCodeModel } from '../lib/review-models.js'
@@ -68,12 +70,14 @@ export function parseOpenCodeOutput(raw: string): { review: string; tokensUsed?:
   return { review, tokensUsed }
 }
 
-// OpenCode follows the same VERDICT rule as claude (the behaviour block ends
-// with "the very last line MUST be VERDICT: …"), so a run that ignores it is
-// the rare path. Fall back to APPROVE — never a BLOCK invented from prose, which
-// would be a claim about the diff nobody made.
-export function inferVerdictFromOpenCodeOutput(_text: string): string {
-  return 'APPROVE'
+// OpenCode follows the same VERDICT rule as claude/codex, so a well-behaved run
+// ends with the line. Match it case-insensitively: a `Verdict: BLOCK` that the
+// old exact-match check missed then received an appended APPROVE, which the
+// parser read as the final verdict. When no verdict was stated at all, default
+// to NEEDS WORK — never APPROVE, which would clear a PR on a verdict nobody
+// gave (an empty or refusing body is caught earlier by detectInconclusiveReview).
+export function inferVerdictFromOpenCodeOutput(text: string): string {
+  return /\bVERDICT\s*:/i.test(text) ? text : `${text}\n\nVERDICT: NEEDS WORK`
 }
 
 // Detect transient OpenCode errors that should be retried (rate limits, socket
@@ -100,6 +104,18 @@ function extractOpenCodeErrorSummary(stderr: string): string | undefined {
   ).at(-1)
 }
 
+// OpenCode auto-discovers a project's own opencode.json / .opencode directory
+// from the working directory upward, and loads any plugin they register. In an
+// untrusted checkout that is an arbitrary-code channel independent of the
+// prompt, and OpenCode v2 has no `--pure` / config override flag to suppress it.
+// Remove them before the run so only the operator's global config applies. The
+// clone is a throwaway and a review reads the diff, not these files.
+export function stripCheckoutOpenCodeConfig(repoDir: string): void {
+  for (const rel of ['opencode.json', 'opencode.jsonc', '.opencode']) {
+    try { rmSync(join(repoDir, rel), { recursive: true, force: true }) } catch { /* best effort */ }
+  }
+}
+
 export async function runOpenCodeReview(
   repoDir: string,
   baseBranch: string,
@@ -113,6 +129,8 @@ export async function runOpenCodeReview(
   issueContext?: string,
   _skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
+  // Drop any OpenCode config the untrusted checkout carries before the run.
+  stripCheckoutOpenCodeConfig(repoDir)
   const model = resolveOpenCodeModel(quality, vendor)
   const effort = opencodeEffort(vendor.effort)
   const tierTimeout = tierTimeoutMs(quality.tier)
@@ -173,10 +191,11 @@ export async function runOpenCodeReview(
           // extendEnv: false or execa merges process.env back in and the
           // allowlist means nothing.
           extendEnv: false,
-          env: buildOpenCodeEnv({
-            // Make local dev tools findable if node_modules exists.
-            PATH: `${repoDir}/node_modules/.bin:${process.env.PATH ?? ''}`,
-          }),
+          // No `${repoDir}/node_modules/.bin` on PATH: the checkout is untrusted
+          // and a committed `node_modules/.bin/opencode` would shadow the real
+          // executable. A review only reads the diff, so repo-local tools are
+          // not needed the way codex.ts assumed they were.
+          env: buildOpenCodeEnv(),
         }),
         {
           onRetry: (effectiveMs, delayMs) =>
@@ -186,9 +205,7 @@ export async function runOpenCodeReview(
 
       const { review: parsedReview, tokensUsed } = parseOpenCodeOutput(stdout ?? '')
       const rawReview = parsedReview.trim()
-      const review = rawReview.includes('VERDICT:')
-        ? rawReview
-        : `${rawReview}\n\nVERDICT: ${inferVerdictFromOpenCodeOutput(rawReview)}`
+      const review = inferVerdictFromOpenCodeOutput(rawReview)
       return { review, tokensUsed, model: model ?? 'default', effort, retried }
     } catch (err: unknown) {
       const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
@@ -225,12 +242,13 @@ export async function runOpenCodeReview(
 
 export async function checkOpenCodeAuth(): Promise<{ ok: boolean; detail: string }> {
   try {
-    // `opencode --version` only proves the CLI is installed, not that a provider
-    // is configured — a review against an unconfigured opencode fails at run
-    // time. `opencode auth list` lists stored provider credentials, so a non-empty
-    // list is the availability signal onboarding/status/init report.
-    const { stdout } = await execa('opencode', ['auth', 'list'], { timeout: 10_000 })
-    const providers = stdout.trim().split('\n').map(l => l.trim()).filter(Boolean)
+    // `--format json` returns one record per provider, so human-readable headers
+    // and summaries can never be miscounted as authenticated providers the way
+    // the text form's line count could.
+    const { stdout } = await execa('opencode', ['auth', 'list', '--format', 'json'], { timeout: 10_000 })
+    let parsed: unknown
+    try { parsed = JSON.parse(stdout) } catch { parsed = null }
+    const providers = Array.isArray(parsed) ? parsed : []
     if (providers.length === 0) {
       return { ok: false, detail: 'no providers configured — run: opencode auth login' }
     }

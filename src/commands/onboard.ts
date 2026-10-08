@@ -238,11 +238,12 @@ async function promptVendorMode(
 
   // OpenCode is opt-in (vendors.opencode.enabled defaults to false): it is asked
   // only when the CLI is authenticated, and never silently flipped on for an
-  // existing install. It reviews as an additional vendor (explicit --reviewer
-  // opencode or a fallback), not as the single-vendor primary — that stays
-  // claude/codex so the cross-vendor independence property is preserved.
-  let opencodeEnabled = existingOpenCodeEnabled
-  if (opencodeOk && !opts.yes) {
+  // existing install. The exception is an OpenCode-only install (no claude/codex
+  // available) — there it is the only vendor that can run, so it is enabled
+  // without asking (including under --yes) rather than leaving every vendor off.
+  const opencodeIsOnlyVendor = opencodeOk && !claudeOk && !codexOk
+  let opencodeEnabled = opencodeIsOnlyVendor || existingOpenCodeEnabled
+  if (opencodeOk && !opts.yes && !opencodeIsOnlyVendor) {
     const items: PickerItem[] = [
       { label: 'no', description: 'leave OpenCode disabled (default)' },
       { label: 'yes', description: 'enable OpenCode as an additional reviewer' },

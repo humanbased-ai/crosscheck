@@ -737,7 +737,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
           onVendorLimit: (failedVendor, fallbackVendor, reason) => {
             if (config.mode === 'cross-vendor' && fallbackVendor !== null && !getSmartSwitch().active) {
-              triggerSwitch(failedVendor, reason, bLog)
+              triggerSwitch(failedVendor, reason, bLog, fallbackVendor)
             }
           },
           ...(workflowStepsForRun !== undefined && { steps: workflowStepsForRun }),
@@ -876,7 +876,10 @@ export async function runWatch(opts: WatchOpts = {}) {
         // degrade to single-vendor with the healthy vendor for the next 30 minutes.
         if (config.mode === 'cross-vendor' && !getSmartSwitch().active && isSubscriptionLimitError(err)) {
           const failedVendor = detectFailedVendor(err)
-          if (failedVendor) triggerSwitch(failedVendor, message, bLog)
+          if (failedVendor) {
+            const fallback = (['claude', 'codex', 'opencode'] as const).find(v => v !== failedVendor && config.vendors[v].enabled) ?? null
+            triggerSwitch(failedVendor, message, bLog, fallback)
+          }
         }
       } finally {
         releasePRLock(owner, repoName, prNumber, params.headSha)

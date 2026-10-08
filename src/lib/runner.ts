@@ -1827,7 +1827,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const fixAttributionFooter = (): string => buildAttributionFooter({
         action: 'Fixed',
         vendor: activeVendor,
-        model: activeVendor === 'codex' ? codexFixModel : claudeFixModel,
+        model: activeVendor === 'codex' ? codexFixModel : activeVendor === 'opencode' ? opencodeFixModel : claudeFixModel,
         effort: fixEffort,
         skills: activatedSkills,
       })
@@ -1843,7 +1843,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
               body: buildFixFailedCommentBody({
                 prUrl: pr.html_url,
                 vendor: activeVendor,
-                model: activeVendor === 'codex' ? codexFixModel : claudeFixModel,
+                model: activeVendor === 'codex' ? codexFixModel : activeVendor === 'opencode' ? opencodeFixModel : claudeFixModel,
                 effort: fixEffort,
                 skills: activatedSkills,
               }),
@@ -1877,7 +1877,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const landing = resolveFixLanding(deliveryMode)
 
       if (landing === 'branch') {
-        const fixModel = activeVendor === 'codex' ? codexFixModel : claudeFixModel
+        const fixModel = activeVendor === 'codex' ? codexFixModel : activeVendor === 'opencode' ? (opencodeFixModel ?? 'default') : claudeFixModel
         runGitWithoutHooks(tmpDir, ['add', '-A'])
         runGitWithoutHooks(tmpDir, [
           'commit',
@@ -1929,7 +1929,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             changedFiles: fixChangedFiles,
             vendor: activeVendor,
             reviewCommentBody,
-            model: activeVendor === 'codex' ? codexFixModel : claudeFixModel,
+            model: activeVendor === 'codex' ? codexFixModel : activeVendor === 'opencode' ? opencodeFixModel : claudeFixModel,
             effort: fixEffort,
             skills: activatedSkills,
           })
@@ -1942,7 +1942,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
 
       } else if (landing === 'branch-then-separate-pr') {
-        const fixModel = activeVendor === 'codex' ? codexFixModel : claudeFixModel
+        const fixModel = activeVendor === 'codex' ? codexFixModel : activeVendor === 'opencode' ? (opencodeFixModel ?? 'default') : claudeFixModel
         // Commit the fix on the PR's own branch (already checked out in tmpDir) and
         // try to push it there, so the fix, recheck, and approval all stay on the
         // original PR. Only when that push can't land — e.g. the PR was merged and
@@ -2002,7 +2002,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
               changedFiles: fixChangedFiles,
               vendor: activeVendor,
               reviewCommentBody,
-              model: activeVendor === 'codex' ? codexFixModel : claudeFixModel,
+              model: activeVendor === 'codex' ? codexFixModel : activeVendor === 'opencode' ? opencodeFixModel : claudeFixModel,
               effort: fixEffort,
               skills: activatedSkills,
             })

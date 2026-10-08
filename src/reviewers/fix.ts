@@ -6,7 +6,7 @@ import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeEffort } from './claude.js'
 import { codexReasoningEffort } from './codex.js'
-import { opencodeEffort } from './opencode.js'
+import { opencodeEffort, stripCheckoutOpenCodeConfig } from './opencode.js'
 import { claudeSkillBrokerArgs, codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { buildCodexEnv } from './codex-env.js'
 import { buildOpenCodeEnv } from './opencode-env.js'
@@ -350,6 +350,8 @@ export async function runOpenCodeFixStep(
   humanFeedback?: string,
 ): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort: string }> {
   const effort = opencodeEffort(configuredEffort ?? 'high')
+  // Drop any OpenCode config the untrusted checkout carries before the run.
+  stripCheckoutOpenCodeConfig(tmpDir)
   let diff = ''
   try {
     diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })

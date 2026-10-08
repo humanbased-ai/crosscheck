@@ -81,6 +81,11 @@ export function triggerSwitch(
   degradedVendor: Vendor,
   reason: string,
   announce: SmartSwitchAnnounce,
+  // The fallback the runner actually selected (enabled and able to run the
+  // step). Callers with no computed fallback omit it and the historical
+  // claude<->codex default applies. Without this the switch hard-coded
+  // OpenCode -> Claude and ignored the enabled fallback the runner had chosen.
+  selectedFallback?: Vendor | null,
 ): void {
   if (_state.active && _state.degradedVendor === degradedVendor) {
     // Vendor is still down — reset the restore clock
@@ -88,11 +93,7 @@ export function triggerSwitch(
     return
   }
 
-  const fallbackVendor: Vendor = degradedVendor === 'claude'
-    ? 'codex'
-    : degradedVendor === 'codex'
-      ? 'claude'
-      : 'claude'
+  const fallbackVendor: Vendor = selectedFallback ?? (degradedVendor === 'claude' ? 'codex' : 'claude')
   // Carry over attempt count if this is a re-trigger after a failed restore attempt
   const prevAttempts =
     _state.degradedVendor === degradedVendor || _state.pendingRecoveryVendor === degradedVendor
