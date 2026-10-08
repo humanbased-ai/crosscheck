@@ -366,7 +366,10 @@ export async function runOpenCodeFixStep(
     .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', humanFeedback ?? ''].filter(Boolean).join('\n\n'))
 
   const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
-  const modelArgs = model ? ['--model', model] : []
+  // Same as the review path: OpenCode carries reasoning effort as the `#variant`
+  // suffix on `--model provider/model#variant`. Without a pinned model the
+  // variant cannot be sent, so `effort` is honoured only when `model` is set.
+  const modelArgs = model ? ['--model', `${model}#${effort}`] : []
 
   try {
     await execa(

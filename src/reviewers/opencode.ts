@@ -139,10 +139,17 @@ export async function runOpenCodeReview(
   // repository guidance from reaching the process list. `--standalone` runs a
   // private server, so a review of untrusted code never shares a session with
   // the operator's interactive work.
-  const modelArgs = model ? ['--model', model] : []
+  //
+  // OpenCode has no separate effort flag — reasoning effort is the `#variant`
+  // suffix on `--model provider/model#variant`. Without a pinned model there is
+  // nowhere to hang the suffix, so `vendors.opencode.effort` is honoured only
+  // when `vendors.opencode.model` is set; otherwise OpenCode's configured
+  // default model AND its default variant run, and `effort` is reported but
+  // not applied (it is not a claim the CLI was given).
+  const modelArgs = model ? ['--model', `${model}#${effort}`] : []
   const args = ['run', '--format', 'json', '--standalone', ...modelArgs]
 
-  onLog?.(`  running: opencode run --format json --standalone${model ? ` --model ${model}` : ''}`)
+  onLog?.(`  running: opencode run --format json --standalone${model ? ` --model ${model}#${effort}` : ''}`)
 
   let lastErr: unknown = undefined
   for (let attempt = 1; attempt <= MAX_OPENCODE_RETRIES; attempt++) {
