@@ -11,7 +11,7 @@ import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getLinearCredentials } from '../config/loader.js'
 import { resolveLinearAuth, withWorker, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
-import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
+import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, DOC_ONLY_GATE_NOTE, detectInconclusiveReview } from '../lib/verdict.js'
 import { clonePRForReview, BaseRefUnavailableError, changedFilesVsBase } from '../lib/clone.js'
@@ -99,7 +99,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
   }
 
-  let reviewer: 'claude' | 'codex' | null
+  let reviewer: Vendor | null
   let origin: PROrigin = 'human'
 
   const normalizedReviewer = normalizeVendor(forceReviewer)

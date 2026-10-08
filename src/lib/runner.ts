@@ -10,7 +10,8 @@ import type { PROrigin } from '../github/detector.js'
 import { vendorDisplayName, type Vendor } from '../lib/vendor.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
-import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
+import { runOpenCodeReview } from '../reviewers/opencode.js'
+import { runFixStep, runCodexFixStep, runOpenCodeFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, DOC_ONLY_GATE_NOTE, detectInconclusiveReview, reviewHasNoFindings } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
@@ -25,9 +26,9 @@ import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js
 import { log as fileLog, logError, classifyError, type LogEntry } from '../lib/logger.js'
 import { buildCommitTrailers, parseAnnotation } from '../lib/annotation.js'
 import { shaCovers } from '../lib/pr-workflow-state.js'
-import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
+import { resolveClaudeModel, resolveCodexModel, resolveOpenCodeModel } from '../lib/review-models.js'
 import { resolveReviewStrategy, escalate, clampToLevels, isDocOnlyChange, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
-import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
+import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS, OPENCODE_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { planAutoFixDelivery, forceWithLeaseArgs, parseLsRemoteOid, isLeaseRejection, assessFixBranchOwnership, isInvalidBaseError } from '../lib/auto-fix-branch.js'
 import type { FixBranchPR } from '../lib/auto-fix-branch.js'
@@ -304,7 +305,7 @@ export interface WorkflowContext {
   stepsExplicitlyScoped?: boolean
   // When smart-switch is active, route to this vendor if the step's configured
   // reviewer resolves to a disabled vendor rather than skipping the step.
-  smartSwitchFallback?: 'claude' | 'codex'
+  smartSwitchFallback?: Vendor
   // Caller-supplied array the runner appends to whenever it sets a remote
   // pending status on a newly pushed sha (currently only from conflict-resolve).
   // Lets the command-layer signal handler release those shas if SIGINT/SIGTERM
@@ -529,29 +530,41 @@ function resolveReviewer(
   if (reviewer === 'origin') {
     if (origin === 'claude' && config.vendors.claude.enabled) return 'claude'
     if (origin === 'codex' && config.vendors.codex.enabled) return 'codex'
+    if (origin === 'opencode' && config.vendors.opencode.enabled) return 'opencode'
     return fallback && config.vendors[fallback].enabled ? fallback : null
   }
   if (reviewer === 'auto') {
     if (origin === 'claude' && config.vendors.codex.enabled) return 'codex'
     if (origin === 'codex' && config.vendors.claude.enabled) return 'claude'
+    if (origin === 'opencode' && config.vendors.claude.enabled) return 'claude'
+    if (origin === 'opencode' && config.vendors.codex.enabled) return 'codex'
     if (config.vendors.codex.enabled) return 'codex'
     if (config.vendors.claude.enabled) return 'claude'
+    if (config.vendors.opencode.enabled) return 'opencode'
     return null
   }
   if (reviewer === 'claude') return config.vendors.claude.enabled ? 'claude' : (fallback && config.vendors[fallback].enabled ? fallback : null)
   if (reviewer === 'codex') return config.vendors.codex.enabled ? 'codex' : (fallback && config.vendors[fallback].enabled ? fallback : null)
+  if (reviewer === 'opencode') return config.vendors.opencode.enabled ? 'opencode' : (fallback && config.vendors[fallback].enabled ? fallback : null)
   return null
 }
 
 function supportsStep(vendor: Vendor, stepType: string): boolean {
   if (stepType === 'review' || stepType === 'recheck' || stepType === 'fix') return true
-  // Conflict resolution is Claude-only until Codex conflict resolution exists.
+  // Conflict resolution is Claude-only until Codex/OpenCode conflict resolution exists.
   return vendor === 'claude'
 }
 
 function resolveLimitFallbackVendor(failedVendor: Vendor, stepType: string, config: Config): Vendor | null {
-  const fallback: Vendor = failedVendor === 'claude' ? 'codex' : 'claude'
-  return config.vendors[fallback].enabled && supportsStep(fallback, stepType) ? fallback : null
+  const candidates: Vendor[] = failedVendor === 'claude'
+    ? ['codex', 'opencode']
+    : failedVendor === 'codex'
+      ? ['claude', 'opencode']
+      : ['claude', 'codex']
+  for (const candidate of candidates) {
+    if (config.vendors[candidate].enabled && supportsStep(candidate, stepType)) return candidate
+  }
+  return null
 }
 
 // ─── commit subjects ──────────────────────────────────────────────────────────
@@ -591,8 +604,8 @@ function resolveStepVendor(
   stepReviewer: string,
   origin: PROrigin,
   config: Config,
-  fallback?: 'claude' | 'codex',
-): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
+  fallback?: Vendor,
+): { vendor: Vendor | null; usedHumanFallback: boolean; substitutedOriginVendor?: Vendor } {
   const vendor = resolveReviewer(stepReviewer, origin, config, fallback)
 
   // Origin detection can assign a vendor that cannot run the step: conflict
@@ -606,7 +619,7 @@ function resolveStepVendor(
   // written so the caller can report the precise unsupported-step skip.
   if (
     stepReviewer === 'origin' &&
-    (origin === 'claude' || origin === 'codex') &&
+    (origin === 'claude' || origin === 'codex' || origin === 'opencode') &&
     vendor !== null &&
     !supportsStep(vendor, stepType)
   ) {
@@ -620,14 +633,15 @@ function resolveStepVendor(
     return { vendor, usedHumanFallback: false }
   }
   const fb = config.routing.fallback_reviewer
-  let humanFallback: 'claude' | 'codex' | null = null
+  let humanFallback: Vendor | null = null
   if (fb === 'claude') humanFallback = config.vendors.claude.enabled ? 'claude' : null
   else if (fb === 'codex') humanFallback = config.vendors.codex.enabled ? 'codex' : null
+  else if (fb === 'opencode') humanFallback = config.vendors.opencode.enabled ? 'opencode' : null
   else if (fb !== null) {
-    // 'auto': prefer codex then claude, same as resolveReviewer's auto path,
-    // narrowed to vendors that support this step type.
+    // 'auto': prefer codex then claude then opencode, same as resolveReviewer's
+    // auto path, narrowed to vendors that support this step type.
     const usable = (v: Vendor): boolean => config.vendors[v].enabled && supportsStep(v, stepType)
-    humanFallback = usable('codex') ? 'codex' : usable('claude') ? 'claude' : null
+    humanFallback = usable('codex') ? 'codex' : usable('claude') ? 'claude' : usable('opencode') ? 'opencode' : null
   }
   if (!humanFallback) return { vendor: null, usedHumanFallback: false }
   return { vendor: humanFallback, usedHumanFallback: true }
@@ -638,8 +652,8 @@ export function resolveFixVendor(
   stepReviewer: string,
   origin: PROrigin,
   config: Config,
-  fallback?: 'claude' | 'codex',
-): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
+  fallback?: Vendor,
+): { vendor: Vendor | null; usedHumanFallback: boolean; substitutedOriginVendor?: Vendor } {
   return resolveStepVendor('fix', stepReviewer, origin, config, fallback)
 }
 
@@ -650,8 +664,8 @@ export function resolveConflictResolveVendor(
   stepReviewer: string,
   origin: PROrigin,
   config: Config,
-  fallback?: 'claude' | 'codex',
-): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean; substitutedOriginVendor?: 'claude' | 'codex' } {
+  fallback?: Vendor,
+): { vendor: Vendor | null; usedHumanFallback: boolean; substitutedOriginVendor?: Vendor } {
   return resolveStepVendor('conflict-resolve', stepReviewer, origin, config, fallback)
 }
 
@@ -858,6 +872,7 @@ export interface RoundExecution {
   quality: Config['quality']
   claudeVendor: Config['vendors']['claude']
   codexVendor: Config['vendors']['codex']
+  opencodeVendor: Config['vendors']['opencode']
   /** `config` with the above folded in, for callees that take the whole config. */
   roundConfig: Config
   escalated: boolean
@@ -887,6 +902,7 @@ export function resolveRoundExecution(
       quality: config.quality,
       claudeVendor: config.vendors.claude,
       codexVendor: config.vendors.codex,
+      opencodeVendor: config.vendors.opencode,
       roundConfig: config,
       escalated: false,
     }
@@ -905,6 +921,9 @@ export function resolveRoundExecution(
   if (config.vendors.codex.enabled) {
     lanes.push({ model: resolveCodexModel(baseQuality, config.vendors.codex), accepted: CODEX_EFFORT_LEVELS })
   }
+  if (config.vendors.opencode.enabled) {
+    lanes.push({ model: resolveOpenCodeModel(baseQuality, config.vendors.opencode) ?? 'default', accepted: OPENCODE_EFFORT_LEVELS })
+  }
 
   const escalated = escalate(
     { tier: strategy.tier ?? config.quality.tier, effort: strategy.effort },
@@ -915,13 +934,15 @@ export function resolveRoundExecution(
   const quality = strategyQuality(config.quality, roundStrategy)
   const claudeVendor = strategyVendor(config.vendors.claude, roundStrategy, CLAUDE_EFFORT_LEVELS)
   const codexVendor = strategyVendor(config.vendors.codex, roundStrategy, CODEX_EFFORT_LEVELS)
+  const opencodeVendor = strategyVendor(config.vendors.opencode, roundStrategy, OPENCODE_EFFORT_LEVELS)
 
   return {
     strategy: roundStrategy,
     quality,
     claudeVendor,
     codexVendor,
-    roundConfig: { ...config, quality, vendors: { ...config.vendors, claude: claudeVendor, codex: codexVendor } },
+    opencodeVendor,
+    roundConfig: { ...config, quality, vendors: { ...config.vendors, claude: claudeVendor, codex: codexVendor, opencode: opencodeVendor } },
     escalated: escalated.tier !== strategy.tier || escalated.effort !== strategy.effort,
   }
 }
@@ -1214,7 +1235,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // Above the try, and above emitPRComplexity, because both the complexity event
   // and workflow_complete report the tier that ran: an escalated round reporting
   // the base class tier is the same defect as a comment citing one.
-  const { strategy: roundStrategy, quality, claudeVendor, codexVendor, roundConfig, escalated } =
+  const { strategy: roundStrategy, quality, claudeVendor, codexVendor, opencodeVendor, roundConfig, escalated } =
     resolveRoundExecution(config, strategy, ctx.round ?? 1)
 
   emitPRComplexity(ctx, triggerField, quality.tier)
@@ -1240,11 +1261,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     const appliedEffort = [...new Set([
       ...(config.vendors.claude.enabled ? [claudeVendor.effort] : []),
       ...(config.vendors.codex.enabled ? [codexVendor.effort] : []),
+      ...(config.vendors.opencode.enabled ? [opencodeVendor.effort] : []),
     ])].join('/')
     const escalatedNote = escalated ? ` · round ${ctx.round} escalated` : ''
     log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${roundStrategy.tier ?? 'skip'} tier${appliedEffort ? ` (${appliedEffort})` : ''}${escalatedNote}`))
     if (escalatedNote) {
-      fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, applied_effort_claude: config.vendors.claude.enabled ? claudeVendor.effort : null, applied_effort_codex: config.vendors.codex.enabled ? codexVendor.effort : null, strategy_version: strategy.version })
+      fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, applied_effort_claude: config.vendors.claude.enabled ? claudeVendor.effort : null, applied_effort_codex: config.vendors.codex.enabled ? codexVendor.effort : null, applied_effort_opencode: config.vendors.opencode.enabled ? opencodeVendor.effort : null, strategy_version: strategy.version })
     }
   }
 
@@ -1346,6 +1368,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
           ;({ review: rawReview, tokensUsed, model, effort, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, quality, codexVendor, memoryPlan?.instructions ?? step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log, reviewContext, skillSession, config.skills.codex_full_access))
+          inputTokens = undefined
+          outputTokens = undefined
+        } else if (candidate === 'opencode') {
+          ;({ review: rawReview, tokensUsed, model, effort, retried } = await runOpenCodeReview(tmpDir, pr.base.ref, pr.title, quality, opencodeVendor, memoryPlan?.instructions ?? step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.opencode.timeout_sec), log, reviewContext, skillSession))
           inputTokens = undefined
           outputTokens = undefined
         } else {
@@ -1691,6 +1717,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // away.
       const claudeFixModel = resolveClaudeModel(quality, claudeVendor)
       const codexFixModel = resolveCodexModel(quality, codexVendor)
+      const opencodeFixModel = resolveOpenCodeModel(quality, opencodeVendor)
 
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
       // Scope to commits ahead of base so long-lived branches (e.g. staging)
@@ -1723,12 +1750,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // model here, and the balanced 600s budget would cut it off.
       const tierMs = tierTimeoutMs(quality.tier)
       const skillSession = skillSessionFor(step.name, effectiveType)
-      const runFix = async (v: 'claude' | 'codex') => {
+      const runFix = async (v: Vendor) => {
         if (v === 'codex') {
           return runCodexFixStep(
             tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
             codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs, skillSession,
             codexVendor.effort, config.skills.codex_full_access, fixHumanFeedback,
+          )
+        }
+        if (v === 'opencode') {
+          return runOpenCodeFixStep(
+            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
+            opencodeFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.opencode.timeout_sec) ?? tierMs, skillSession,
+            opencodeVendor.effort, fixHumanFeedback,
           )
         }
         // roundConfig, not config: runFixStep reads vendors.claude.effort and
@@ -2273,6 +2307,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
       if (!vendor) { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
       if (vendor === 'codex') { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
+      if (vendor === 'opencode') { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('opencode_conflict_resolve_unsupported'); continue }
       // Conflict-resolve is mechanical text surgery bounded by the markers —
       // measured at 37s against ~643s for a review — so it always runs fast.
       const conflictResolveModel = resolveClaudeModel(

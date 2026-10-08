@@ -413,6 +413,7 @@ describe('resolveFixVendor', () => {
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
+      opencode: { enabled: false },
     },
     routing: { fallback_reviewer: fallbackReviewer },
     // Partial fixture: these resolvers read only vendors.* and routing.*, and
@@ -486,6 +487,7 @@ describe('resolveConflictResolveVendor', () => {
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
+      opencode: { enabled: false },
     },
     routing: { fallback_reviewer: fallbackReviewer },
     // Partial fixture: these resolvers read only vendors.* and routing.*, and

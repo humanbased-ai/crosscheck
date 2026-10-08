@@ -34,6 +34,7 @@ import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
+import type { Vendor } from '../lib/vendor.js'
 import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
 import { fetchStepHistoryWithRetry, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
@@ -116,13 +117,14 @@ export async function runWithConcurrency(
   await Promise.all(workers)
 }
 
-function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
+function buildFallbackConfig(config: Config, fallbackVendor: Vendor): Config {
   return {
     ...config,
     mode: 'single-vendor',
     vendors: {
       codex: { ...config.vendors.codex, enabled: fallbackVendor === 'codex' },
       claude: { ...config.vendors.claude, enabled: fallbackVendor === 'claude' },
+      opencode: { ...config.vendors.opencode, enabled: fallbackVendor === 'opencode' },
     },
   }
 }

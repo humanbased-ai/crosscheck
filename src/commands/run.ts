@@ -89,7 +89,7 @@ function applyStepVendorOverrides(
   })
 }
 
-function synthesizeRecheckStep(allSteps: WorkflowStep[], assignedReviewer: 'claude' | 'codex'): WorkflowStep | null {
+function synthesizeRecheckStep(allSteps: WorkflowStep[], assignedReviewer: Vendor): WorkflowStep | null {
   const reviewStep = allSteps.find(s => s.type === 'review')
   if (!reviewStep) return null
   return {
@@ -106,7 +106,7 @@ function synthesizeRecheckStep(allSteps: WorkflowStep[], assignedReviewer: 'clau
 // conflict-resolve only resolves git conflict markers — it needs no prior review
 // step, so (unlike recheck) it can be synthesized from scratch when the workflow
 // has no conflict-resolve step but `ck resolve` / `--steps conflict-resolve` asks for one.
-function synthesizeConflictResolveStep(assignedReviewer: 'claude' | 'codex', vendorOverride?: Vendor): WorkflowStep {
+function synthesizeConflictResolveStep(assignedReviewer: Vendor, vendorOverride?: Vendor): WorkflowStep {
   return {
     name: 'conflict-resolve',
     type: 'conflict-resolve',
@@ -125,7 +125,7 @@ function appendAfterLastFix(steps: WorkflowStep[], step: WorkflowStep): Workflow
 export function resolveWorkflowSteps(
   allSteps: WorkflowStep[],
   stepFilter: string[] | undefined,
-  assignedReviewer: 'claude' | 'codex',
+  assignedReviewer: Vendor,
   overrides: StepVendorOverrides = {},
 ): WorkflowStep[] {
   const selected = stepFilter
@@ -148,7 +148,7 @@ export function resolveWorkflowSteps(
 export function buildFixRecheckSteps(
   steps: WorkflowStep[],
   allSteps: WorkflowStep[],
-  assignedReviewer: 'claude' | 'codex',
+  assignedReviewer: Vendor,
   overrides: StepVendorOverrides = {},
 ): WorkflowStep[] {
   const selectedFixRecheckSteps = steps.filter(s => s.type === 'fix' || s.type === 'recheck')
@@ -340,7 +340,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   let origin: import('../github/detector.js').PROrigin
   if (normalizedReviewer !== null) {
     // --reviewer forces the origin to the opposite vendor (cross-vendor semantics)
-    origin = normalizedReviewer === 'codex' ? 'claude' : 'codex'
+    origin = normalizedReviewer === 'codex' ? 'claude' : normalizedReviewer === 'opencode' ? 'claude' : 'codex'
     console.log(chalk.dim(`  reviewer: ${normalizedReviewer} (forced)`))
   } else {
     const { origin: detectedOrigin, method } = await detectOriginFull(

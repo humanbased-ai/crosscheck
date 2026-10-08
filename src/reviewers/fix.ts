@@ -6,8 +6,10 @@ import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeEffort } from './claude.js'
 import { codexReasoningEffort } from './codex.js'
+import { opencodeEffort } from './opencode.js'
 import { claudeSkillBrokerArgs, codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { buildCodexEnv } from './codex-env.js'
+import { buildOpenCodeEnv } from './opencode-env.js'
 import { withCredentialFreeOrigin } from '../lib/clone.js'
 
 interface ClaudeJsonOutput {
@@ -322,6 +324,71 @@ export async function runCodexFixStep(
   }
 
   // Count all files codex touched: modified/deleted (git diff) + newly created (git ls-files --others)
+  const changedOutput = execSync('git diff --name-only', { cwd: tmpDir, encoding: 'utf8' }).trim()
+  const untrackedOutput = execSync('git ls-files --others --exclude-standard', { cwd: tmpDir, encoding: 'utf8' }).trim()
+  const changedFiles = [
+    ...(changedOutput ? changedOutput.split('\n').filter(Boolean) : []),
+    ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
+  ]
+  return { appliedCount: changedFiles.length, changedFiles, effort }
+}
+
+// OpenCode fix: like codex, opencode is an agentic tool that edits files
+// directly on disk. Same prompt, `--auto` to approve file edits without an
+// interactive approval loop, and git diff to count what changed rather than
+// parsing edit blocks. No skill broker yet — skills integration is a follow-up.
+export async function runOpenCodeFixStep(
+  tmpDir: string,
+  baseRef: string,
+  prTitle: string,
+  reviewComment: string,
+  instructions: string,
+  model: string | undefined = undefined,
+  timeoutMs?: number,
+  _skillSession?: SkillActivationSession,
+  configuredEffort?: string,
+  humanFeedback?: string,
+): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort: string }> {
+  const effort = opencodeEffort(configuredEffort ?? 'high')
+  let diff = ''
+  try {
+    diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
+  } catch {
+    try {
+      diff = execSync('git diff HEAD~1', { cwd: tmpDir, encoding: 'utf8' })
+    } catch { /* proceed with empty diff */ }
+  }
+
+  const prompt = CODEX_FIX_PROMPT
+    .replace('{PR_TITLE}', prTitle)
+    .replace('{REVIEW_COMMENT}', reviewComment.slice(0, 8000))
+    .replace('{DIFF}', diff.slice(0, 16000))
+    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', humanFeedback ?? ''].filter(Boolean).join('\n\n'))
+
+  const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
+  const modelArgs = model ? ['--model', model] : []
+
+  try {
+    await execa(
+      'opencode',
+      ['run', '--auto', '--standalone', ...modelArgs],
+      {
+        cwd: tmpDir,
+        timeout: resolvedTimeout,
+        input: prompt,
+        extendEnv: false,
+        env: buildOpenCodeEnv({}),
+      },
+    )
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/not logged in|auth|credential/i.test(msg)) {
+      throw new Error('opencode auth failure during fix step — run: opencode auth login')
+    }
+    throw err
+  }
+
+  // Count all files opencode touched: modified/deleted + newly created.
   const changedOutput = execSync('git diff --name-only', { cwd: tmpDir, encoding: 'utf8' }).trim()
   const untrackedOutput = execSync('git ls-files --others --exclude-standard', { cwd: tmpDir, encoding: 'utf8' }).trim()
   const changedFiles = [

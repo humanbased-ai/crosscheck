@@ -16,7 +16,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     orgs: [],
     users: [],
     repos: [],
-    routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], allowed_authors: [], author_routes: {}, fallback_reviewer: 'auto' },
+    routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], opencode_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], opencode_branch_prefixes: [], allowed_authors: [], author_routes: {}, fallback_reviewer: 'auto' },
     server: { port: 7892, webhook_path: '/webhook' },
     quality: { tier: 'balanced', mode: 'fixed', review_memory: true, focus: [], custom_prompt: undefined },
     skills: { enabled: [], codex_full_access: false },
@@ -24,6 +24,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     vendors: {
       claude: { enabled: claudeEnabled, model: null, auth: 'subscription', effort: 'medium', timeout_sec: null },
       codex: { enabled: codexEnabled, model: null, auth: 'subscription', effort: 'medium', quality: 'medium', timeout_sec: null },
+      opencode: { enabled: false, model: null, auth: 'subscription', effort: 'high', timeout_sec: null },
     },
     logs: { enabled: false, retention_days: 7, extended: { enabled: false } },
     tunnel: { backend: 'localhost.run', smee_channel: '' },
