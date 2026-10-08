@@ -8,6 +8,7 @@ import { createGithubClient, postReviewComment } from '../github/client.js'
 import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
+import { runOpenCodeReview } from '../reviewers/opencode.js'
 import { loadConfig, getGithubToken, getLinearCredentials } from '../config/loader.js'
 import { resolveLinearAuth, withWorker, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
@@ -233,10 +234,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       fileLog({ level: 'info', event: 'strategy_class_skip_bypassed', repo: `${owner}/${repo}`, pr: number, pr_class: strategy.classId, strategy_version: strategy.version })
     }
     // Round 1: this command has no fix loop, so nothing escalates.
-    const { strategy: appliedStrategy, quality, claudeVendor, codexVendor } = resolveRoundExecution(config, strategy, 1)
+    const { strategy: appliedStrategy, quality, claudeVendor, codexVendor, opencodeVendor } = resolveRoundExecution(config, strategy, 1)
     if (strategy && appliedStrategy) {
       // Only the routed reviewer runs, so name the effort it was given.
-      const appliedEffort = reviewer === 'codex' ? codexVendor.effort : claudeVendor.effort
+      const appliedEffort = reviewer === 'codex' ? codexVendor.effort : reviewer === 'opencode' ? opencodeVendor.effort : claudeVendor.effort
       console.log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${appliedStrategy.tier ?? 'skip'} tier (${appliedEffort})`))
     }
 
@@ -258,6 +259,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     // Honor a per-vendor configured timeout; unset (null) → reviewer's built-in default.
     const codexTimeoutMs = config.vendors.codex.timeout_sec == null ? undefined : config.vendors.codex.timeout_sec * 1000
     const claudeTimeoutMs = config.vendors.claude.timeout_sec == null ? undefined : config.vendors.claude.timeout_sec * 1000
+    const opencodeTimeoutMs = config.vendors.opencode.timeout_sec == null ? undefined : config.vendors.opencode.timeout_sec * 1000
 
     try {
       if (reviewer === 'codex') {
@@ -274,6 +276,20 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           undefined,
           skillSession,
           config.skills.codex_full_access,
+        ))
+      } else if (reviewer === 'opencode') {
+        ;({ review: reviewText, tokensUsed, model, effort } = await runOpenCodeReview(
+          tmpDir,
+          pr.base.ref,
+          pr.title,
+          quality,
+          opencodeVendor,
+          memoryPlan?.instructions,
+          msg => { reviewSpinner!.text = msg },
+          opencodeTimeoutMs,
+          undefined,
+          undefined,
+          skillSession,
         ))
       } else {
         ;({ review: reviewText, tokensUsed, model, effort } = await runClaudeReview(
@@ -345,7 +361,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
     await postReviewComment(
       octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort,
-      strategyCitation(reviewer === 'codex' ? config.vendors.codex : config.vendors.claude, strategy, appliedStrategy, model),
+      strategyCitation(reviewer === 'codex' ? config.vendors.codex : reviewer === 'opencode' ? config.vendors.opencode : config.vendors.claude, strategy, appliedStrategy, model),
     )
     if (memoryPlan && structured?.snapshot) {
       // The review is already posted; a memory write failure only costs the next review its delta.

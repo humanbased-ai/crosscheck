@@ -8,10 +8,12 @@ import { z } from 'zod'
 // silently degrades to the `medium` fallback in claudeEffort/codexReasoningEffort.
 export const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'max'] as const
 export const CODEX_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
-// OpenCode's reasoning-effort ladder is its `--model provider/model#variant`
-// suffix: none (no reasoning) / low / high / max. There is no `medium` — a
-// crosscheck effort of `medium` is clamped down to `low` in opencodeEffort.
-export const OPENCODE_EFFORT_LEVELS = ['none', 'low', 'high', 'max'] as const
+// OpenCode's reasoning-effort ladder is the `#variant` suffix on
+// `--model provider/model#variant`. Variants are provider-defined, not one
+// global ladder like claude/codex: the opencode models crosscheck ships policy
+// for (deepseek-v4-*) expose none / high / max — there is no `low` or `medium`.
+// A crosscheck effort of low/medium clamps down to `none` via clampToLevels.
+export const OPENCODE_EFFORT_LEVELS = ['none', 'high', 'max'] as const
 
 export const VendorConfigSchema = z.object({
   enabled: z.boolean().default(true),

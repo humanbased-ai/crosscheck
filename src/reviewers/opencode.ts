@@ -10,13 +10,14 @@ import { buildOpenCodeEnv } from './opencode-env.js'
 import type { SkillActivationSession } from '../skills/broker.js'
 import { loadRepositoryReviewGuidance } from '../lib/repository-guidance.js'
 
-// OpenCode's reasoning-effort ladder is its `--model provider/model#variant`
-// suffix: none / low / high / max. Whitelist rather than translation — anything
-// outside the schema vocabulary falls back to `high` (OpenCode's default)
-// instead of reaching the CLI as an arbitrary variant.
+// OpenCode's reasoning-effort ladder is the `#variant` suffix on
+// `--model provider/model#variant`. Variants are provider-defined, not one
+// global ladder like claude/codex: deepseek-v4-* (the opencode models
+// crosscheck ships policy for) expose none / high / max, with no low/medium.
+// Whitelist rather than translation — anything outside this vocabulary falls
+// back to `high` instead of reaching the CLI as an unsupported variant.
 const OPENCODE_EFFORT_MAP: Record<string, string> = {
   none: 'none',
-  low: 'low',
   high: 'high',
   max: 'max',
 }
@@ -28,12 +29,16 @@ export function opencodeEffort(effort?: string): string {
 // OpenCode emits a JSONL stream under `--format json`. Each line is one event:
 // `step_start` / `text` / `step_finish` (plus tool/step events). The review
 // text lives in `part.text` on `text` lines, and token telemetry lives in the
-// `tokens` object on the final `step_finish` line. There is no single JSON
-// envelope like claude's `--output-format json` — parse line-by-line.
+// `part.tokens` object on the final `step_finish` line (nested under `part`,
+// not a top-level field). There is no single JSON envelope like claude's
+// `--output-format json` — parse line-by-line.
 interface OpenCodeEvent {
   type?: string
-  part?: { type?: string; text?: string }
-  tokens?: { input?: number; output?: number; reasoning?: number }
+  part?: {
+    type?: string
+    text?: string
+    tokens?: { input?: number; output?: number; reasoning?: number }
+  }
 }
 
 export function parseOpenCodeOutput(raw: string): { review: string; tokensUsed?: number } {
@@ -50,9 +55,9 @@ export function parseOpenCodeOutput(raw: string): { review: string; tokensUsed?:
       continue
     }
     if (event.type === 'text' && event.part?.text) review += event.part.text
-    if (event.type === 'step_finish' && event.tokens) {
-      inputTokens = event.tokens.input
-      outputTokens = event.tokens.output
+    if (event.type === 'step_finish' && event.part?.tokens) {
+      inputTokens = event.part.tokens.input
+      outputTokens = event.part.tokens.output
     }
   }
   const tokensUsed =
@@ -138,7 +143,11 @@ export async function runOpenCodeReview(
   // no message argument reads stdin, and keeping the prompt out of argv stops
   // repository guidance from reaching the process list. `--standalone` runs a
   // private server, so a review of untrusted code never shares a session with
-  // the operator's interactive work.
+  // the operator's interactive work. `--auto` is required even for a read-only
+  // review: a headless run auto-rejects permission requests otherwise, and
+  // reviewing a diff can trip `external_directory` (the clone lives outside the
+  // agent's workspace root) which is fatal without it. The env allowlist and
+  // the throwaway clone bound the blast radius of the widened permissions.
   //
   // OpenCode has no separate effort flag — reasoning effort is the `#variant`
   // suffix on `--model provider/model#variant`. Without a pinned model there is
@@ -147,9 +156,9 @@ export async function runOpenCodeReview(
   // default model AND its default variant run, and `effort` is reported but
   // not applied (it is not a claim the CLI was given).
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
-  const args = ['run', '--format', 'json', '--standalone', ...modelArgs]
+  const args = ['run', '--format', 'json', '--auto', '--standalone', ...modelArgs]
 
-  onLog?.(`  running: opencode run --format json --standalone${model ? ` --model ${model}#${effort}` : ''}`)
+  onLog?.(`  running: opencode run --format json --auto --standalone${model ? ` --model ${model}#${effort}` : ''}`)
 
   let lastErr: unknown = undefined
   for (let attempt = 1; attempt <= MAX_OPENCODE_RETRIES; attempt++) {
