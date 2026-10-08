@@ -158,17 +158,24 @@ jobs:
           fi
 
           if [ -n "$RELEASE_SHA" ]; then
-            PARENTS=$(git show -s --format=%P "$RELEASE_SHA")
-            FIRST_PARENT=${PARENTS%% *}
-            if [ "$FIRST_PARENT" != "$SOURCE_SHA" ]; then
-              echo "::error::The merged version bump PR was based on $FIRST_PARENT, not the release source $SOURCE_SHA; refusing to publish a mixed-source release."
-              exit 1
-            fi
-            CHANGED_FILES=$(git diff --name-only "$SOURCE_SHA" "$RELEASE_SHA" | sort)
-            EXPECTED_FILES=$'package-lock.json\npackage.json'
-            if [ "$CHANGED_FILES" != "$EXPECTED_FILES" ]; then
-              echo "::error::The version bump merge changed files outside package.json and package-lock.json; refusing to publish an unreviewed release tree."
-              exit 1
+            if [ "$RELEASE_SHA" = "$SOURCE_SHA" ]; then
+              # A manual exact-version dispatch may intentionally start from
+              # the already-merged bump commit after a later publish step
+              # failed. It is already the validated release tree.
+              echo "Resuming from the already-merged release commit $RELEASE_SHA."
+            else
+              PARENTS=$(git show -s --format=%P "$RELEASE_SHA")
+              FIRST_PARENT=${PARENTS%% *}
+              if [ "$FIRST_PARENT" != "$SOURCE_SHA" ]; then
+                echo "::error::The merged version bump PR was based on $FIRST_PARENT, not the release source $SOURCE_SHA; refusing to publish a mixed-source release."
+                exit 1
+              fi
+              CHANGED_FILES=$(git diff --name-only "$SOURCE_SHA" "$RELEASE_SHA" | sort)
+              EXPECTED_FILES=$'package-lock.json\npackage.json'
+              if [ "$CHANGED_FILES" != "$EXPECTED_FILES" ]; then
+                echo "::error::The version bump merge changed files outside package.json and package-lock.json; refusing to publish an unreviewed release tree."
+                exit 1
+              fi
             fi
           else
             CURRENT_MAIN_SHA=$(git rev-parse origin/main)
