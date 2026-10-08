@@ -1,5 +1,6 @@
 import { execa } from 'execa'
-import { execFileSync } from 'node:child_process'
+import { accessSync, constants as fsConstants } from 'node:fs'
+import { delimiter, join } from 'node:path'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { primaryModelFromUsage, resolveClaudeModel } from '../lib/review-models.js'
@@ -31,12 +32,14 @@ function isRetryableClaudeError(message: string): boolean {
 
 function isClaudeExecutableMissing(code: string | undefined): boolean {
   if (code !== 'ENOENT') return false
-  try {
-    execFileSync(process.platform === 'win32' ? 'where' : 'which', ['claude'], { stdio: 'ignore' })
-    return false
-  } catch {
-    return true
-  }
+  const pathEnv = process.env.PATH
+  if (!pathEnv) return false
+  const suffixes = process.platform === 'win32'
+    ? ['', ...(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')]
+    : ['']
+  return !pathEnv.split(delimiter).some(dir => suffixes.some(suffix => {
+    try { accessSync(join(dir || '.', `claude${suffix}`), fsConstants.X_OK); return true } catch { return false }
+  }))
 }
 
 const MAX_CLAUDE_RETRIES = 2

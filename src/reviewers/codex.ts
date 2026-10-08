@@ -1,9 +1,9 @@
 import { execa } from 'execa'
-import { execFileSync } from 'node:child_process'
+import { accessSync, constants as fsConstants } from 'node:fs'
 import { readFileSync, realpathSync, rmSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { delimiter, join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveCodexModel } from '../lib/review-models.js'
@@ -120,12 +120,14 @@ function isRetryableCodexError(message: string): boolean {
 
 function isCodexExecutableMissing(code: string | undefined): boolean {
   if (code !== 'ENOENT') return false
-  try {
-    execFileSync(process.platform === 'win32' ? 'where' : 'which', ['codex'], { stdio: 'ignore' })
-    return false
-  } catch {
-    return true
-  }
+  const pathEnv = process.env.PATH
+  if (!pathEnv) return false
+  const suffixes = process.platform === 'win32'
+    ? ['', ...(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')]
+    : ['']
+  return !pathEnv.split(delimiter).some(dir => suffixes.some(suffix => {
+    try { accessSync(join(dir || '.', `codex${suffix}`), fsConstants.X_OK); return true } catch { return false }
+  }))
 }
 
 const MAX_CODEX_RETRIES = 2
