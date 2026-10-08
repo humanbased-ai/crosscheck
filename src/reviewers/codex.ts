@@ -1,4 +1,5 @@
 import { execa } from 'execa'
+import { execFileSync } from 'node:child_process'
 import { readFileSync, realpathSync, rmSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { tmpdir } from 'os'
@@ -115,6 +116,16 @@ export function parseCodexTokensUsed(output: string): number | undefined {
 
 function isRetryableCodexError(message: string): boolean {
   return isTransientVendorError(message)
+}
+
+function isCodexExecutableMissing(code: string | undefined): boolean {
+  if (code !== 'ENOENT') return false
+  try {
+    execFileSync(process.platform === 'win32' ? 'where' : 'which', ['codex'], { stdio: 'ignore' })
+    return false
+  } catch {
+    return true
+  }
 }
 
 const MAX_CODEX_RETRIES = 2
@@ -279,6 +290,7 @@ export async function runCodexReview(
       const thrown = Object.assign(new Error(`codex: ${summary}`), {
         exitCode: execa.exitCode,
         code: execa.code,
+        vendorExecutableMissing: isCodexExecutableMissing(execa.code),
         timedOut: execa.timedOut,
         stderr: rawStderr,
         effectiveTimeoutMs: effectiveMs,

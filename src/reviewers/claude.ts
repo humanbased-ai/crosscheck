@@ -1,4 +1,5 @@
 import { execa } from 'execa'
+import { execFileSync } from 'node:child_process'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { primaryModelFromUsage, resolveClaudeModel } from '../lib/review-models.js'
@@ -26,6 +27,16 @@ export function claudeEffort(effort?: string): string {
 
 function isRetryableClaudeError(message: string): boolean {
   return isTransientVendorError(message) || /session limit/i.test(message)
+}
+
+function isClaudeExecutableMissing(code: string | undefined): boolean {
+  if (code !== 'ENOENT') return false
+  try {
+    execFileSync(process.platform === 'win32' ? 'where' : 'which', ['claude'], { stdio: 'ignore' })
+    return false
+  } catch {
+    return true
+  }
 }
 
 const MAX_CLAUDE_RETRIES = 2
@@ -188,6 +199,7 @@ export async function runClaudeReview(
       const thrown = Object.assign(new Error(`claude: ${summary}`), {
         exitCode: execa.exitCode,
         code: execa.code,
+        vendorExecutableMissing: isClaudeExecutableMissing(execa.code),
         timedOut: execa.timedOut,
         stderr: rawStderr,
         effectiveTimeoutMs: effectiveMs,

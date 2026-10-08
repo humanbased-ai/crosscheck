@@ -83,9 +83,16 @@ describe('vendor failover classification', () => {
   })
 
   it('recognizes a structured missing-vendor executable error', () => {
-    const err = Object.assign(new Error('codex: failed to start reviewer'), { code: 'ENOENT' })
+    const err = Object.assign(new Error('codex: failed to start reviewer'), {
+      code: 'ENOENT',
+      vendorExecutableMissing: true,
+    })
     expect(isVendorUnavailableError(err)).toBe(true)
     expect(isVendorFailoverError(err)).toBe(true)
+  })
+
+  it('recognizes colon-separated provider status errors', () => {
+    expect(isVendorFailoverError(new Error('claude: API Error: 403 Forbidden'))).toBe(true)
   })
 
   it('marks provider outages as transient for the short retry path', () => {

@@ -42,6 +42,7 @@ interface ErrorLike {
   stderr?: unknown
   stdout?: unknown
   code?: unknown
+  vendorExecutableMissing?: unknown
   timedOut?: unknown
 }
 
@@ -63,8 +64,8 @@ function hasVendorPrefix(msg: string): boolean {
 }
 
 function isMissingVendorExecutable(err: unknown, msg: string): boolean {
-  const code = err && typeof err === 'object' ? (err as ErrorLike).code : undefined
-  return code === 'ENOENT' || /^(?:claude|codex):\s*(?:command not found|not found)\b/i.test(msg)
+  const value = err && typeof err === 'object' ? err as ErrorLike : undefined
+  return value?.vendorExecutableMissing === true || /^(?:claude|codex):\s*(?:command not found|not found)\b/i.test(msg)
 }
 
 function errorTimedOut(err: unknown): boolean {
@@ -91,7 +92,7 @@ export function isSubscriptionLimitError(err: unknown): boolean {
  */
 export function isVendorUnavailableError(err: unknown): boolean {
   const msg = errorText(err)
-  const providerStatus = /\b(?:api|http)\s+(?:error\s+)?(?:401|403|408|500|502|503|504|529)\b/.test(msg)
+  const providerStatus = /\b(?:api|http)\s+(?:error\s*:?\s*)?(?:401|403|408|500|502|503|504|529)\b/.test(msg)
   const providerFailure = providerStatus || /requires a newer version|unsupported\s+(?:model|version|feature)|model\s+(?:not found|unavailable|unsupported|does not exist)|not logged in|auth(?:entication)?\s+(?:failure|required|expired)|unauthori[sz]ed|access denied|bad credentials|organization[^\n]*(?:disabled|not enabled)|subscription access[^\n]*(?:disabled|forbidden|not enabled)|internal server error|bad gateway|gateway timeout|service unavailable|temporarily unavailable|provider\s+(?:unavailable|overloaded)|overloaded|capacity exceeded/.test(msg)
   const vendorTransportFailure = /connection\s+(?:reset|refused|closed)|socket.*(?:hang|closed)|econn(?:reset|refused)|etimedout|eai_again|network\s+(?:unreachable|timeout|error)/.test(msg)
   return providerFailure || isMissingVendorExecutable(err, msg) || (hasVendorPrefix(msg) && vendorTransportFailure)
