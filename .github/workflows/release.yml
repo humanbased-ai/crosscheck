@@ -17,14 +17,18 @@ on:
         default: ''
         type: string
 
-# Skip the release cycle when the push is itself the version-bump commit.
+# Skip the release cycle when the push is the version-bump commit itself or the
+# merge commit for the automated version-bump PR.
 jobs:
   # ── Job 1: determine whether a release is needed and which version ───────────
   compute:
     name: Compute version
     if: |
       github.event_name == 'workflow_dispatch' ||
-      !startsWith(github.event.head_commit.message, 'chore: release')
+      (
+        !startsWith(github.event.head_commit.message, 'chore: release') &&
+        !contains(github.event.head_commit.message, 'chore: release v')
+      )
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ steps.ver.outputs.new_version }}
@@ -116,15 +120,66 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      - name: Tag release
+      - name: Persist version bump and tag release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          RELEASE_BRANCH: ci/release-${{ needs.compute.outputs.new_tag }}
         run: |
+          set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # main is protected and rejects direct pushes. Put the version bump
+          # in a disposable PR, merge it, then tag the resulting main commit.
+          git fetch origin main --tags
+          git switch --create "$RELEASE_BRANCH" origin/main
           CURRENT=$(node -p "require('./package.json').version")
           if [ "$CURRENT" != "${{ needs.compute.outputs.new_version }}" ]; then
             npm version "${{ needs.compute.outputs.new_version }}" --no-git-tag-version
             git add package.json package-lock.json
             git commit -m "chore: release ${{ needs.compute.outputs.new_tag }}"
+
+            git push --force origin "$RELEASE_BRANCH"
+            PR_URL=$(gh pr list \
+              --base main \
+              --head "$RELEASE_BRANCH" \
+              --state open \
+              --json url \
+              --jq '.[0].url // empty')
+            if [ -z "$PR_URL" ]; then
+              PR_URL=$(gh pr create \
+                --base main \
+                --head "$RELEASE_BRANCH" \
+                --title "chore: release ${{ needs.compute.outputs.new_tag }}" \
+                --body "Automated version bump for ${{ needs.compute.outputs.new_tag }}. ⚡ Generated with [OpenAI Codex](https://openai.com/codex)")
+            fi
+
+            if ! gh pr merge "$PR_URL" --merge --delete-branch; then
+              gh pr merge "$PR_URL" --merge --auto --delete-branch || true
+            fi
+
+            MERGED_AT=""
+            for attempt in $(seq 1 30); do
+              MERGED_AT=$(gh pr view "$PR_URL" --json state,mergedAt --jq \
+                'select(.state == "MERGED") | .mergedAt')
+              if [ -n "$MERGED_AT" ]; then
+                break
+              fi
+              sleep 2
+            done
+            if [ -z "$MERGED_AT" ]; then
+              echo "::error::Version bump PR was not merged; refusing to publish a tag from an unversioned main."
+              exit 1
+            fi
+
+            git fetch origin main --tags
+            git checkout --detach origin/main
+          fi
+
+          CURRENT=$(node -p "require('./package.json').version")
+          if [ "$CURRENT" != "${{ needs.compute.outputs.new_version }}" ]; then
+            echo "::error::main still contains package version $CURRENT after the version bump PR merged."
+            exit 1
           fi
           if git rev-parse "${{ needs.compute.outputs.new_tag }}" >/dev/null 2>&1; then
             echo "Tag ${{ needs.compute.outputs.new_tag }} already exists — skipping."
