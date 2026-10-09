@@ -28,7 +28,7 @@ const claudeVendor = (model: string | null = null, auth: VendorConfig['auth'] = 
 
 describe('review model resolution', () => {
   it('resolves Claude models by tier', () => {
-    expect(resolveClaudeModel(quality('fast'))).toBe('claude-haiku-4-5-20251001')
+    expect(resolveClaudeModel(quality('fast'))).toBe('claude-haiku-5-5')
     expect(resolveClaudeModel(quality('balanced'))).toBe('claude-sonnet-5')
     // thorough moved from the legacy claude-opus-4-8 to claude-opus-5 — identical
     // $5/$25 pricing, higher coding benchmark score. The stale pin was a silent
@@ -49,9 +49,9 @@ describe('review model resolution', () => {
   })
 
   it('resolves Codex API-key models by tier and configured override', () => {
-    expect(resolveCodexModel(quality('fast'), codexVendor('api-key'))).toBe('gpt-5.6-luna')
-    expect(resolveCodexModel(quality('balanced'), codexVendor('api-key'))).toBe('gpt-5.6-terra')
-    expect(resolveCodexModel(quality('thorough'), codexVendor('api-key'))).toBe('gpt-5.6-sol')
+    expect(resolveCodexModel(quality('fast'), codexVendor('api-key'))).toBe('gpt-6-luna')
+    expect(resolveCodexModel(quality('balanced'), codexVendor('api-key'))).toBe('gpt-6.1-sol')
+    expect(resolveCodexModel(quality('thorough'), codexVendor('api-key'))).toBe('gpt-6-astra')
     expect(resolveCodexModel(quality('thorough'), codexVendor('api-key', 'custom-model'))).toBe('custom-model')
   })
 
@@ -61,7 +61,7 @@ describe('review model resolution', () => {
       model_tiers: { thorough: 'custom-thorough-model' },
     }
     expect(resolveCodexModel(quality('thorough'), vendor)).toBe('custom-thorough-model')
-    expect(resolveCodexModel(quality('balanced'), vendor)).toBe('gpt-5.6-terra')
+    expect(resolveCodexModel(quality('balanced'), vendor)).toBe('gpt-6.1-sol')
   })
 
   it('uses the CLI default for Codex subscription auth with no model configured', () => {

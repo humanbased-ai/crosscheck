@@ -15,7 +15,7 @@
     {
       "name": "Anthropic model catalog",
       "url": "https://platform.claude.com/docs/en/about-claude/models/overview",
-      "checks": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]
+      "checks": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-5-5"]
     },
     {
       "name": "Anthropic effort parameter",
@@ -25,7 +25,7 @@
     {
       "name": "OpenAI model catalog",
       "url": "https://developers.openai.com/api/docs/models",
-      "checks": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
+      "checks": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]
     }
   ],
 
@@ -47,10 +47,10 @@
   "models": {
     "claude-opus-5":             { "vendor": "claude", "license": "closed", "in_usd_mtok": 5,    "out_usd_mtok": 25,   "context": 1000000, "swe_bench_verified": 0.960, "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
     "claude-sonnet-5":           { "vendor": "claude", "license": "closed", "in_usd_mtok": 3,    "out_usd_mtok": 15,   "context": 1000000, "swe_bench_verified": 0.852, "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
-    "claude-haiku-4-5-20251001": { "vendor": "claude", "license": "closed", "in_usd_mtok": 1,    "out_usd_mtok": 5,    "context": 200000,  "swe_bench_verified": 0.733, "frontend_elo": null, "effort_levels": [] },
-    "gpt-5.6-sol":               { "vendor": "codex",  "license": "closed", "in_usd_mtok": 5,    "out_usd_mtok": 30,   "context": 1050000, "swe_bench_verified": null,  "frontend_elo": 1618, "effort_levels": ["none","low","medium","high","xhigh","max"] },
-    "gpt-5.6-terra":             { "vendor": "codex",  "license": "closed", "in_usd_mtok": 2,    "out_usd_mtok": 12,   "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["none","low","medium","high","xhigh","max"] },
-    "gpt-5.6-luna":              { "vendor": "codex",  "license": "closed", "in_usd_mtok": 0.2,  "out_usd_mtok": 1.2,  "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["none","low","medium","high","xhigh","max"] },
+    "claude-haiku-5-5":          { "vendor": "claude", "license": "closed", "in_usd_mtok": 0.1,  "out_usd_mtok": 0.5,  "context": 1000000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
+    "gpt-6-astra":               { "vendor": "codex",  "license": "closed", "in_usd_mtok": 10,   "out_usd_mtok": 50,   "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
+    "gpt-6.1-sol":               { "vendor": "codex",  "license": "closed", "in_usd_mtok": 2,    "out_usd_mtok": 10,   "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
+    "gpt-6-luna":                { "vendor": "codex",  "license": "closed", "in_usd_mtok": 0.1,  "out_usd_mtok": 0.5,  "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["none","low","medium","high","xhigh","max"] },
 
     "kimi-k3":            { "vendor": "opencode", "license": "Modified MIT", "in_usd_mtok": 3,     "out_usd_mtok": 15,   "context": 1000000, "swe_bench_verified": null,  "frontend_elo": 1679, "effort_levels": [], "status": "planned" },
     "glm-5.2":            { "vendor": "opencode", "license": "MIT",          "in_usd_mtok": 1.4,   "out_usd_mtok": 4.4,  "context": 1000000, "swe_bench_verified": null,  "frontend_elo": 1587, "effort_levels": [], "status": "planned" },
@@ -69,12 +69,12 @@
   "vendors": {
     "claude": {
       "cli": "claude", "honors_model_under_subscription": true, "min_cli_version": null,
-      "tiers": { "fast": "claude-haiku-4-5-20251001", "balanced": "claude-sonnet-5", "thorough": "claude-opus-5" }
+      "tiers": { "fast": "claude-haiku-5-5", "balanced": "claude-sonnet-5", "thorough": "claude-opus-5" }
     },
     "codex": {
       "cli": "codex", "honors_model_under_subscription": true, "min_cli_version": "0.147.0",
       "_min_cli_version_note": "gpt-5.6-* return HTTP 400 'requires a newer version of Codex' below this. The CLI accepts --model under subscription auth; the old auth!=api-key guard in resolveCodexModel was wrong and dropped the configured model.",
-      "tiers": { "fast": "gpt-5.6-luna", "balanced": "gpt-5.6-terra", "thorough": "gpt-5.6-sol" }
+      "tiers": { "fast": "gpt-6-luna", "balanced": "gpt-6.1-sol", "thorough": "gpt-6-astra" }
     },
     "opencode": {
       "cli": "opencode", "honors_model_under_subscription": true, "min_cli_version": null,
@@ -88,14 +88,14 @@
     "frontend": {
       "match_extensions": ["tsx", "jsx", "vue", "svelte", "css", "scss", "less", "html"],
       "threshold": "more frontend files than backend files",
-      "preferred": { "thorough": ["kimi-k3", "gpt-5.6-sol", "claude-opus-5"], "balanced": ["glm-5.2", "claude-sonnet-5"], "fast": ["gpt-5.6-luna", "deepseek-v4-flash"] },
-      "basis": "Frontend Code Arena Elo: kimi-k3 1679 > gpt-5.6-sol 1618 > glm-5.2 1587. Falls back to installed vendors when opencode is unavailable.",
+      "preferred": { "thorough": ["kimi-k3", "gpt-6-astra", "claude-opus-5"], "balanced": ["glm-5.2", "claude-sonnet-5"], "fast": ["gpt-6-luna", "deepseek-v4-flash"] },
+      "basis": "Frontend Code Arena Elo: kimi-k3 1679 > glm-5.2 1587 (gpt-6-* scores re-verified pending). Falls back to installed vendors when opencode is unavailable.",
       "confidence": "hypothesis - the benchmark measures generation, not review. Pending local A/B."
     },
     "backend": {
       "match_extensions": ["py", "go", "rs", "java", "rb", "php", "sql", "ts"],
-      "preferred": { "thorough": ["claude-opus-5", "gpt-5.6-sol"], "balanced": ["claude-sonnet-5", "gpt-5.6-terra"], "fast": ["deepseek-v4-flash", "gpt-5.6-luna", "claude-haiku-4-5-20251001"] },
-      "basis": "SWE-bench Verified: claude-opus-5 0.960 > claude-sonnet-5 0.852 > deepseek-v4-pro 0.806 > claude-haiku-4-5 0.733.",
+      "preferred": { "thorough": ["claude-opus-5", "gpt-6-astra"], "balanced": ["claude-sonnet-5", "gpt-6.1-sol"], "fast": ["deepseek-v4-flash", "gpt-6-luna", "claude-haiku-5-5"] },
+      "basis": "SWE-bench Verified: claude-opus-5 0.960 > claude-sonnet-5 0.852 > deepseek-v4-pro 0.806 (claude-haiku-5-5 and gpt-6-* re-verified pending).",
       "confidence": "measured"
     }
   },

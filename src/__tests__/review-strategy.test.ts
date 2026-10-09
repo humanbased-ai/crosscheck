@@ -157,13 +157,13 @@ describe('escalation ladder', () => {
   // The OpenCode case: most open-weight models expose no effort ladder, so the
   // effort step has to degrade to a model step or escalation silently no-ops.
   it('promotes a tier when the model has no effort control', () => {
-    expect(effortLevelsFor('claude-haiku-4-5-20251001')).toEqual([])
-    expect(escalate({ tier: 'fast', effort: null }, 2, 'claude-haiku-4-5-20251001'))
+    expect(effortLevelsFor('kimi-k3')).toEqual([])
+    expect(escalate({ tier: 'fast', effort: null }, 2, 'kimi-k3'))
       .toEqual({ tier: 'balanced', effort: null })
   })
 
   it('caps tier promotion at thorough', () => {
-    expect(escalate({ tier: 'thorough', effort: null }, 3, 'claude-haiku-4-5-20251001').tier)
+    expect(escalate({ tier: 'thorough', effort: null }, 3, 'kimi-k3').tier)
       .toBe('thorough')
   })
 })
@@ -174,7 +174,7 @@ describe('effort clamping', () => {
   })
 
   it('returns null for a model with no effort parameter', () => {
-    expect(clampEffort('claude-haiku-4-5-20251001', 'high')).toBeNull()
+    expect(clampEffort('kimi-k3', 'high')).toBeNull()
   })
 
   it('snaps down to the nearest supported level', () => {
@@ -206,7 +206,7 @@ describe('model resolution honours the strategy', () => {
 
   it('uses the strategy tier in smart mode', () => {
     expect(resolveClaudeModel(quality(), undefined, { tier: 'thorough' })).toBe('claude-opus-5')
-    expect(resolveClaudeModel(quality(), undefined, { tier: 'fast' })).toBe('claude-haiku-4-5-20251001')
+    expect(resolveClaudeModel(quality(), undefined, { tier: 'fast' })).toBe('claude-haiku-5-5')
   })
 
   it('ignores the strategy tier in fixed mode', () => {
@@ -232,8 +232,8 @@ describe('model resolution honours the strategy', () => {
 
   it('drives the codex tier model from the strategy under api-key auth', () => {
     const vendor = { enabled: true, model: null, auth: 'api-key', effort: 'medium', timeout_sec: null, quality: 'medium' } as CodexVendorConfig
-    expect(resolveCodexModel(quality(), vendor, { tier: 'thorough' })).toBe('gpt-5.6-sol')
-    expect(resolveCodexModel(quality(), vendor, { tier: 'fast' })).toBe('gpt-5.6-luna')
+    expect(resolveCodexModel(quality(), vendor, { tier: 'thorough' })).toBe('gpt-6-astra')
+    expect(resolveCodexModel(quality(), vendor, { tier: 'fast' })).toBe('gpt-6-luna')
   })
 
   it('keeps the CLI default under subscription auth with nothing configured', () => {
@@ -462,7 +462,7 @@ describe('strategyCitation', () => {
   it('cites the class without a tier when the class named none', () => {
     const generated = { ...strat, classId: 'generated', reason: 'generated only', tier: null }
     const filled = { ...generated, tier: 'fast' as const }
-    expect(strategyCitation({ model: null }, generated, filled, 'claude-haiku-4-5-20251001'))
+    expect(strategyCitation({ model: null }, generated, filled, 'claude-haiku-5-5'))
       .toEqual({ version: '1.2.0', classId: 'generated', tier: null, reason: 'generated only' })
   })
 })
@@ -483,7 +483,7 @@ describe('annotation round-trips the citation', () => {
   it('names the class but no tier when the class selects none', () => {
     const body = buildReviewCommentBody({
       body: 'findings', reviewer: 'claude', origin: 'codex', verdict: 'APPROVE',
-      model: 'claude-haiku-4-5-20251001', stepType: 'review', round: 1,
+      model: 'claude-haiku-5-5', stepType: 'review', round: 1,
       strategy: { version: '1.2.0', classId: 'generated', tier: null, reason: 'generated only' },
     })
     const parsed = parseAnnotation(body)
@@ -531,7 +531,7 @@ describe('rounds escalate on measured non-convergence', () => {
   })
 
   it('promotes the tier instead when the model has no effort ladder', () => {
-    expect(escalate({ tier: 'fast', effort: null }, 2, 'claude-haiku-4-5-20251001'))
+    expect(escalate({ tier: 'fast', effort: null }, 2, 'kimi-k3'))
       .toEqual({ tier: 'balanced', effort: null })
   })
 })

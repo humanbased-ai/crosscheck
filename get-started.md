@@ -37,7 +37,7 @@
 
 ## Prerequisites
 
-You need GitHub CLI and at least one authenticated AI reviewer CLI before crosscheck can run a one-shot review. Install both Claude Code and Codex only if you want cross-vendor review routing.
+You need GitHub CLI and at least one authenticated AI reviewer CLI before crosscheck can run a one-shot review. Install both Claude Code and Codex only if you want cross-vendor review routing. OpenCode is an optional third harness, disabled by default.
 
 ### Claude Code
 
@@ -64,6 +64,15 @@ printenv OPENAI_API_KEY | codex login --with-api-key
 ```
 
 Then set `auth: api-key` in your config to enable model selection.
+
+### OpenCode
+
+```bash
+npm install -g @opencode/cli
+opencode auth login   # sign in to a provider (e.g. DeepSeek, Anthropic, OpenAI)
+```
+
+OpenCode is **opt-in**: enable it with `vendors.opencode.enabled: true` (or `crosscheck onboard`). Its model and provider come from your OpenCode config (`opencode auth login` / `opencode.json`) — crosscheck pins no model by default, so reviews run against whichever model OpenCode is configured to use. Reasoning effort is carried as the `#variant` suffix on `--model provider/model#variant`, so `vendors.opencode.effort` (none | high | max) applies only when `vendors.opencode.model` is also set.
 
 ### GitHub CLI
 
@@ -384,6 +393,10 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, GitHub auth, and webhook-se
 
 ### `crosscheck onboard`
 
+Interactive onboarding starts with a checklist of Claude, Codex, and OpenCode, including tools that are not installed or need login. Select one or more tools first, then choose to run the displayed installation/login command, handle setup in another terminal and check again, skip that tool, or cancel. Commands run only when explicitly chosen. Setup rechecks each tool after installation/login and again before saving; skipped or unready tools are never enabled. One ready selection uses single-vendor mode; multiple ready selections use cross-vendor mode. Existing choices are preselected, and OpenCode is unchecked by default on fresh mixed installs.
+
+With `--yes`, no installation/login commands run and no tools are selected interactively: existing opt-outs are preserved and unavailable tools are disabled. If no enabled reviewer is available, setup stops without writing config. A fresh OpenCode-only installation enables OpenCode. These checks verify installation and saved login/provider configuration, not a live request to each model or provider account permissions.
+
 The recommended first-time setup command. Walks through ten steps interactively and writes a ready-to-use config.
 
 ```bash
@@ -396,7 +409,7 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 **The ten steps:**
 
-**Step 1 — Environment check.** Verifies codex CLI, claude CLI, gh CLI, and GitHub token. At least one AI CLI must be authenticated; gh auth is always required. Prints ✓/✗ with fix hints.
+**Step 1 — Environment check.** Verifies codex CLI, claude CLI, gh CLI, and GitHub token. GitHub auth is required. Interactive setup can start without an installed AI tool and then guides tool selection, installation, and login; `--yes` requires an enabled ready tool.
 
 **Step 2 — Deployment mode.** Choose how crosscheck scopes itself:
 - `personal` — monitors your personal repos + all orgs you belong to; reviews only PRs you author
@@ -404,9 +417,9 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 **Step 3 — Repo selection.** Lists accessible repos and orgs; you pick which ones to watch. Org-level selection covers all repos in the org with one webhook.
 
-**Step 4 — Review mode.** If both CLIs are available, choose:
-- `cross-vendor` — Claude reviews Codex PRs; Codex reviews Claude PRs (recommended when using both agents)
-- `single-vendor` — one AI reviews all PRs (default when only one CLI is installed)
+**Step 4 — Review mode.** Uses the tools retained after guided setup:
+- `cross-vendor` — enabled tools review PRs written by another tool (used for multiple ready selections)
+- `single-vendor` — one AI reviews all PRs (used for one ready selection)
 
 **Step 5 — Primary author.** In personal cross-vendor mode, choose which agent usually authors your PRs so Crosscheck can route reviews to the other vendor.
 
@@ -794,6 +807,7 @@ crosscheck status
   Auth
   ✓ codex                  authenticated
   ✓ claude                 2.1.x (Claude Code)
+  ✓ opencode               v2.x
   ✓ GITHUB_TOKEN           via gh auth login
   ✓ WEBHOOK_SECRET         auto-managed at ~/.crosscheck/webhook-secret
 
@@ -804,6 +818,8 @@ crosscheck status
     enabled skills         code-review-skill (by @awesome-skills, MIT), diagnosing-bugs (by @mattpocock, MIT)
     codex auth             subscription
     claude model           sonnet
+    opencode enabled       false
+    opencode model         configured in opencode.json
     per-review budget      $2.00/review
 
   Impact
@@ -817,6 +833,7 @@ crosscheck status
   CLIs
     codex                  codex-cli 0.128.0
     claude                 2.1.x (Claude Code)
+    opencode               v2.x
 ```
 
 | Flag | Description |
@@ -1192,8 +1209,8 @@ vendors:
   codex:
     enabled: true
     auth: subscription      # subscription | api-key
-    model: gpt-5.6-terra    # pins the review model; unset = tier model (api-key) / CLI default (subscription)
-    effort: medium          # low | medium | high | xhigh | max | ultra (ultra: terra/sol only)
+    model: gpt-6.1-sol      # pins the review model; unset = tier model (api-key) / CLI default (subscription)
+    effort: medium          # low | medium | high | xhigh | max | ultra
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
@@ -1201,6 +1218,16 @@ vendors:
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
+
+  # Opt-in third harness; disabled by default. Its model/provider come from
+  # `opencode auth login` / opencode.json, not from a crosscheck catalog.
+  # Reasoning effort rides the `--model provider/model#variant` suffix, so
+  # `effort` applies only when `model` is also set.
+  opencode:
+    enabled: false
+    # model: provider/model   # e.g. alibaba-cn/deepseek-v4-pro; unset = opencode.json default
+    effort: high              # none | high | max
+    # timeout_sec: 1200       # max seconds per CLI call; unset = tier-based (300/600/1200)
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:
@@ -1285,12 +1312,18 @@ routing:
   claude_reviews_patterns:
     - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
     - "Co-Authored-By: codex"               # commit trailer
+  opencode_reviews_patterns:
+    - "Generated with \\[OpenCode\\]"       # OpenCode attribution footer
+    - "Co-Authored-By: opencode"            # commit trailer
 
-  # Branch prefix detection (signal 3). Claude Code uses claude/, Codex uses codex/.
+  # Branch prefix detection (signal 3). Claude Code uses claude/, Codex uses
+  # codex/, OpenCode uses opencode/.
   claude_branch_prefixes:
     - "claude/"
   codex_branch_prefixes:
     - "codex/"
+  opencode_branch_prefixes:
+    - "opencode/"
 
   # Restrict reviews to PRs opened by these GitHub logins.
   # Auto-filled with your GitHub login by `crosscheck init` or first `crosscheck watch`.
@@ -1303,6 +1336,11 @@ routing:
   # the attribution footer (e.g. when creating PRs via gh CLI directly).
   author_routes:
     your-github-login: claude   # your PRs → treated as Claude-authored → Codex reviews
+
+  # Reviewer for PRs crosscheck cannot attribute (origin: human). 'auto' = the
+  # first authenticated vendor (codex, then claude, then opencode); an explicit
+  # 'codex' | 'claude' | 'opencode' always uses that vendor; null = skip the PR.
+  fallback_reviewer: auto
 
 # ── Tunnel (watch mode only) ──────────────────────────────────────────────────
 # localhost.run (default) — SSH tunnel, zero install, URL changes on reconnect.

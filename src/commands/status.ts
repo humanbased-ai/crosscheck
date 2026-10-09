@@ -5,6 +5,7 @@ import { loadConfig, getGithubTokenSource, getWebhookSecretPath, resolveConfigPa
 import { verifyLinearIdentity, type LinearIdentityReport } from '../linear/verify.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
+import { checkOpenCodeAuth } from '../reviewers/opencode.js'
 import { getLogDir, getTodayLogPath } from '../lib/logger.js'
 import { buildImpactReport } from './impact.js'
 import { formatSkillIdentity, loadSkillCatalog } from '../skills/catalog.js'
@@ -41,9 +42,10 @@ export async function runStatus(configPath?: string) {
 
   // Auth
   console.log(chalk.dim('  Auth'))
-  const [codexAuth, claudeAuth] = await Promise.all([checkCodexAuth(), checkClaudeAuth()])
+  const [codexAuth, claudeAuth, opencodeAuth] = await Promise.all([checkCodexAuth(), checkClaudeAuth(), checkOpenCodeAuth()])
   row('codex', codexAuth.detail || 'authenticated', codexAuth.ok)
   row('claude', claudeAuth.detail || 'authenticated', claudeAuth.ok)
+  row('opencode', opencodeAuth.detail || 'authenticated', opencodeAuth.ok)
 
   const tokenResult = getGithubTokenSource()
   const ghTokenDetail = tokenResult
@@ -78,6 +80,8 @@ export async function runStatus(configPath?: string) {
   row('codex auth', config.vendors.codex.auth)
   row('codex model', config.vendors.codex.model ?? 'auto (by tier)')
   row('claude model', config.vendors.claude.model ?? 'default')
+  row('opencode enabled', String(config.vendors.opencode.enabled), config.vendors.opencode.enabled)
+  row('opencode model', config.vendors.opencode.model ?? 'configured in opencode.json')
   row('per-review budget', config.vendors.codex.auth === 'subscription'
     ? 'subscription (unlimited)'
     : `$${config.budget.per_review_usd.toFixed(2)}`)
@@ -152,6 +156,12 @@ export async function runStatus(configPath?: string) {
     row('claude', claudeVer)
   } catch {
     row('claude', 'not found', false)
+  }
+  try {
+    const opencodeVer = execSync('opencode --version 2>&1', { encoding: 'utf8' }).trim()
+    row('opencode', opencodeVer)
+  } catch {
+    row('opencode', 'not found', false)
   }
 
   console.log()

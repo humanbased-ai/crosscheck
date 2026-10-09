@@ -10,13 +10,15 @@ import { loadConfig, resolveConfigPath } from '../config/loader.js'
 import type { Config } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { buildDiagnoseReport, type DiagnoseReport } from './diagnose.js'
+import { parseOpenCodeOutput, opencodePolicy } from '../reviewers/opencode.js'
+import { buildOpenCodeEnv } from '../reviewers/opencode-env.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 // dist/commands/ → ../../ = package root
 const PACKAGE_ROOT = resolve(__dirname, '..', '..')
 
-type Agent = 'claude' | 'codex'
+type Agent = 'claude' | 'codex' | 'opencode'
 
 // eslint-disable-next-line no-control-regex -- matching the ESC byte is the point
 const ANSI_RE = /\x1b\[[0-9;]*m/g
@@ -28,22 +30,30 @@ export function selectOptimizeAgent(
   const enabled: Agent[] = []
   if (config.vendors.claude.enabled) enabled.push('claude')
   if (config.vendors.codex.enabled) enabled.push('codex')
+  if (config.vendors.opencode.enabled) enabled.push('opencode')
 
-  if (enabled.length === 0) throw new Error('No vendors enabled in config — enable claude or codex under vendors.')
+  if (enabled.length === 0) throw new Error('No vendors enabled in config — enable claude, codex, or opencode under vendors.')
   if (enabled.length === 1) return { agent: enabled[0], reason: `only enabled vendor in config` }
 
-  // Both enabled — pick by success rate from log data
+  // Pick by success rate from log data, but only among the vendors actually
+  // enabled — a disabled vendor must never be selected or named. OpenCode is
+  // opt-in and stays out of the default success-rate race: diagnose's
+  // reviewer_performance is keyed to claude/codex, and opencode only runs when
+  // it is the sole enabled vendor or explicitly requested with --agent.
+  const claudeEnabled = config.vendors.claude.enabled
+  const codexEnabled = config.vendors.codex.enabled
   const cp = report.reviewer_performance['claude']
   const xp = report.reviewer_performance['codex']
 
-  if (cp?.attempts > 0 && xp?.attempts > 0) {
+  if (claudeEnabled && codexEnabled && cp?.attempts > 0 && xp?.attempts > 0) {
     const cr = cp.successes / cp.attempts
     const xr = xp.successes / xp.attempts
     if (xr > cr) return { agent: 'codex', reason: `codex success rate ${Math.round(xr * 100)}% > claude ${Math.round(cr * 100)}%` }
     if (cr > xr) return { agent: 'claude', reason: `claude success rate ${Math.round(cr * 100)}% > codex ${Math.round(xr * 100)}%` }
   }
 
-  return { agent: 'claude', reason: 'default (both enabled, no data or equal rates)' }
+  // Fall back to the first enabled vendor (claude, then codex, then opencode).
+  return { agent: enabled[0], reason: 'default (multiple enabled, no data or equal rates)' }
 }
 
 // ── ProposedChange ────────────────────────────────────────────────────────────
@@ -225,6 +235,36 @@ async function runWithCodex(prompt: string): Promise<string> {
   }
 }
 
+async function runWithOpenCode(prompt: string): Promise<string> {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-optimize-'))
+  try {
+    writeFileSync(join(tmpDir, 'OPTIMIZE_PROMPT.md'), prompt)
+    // No host sandbox in OpenCode v2 — deny shell/edits so a prompt-injected
+    // optimize run cannot execute commands or mutate files.
+    writeFileSync(join(tmpDir, 'opencode.json'), JSON.stringify(opencodePolicy(false), null, 2))
+    const result = await execa('opencode', [
+      'run', '--format', 'json', '--auto', '--standalone',
+      'Read OPTIMIZE_PROMPT.md and produce the new instructions.md content. Output only the file content — no explanation, no markdown fences.',
+    ], {
+      cwd: tmpDir,
+      timeout: 180_000,
+      // Same posture as the review/fix paths: --auto lets the agent run tools, so
+      // hand it an allowlisted env rather than the operator's full process env.
+      extendEnv: false,
+      env: buildOpenCodeEnv({ PATH: `${process.env.PATH ?? ''}` }),
+    })
+    return parseOpenCodeOutput(result.stdout ?? '').review.trim()
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+function runAgent(agent: Agent, prompt: string): Promise<string> {
+  if (agent === 'claude') return runWithClaude(prompt)
+  if (agent === 'codex') return runWithCodex(prompt)
+  return runWithOpenCode(prompt)
+}
+
 // Runs primary agent; on failure, retries with fallback if one is available.
 async function runAgentWithFallback(
   primary: Agent,
@@ -232,14 +272,14 @@ async function runAgentWithFallback(
   prompt: string,
 ): Promise<{ result: string; agent: Agent }> {
   try {
-    const result = primary === 'claude' ? await runWithClaude(prompt) : await runWithCodex(prompt)
+    const result = await runAgent(primary, prompt)
     return { result, agent: primary }
   } catch (err) {
     if (!fallback) throw err
     const msg = err instanceof Error ? err.message : String(err)
     console.log(chalk.yellow(`  ⚠ ${primary} failed: ${msg.slice(0, 80)}`))
     console.log(chalk.dim(`  falling back to ${fallback}...`))
-    const result = fallback === 'claude' ? await runWithClaude(prompt) : await runWithCodex(prompt)
+    const result = await runAgent(fallback, prompt)
     return { result, agent: fallback }
   }
 }
@@ -304,7 +344,7 @@ export async function runOptimize(opts: {
   let agentReason: string
   let fallbackAgent: Agent | undefined
 
-  if (opts.agent === 'claude' || opts.agent === 'codex') {
+  if (opts.agent === 'claude' || opts.agent === 'codex' || opts.agent === 'opencode') {
     primaryAgent = opts.agent
     agentReason = '--agent flag'
     // No fallback when agent is explicitly chosen
@@ -317,10 +357,10 @@ export async function runOptimize(opts: {
       console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
       process.exit(1)
     }
-    // Fallback: the other enabled vendor
-    const other: Agent = primaryAgent === 'claude' ? 'codex' : 'claude'
-    if (primaryAgent === 'claude' && config.vendors.codex.enabled) fallbackAgent = other
-    if (primaryAgent === 'codex' && config.vendors.claude.enabled) fallbackAgent = other
+    // Fallback: the first other enabled vendor
+    const fallbackCandidates: Agent[] = (['claude', 'codex', 'opencode'] as const)
+      .filter(v => v !== primaryAgent)
+    fallbackAgent = fallbackCandidates.find(v => config.vendors[v].enabled)
   }
 
   const fallbackSuffix = fallbackAgent ? chalk.dim(` → ${fallbackAgent} on failure`) : ''

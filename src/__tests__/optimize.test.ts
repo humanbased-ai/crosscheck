@@ -8,7 +8,7 @@ import {
 import type { Config } from '../config/schema.js'
 import type { DiagnoseReport } from '../commands/diagnose.js'
 
-function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
+function makeConfig(claudeEnabled: boolean, codexEnabled: boolean, opencodeEnabled = false): Config {
   return {
     mode: 'cross-vendor',
     clone_protocol: 'ssh',
@@ -16,7 +16,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     orgs: [],
     users: [],
     repos: [],
-    routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], allowed_authors: [], author_routes: {}, fallback_reviewer: 'auto' },
+    routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], opencode_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], opencode_branch_prefixes: [], allowed_authors: [], author_routes: {}, fallback_reviewer: 'auto' },
     server: { port: 7892, webhook_path: '/webhook' },
     quality: { tier: 'balanced', mode: 'fixed', review_memory: true, focus: [], custom_prompt: undefined },
     skills: { enabled: [], codex_full_access: false },
@@ -24,6 +24,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     vendors: {
       claude: { enabled: claudeEnabled, model: null, auth: 'subscription', effort: 'medium', timeout_sec: null },
       codex: { enabled: codexEnabled, model: null, auth: 'subscription', effort: 'medium', quality: 'medium', timeout_sec: null },
+      opencode: { enabled: opencodeEnabled, model: null, auth: 'subscription', effort: 'high', timeout_sec: null },
     },
     logs: { enabled: false, retention_days: 7, extended: { enabled: false } },
     tunnel: { backend: 'localhost.run', smee_channel: '' },
@@ -111,6 +112,24 @@ describe('selectOptimizeAgent', () => {
 
   it('throws when no vendors are enabled', () => {
     expect(() => selectOptimizeAgent(makeConfig(false, false), makeReport())).toThrow(/No vendors enabled/)
+  })
+
+  it('returns opencode when only opencode is enabled', () => {
+    const { agent, reason } = selectOptimizeAgent(makeConfig(false, false, true), makeReport())
+    expect(agent).toBe('opencode')
+    expect(reason).toMatch(/only enabled vendor/)
+  })
+
+  it('does not prefer opencode when claude/codex are also enabled', () => {
+    // opencode is opt-in and stays out of the claude/codex success-rate race.
+    const { agent } = selectOptimizeAgent(makeConfig(true, true, true), makeReport(10, 9, 10, 6))
+    expect(agent).toBe('claude')
+  })
+
+  it('does not return a disabled vendor as the default fallback', () => {
+    // claude disabled, codex + opencode enabled — the fallback must not pick claude.
+    const { agent } = selectOptimizeAgent(makeConfig(false, true, true), makeReport())
+    expect(agent).toBe('codex')
   })
 
   it('reason string mentions source when only one vendor enabled', () => {

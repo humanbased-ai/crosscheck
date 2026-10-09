@@ -1067,7 +1067,7 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
   const stepType = input.stepType ?? (input.isRecheck ? 'recheck' : 'review')
   const serviceName = brand.service_name || 'crosscheck'
   const isClaude = reviewer === 'claude'
-  const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
+  const vendorLabel = isClaude ? '🤖 Claude Code' : reviewer === 'opencode' ? '🔷 OpenCode' : '⚡ Codex'
   const modelDisplay = modelDisplayName(model)
   const serviceSegment = serviceName !== 'crosscheck' ? ` · ${serviceName}` : ''
   const modelSegment = modelDisplay ? ` · ${modelDisplay}` : ''

@@ -8,7 +8,7 @@ export const WorkflowStepSchema = z.object({
   name: z.string(),
   // 'address' is the legacy name — normalized to 'fix' at parse time for backward compat
   type: z.enum(['review', 'fix', 'recheck', 'address', 'conflict-resolve']).transform(t => t === 'address' ? 'fix' : t) as z.ZodType<'review' | 'fix' | 'recheck' | 'conflict-resolve'>,
-  reviewer: z.enum(['auto', 'claude', 'codex', 'origin']).default('auto'),
+  reviewer: z.enum(['auto', 'claude', 'codex', 'opencode', 'origin']).default('auto'),
   when: z.string().optional(),
   max_rounds: z.number().int().positive().default(1),
   instructions: z.string().optional(),

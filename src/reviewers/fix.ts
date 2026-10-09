@@ -6,8 +6,10 @@ import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeEffort } from './claude.js'
 import { codexReasoningEffort } from './codex.js'
+import { opencodeEffort, isolateCheckoutOpenCodeConfig, parseOpenCodeOutput } from './opencode.js'
 import { claudeSkillBrokerArgs, codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { buildCodexEnv } from './codex-env.js'
+import { buildOpenCodeEnv } from './opencode-env.js'
 import { withCredentialFreeOrigin } from '../lib/clone.js'
 
 interface ClaudeJsonOutput {
@@ -329,4 +331,80 @@ export async function runCodexFixStep(
     ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
   ]
   return { appliedCount: changedFiles.length, changedFiles, effort }
+}
+
+// OpenCode fix: like codex, opencode is an agentic tool that edits files
+// directly on disk. Same prompt, `--auto` to approve file edits without an
+// interactive approval loop, and git diff to count what changed rather than
+// parsing edit blocks. No skill broker yet — skills integration is a follow-up.
+export async function runOpenCodeFixStep(
+  tmpDir: string,
+  baseRef: string,
+  prTitle: string,
+  reviewComment: string,
+  instructions: string,
+  model: string | undefined = undefined,
+  timeoutMs?: number,
+  _skillSession?: SkillActivationSession,
+  configuredEffort?: string,
+  humanFeedback?: string,
+): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort?: string }> {
+  const effort = opencodeEffort(configuredEffort ?? 'high')
+  let diff = ''
+  try {
+    diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
+  } catch {
+    try {
+      diff = execSync('git diff HEAD~1', { cwd: tmpDir, encoding: 'utf8' })
+    } catch { /* proceed with empty diff */ }
+  }
+
+  const prompt = CODEX_FIX_PROMPT
+    .replace('{PR_TITLE}', prTitle)
+    .replace('{REVIEW_COMMENT}', reviewComment.slice(0, 8000))
+    .replace('{DIFF}', diff.slice(0, 16000))
+    .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', humanFeedback ?? ''].filter(Boolean).join('\n\n'))
+
+  const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
+  // Same as the review path: OpenCode carries reasoning effort as the `#variant`
+  // suffix on `--model provider/model#variant`. Without a pinned model the
+  // variant cannot be sent, so `effort` is honoured only when `model` is set.
+  const modelArgs = model ? ['--model', `${model}#${effort}`] : []
+
+  let tokensUsed: number | undefined
+  try {
+    const result = await withCredentialFreeOrigin(tmpDir, () => {
+      // Hide any OpenCode config the untrusted checkout carries while the agent
+      // runs; restore it after so the fix's git add -A cannot stage the deletion.
+      const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true)
+      return execa(
+        'opencode',
+        ['run', '--format', 'json', '--auto', '--standalone', ...modelArgs],
+        {
+          cwd: tmpDir,
+          timeout: resolvedTimeout,
+          input: prompt,
+          extendEnv: false,
+          env: buildOpenCodeEnv({}),
+        },
+      ).finally(restoreConfig)
+    })
+    tokensUsed = parseOpenCodeOutput(result.stdout ?? '').tokensUsed
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/not logged in|auth|credential/i.test(msg)) {
+      throw new Error('opencode auth failure during fix step — run: opencode auth login')
+    }
+    throw err
+  }
+
+  // Count all files opencode touched: modified/deleted + newly created.
+  const changedOutput = execSync('git diff --name-only', { cwd: tmpDir, encoding: 'utf8' }).trim()
+  const untrackedOutput = execSync('git ls-files --others --exclude-standard', { cwd: tmpDir, encoding: 'utf8' }).trim()
+  const changedFiles = [
+    ...(changedOutput ? changedOutput.split('\n').filter(Boolean) : []),
+    ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
+  ]
+  // Report effort only when a pinned model actually carried the #variant.
+  return { appliedCount: changedFiles.length, changedFiles, tokensUsed, effort: model ? effort : undefined }
 }

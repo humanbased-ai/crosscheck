@@ -97,9 +97,10 @@ You need GitHub CLI plus **at least one** reviewer CLI. Install both only if you
 gh auth login
 npm install -g @anthropic-ai/claude-code && claude       # Claude Pro or Max
 npm install -g @openai/codex && codex login --device-auth # ChatGPT Plus or Pro
+npm install -g @opencode/cli && opencode auth login        # optional third harness (opt-in)
 ```
 
-Both reviewers run on your existing subscription — no API key required.
+Claude Code and Codex run on your existing subscription — no API key required. OpenCode is opt-in and uses whichever provider you configure in `opencode auth login`.
 
 ## First review in two minutes
 
@@ -340,6 +341,7 @@ Deployment mode decides scope: `personal` monitors your own repos and reviews on
 | Node.js | 18+ |
 | Claude Code CLI | `npm install -g @anthropic-ai/claude-code` |
 | Codex CLI | `npm install -g @openai/codex` |
+| OpenCode CLI (optional) | `npm install -g @opencode/cli` |
 | GitHub CLI | 2.65+ — `brew install gh` |
 
 `GITHUB_TOKEN` is derived automatically from `gh auth login`. No manual export needed.
