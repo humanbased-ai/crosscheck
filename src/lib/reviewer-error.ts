@@ -3,10 +3,10 @@
 // caller (watch.ts catch) can skip posting on fix/conflict-resolve/setup
 // failures — those have their own handling.
 //
-// Reviewer errors carry a `claude: ` or `codex: ` message prefix (set by
-// runClaudeReview / runCodexReview when they wrap the underlying execa error)
-// plus optional `timedOut`, `effectiveTimeoutMs`, `retryDelayMs`, `exitCode`,
-// and `stderr` annotations.
+// Reviewer errors carry a `claude: `, `codex: `, or `opencode: ` message prefix
+// (set by the vendor runners when they wrap the underlying execa error) plus
+// optional `timedOut`, `effectiveTimeoutMs`, `retryDelayMs`, `exitCode`, and
+// `stderr` annotations.
 import { isSubscriptionLimitError } from './smart-switch.js'
 import type { ReviewFailedReason } from './comment-bodies.js'
 
@@ -28,10 +28,12 @@ export interface ClassifiedReviewerError {
 
 export function classifyReviewerError(err: unknown): ClassifiedReviewerError | null {
   if (!(err instanceof Error)) return null
-  if (!/^(claude|codex):\s/.test(err.message)) return null
+  if (!/^(claude|codex|opencode):\s/.test(err.message)) return null
 
   const ann = err as Error & ReviewerErrorAnnotations
-  const vendor = err.message.startsWith('claude:') ? 'claude' : 'codex'
+  const vendor = err.message.startsWith('claude:') ? 'claude'
+    : err.message.startsWith('opencode:') ? 'opencode'
+    : 'codex'
 
   if (ann.timedOut === true) {
     const timeoutSec = ann.effectiveTimeoutMs !== undefined
@@ -67,7 +69,9 @@ export function classifyReviewerError(err: unknown): ClassifiedReviewerError | n
   // Auth failure — surface a specific login command rather than a generic message.
   const msgBody = stripVendorPrefix(err.message)
   if (/not logged in|auth failure|authentication required|bad credentials|unauthorized/i.test(msgBody)) {
-    const loginCmd = vendor === 'claude' ? 'claude auth login' : 'codex login'
+    const loginCmd = vendor === 'claude' ? 'claude auth login'
+      : vendor === 'opencode' ? 'opencode auth login'
+      : 'codex login'
     return {
       reason: 'subprocess_error',
       summary: `${vendor} auth expired — run \`${loginCmd}\` on the crosscheck host`,
@@ -96,5 +100,5 @@ export function classifyReviewerError(err: unknown): ClassifiedReviewerError | n
 }
 
 function stripVendorPrefix(msg: string): string {
-  return msg.replace(/^(claude|codex):\s*/, '')
+  return msg.replace(/^(claude|codex|opencode):\s*/, '')
 }

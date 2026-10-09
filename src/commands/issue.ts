@@ -8,6 +8,8 @@ import { execa } from 'execa'
 import { loadConfig } from '../config/loader.js'
 import { buildDiagnoseReport } from './diagnose.js'
 import { selectOptimizeAgent } from './optimize.js'
+import { parseOpenCodeOutput, opencodePolicy } from '../reviewers/opencode.js'
+import { buildOpenCodeEnv } from '../reviewers/opencode-env.js'
 import { sanitizeEntry, loadErrorEntriesForPattern, sanitizeDraftContent } from '../lib/log-analysis.js'
 import type { RawLogEntry } from '../lib/log-analysis.js'
 import { loadIssueQueue, markQueueItemDone } from '../lib/issue-queue.js'
@@ -242,6 +244,37 @@ async function runWithCodex(prompt: string): Promise<string> {
   }
 }
 
+type IssueAgent = 'claude' | 'codex' | 'opencode'
+
+async function runWithOpenCode(prompt: string): Promise<string> {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-issue-'))
+  try {
+    writeFileSync(join(tmpDir, 'ISSUE_PROMPT.md'), prompt)
+    // No host sandbox in OpenCode v2 — deny shell/edits so a prompt-injected
+    // issue run cannot execute commands or mutate files.
+    writeFileSync(join(tmpDir, 'opencode.json'), JSON.stringify(opencodePolicy(false), null, 2))
+    const result = await execa('opencode', [
+      'run', '--format', 'json', '--auto', '--standalone',
+      'Read ISSUE_PROMPT.md and produce a GitHub issue draft. ' +
+      'Output exactly: TITLE: line, then ---, then the markdown body.',
+    ], {
+      cwd: tmpDir,
+      timeout: 180_000,
+      extendEnv: false,
+      env: buildOpenCodeEnv({}),
+    })
+    return parseOpenCodeOutput(result.stdout ?? '').review.trim()
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+function runIssueAgent(agent: IssueAgent, prompt: string): Promise<string> {
+  if (agent === 'claude') return runWithClaude(prompt)
+  if (agent === 'opencode') return runWithOpenCode(prompt)
+  return runWithCodex(prompt)
+}
+
 function printDraft(title: string, body: string): void {
   const width = Math.min(process.stdout.columns ?? 80, 80)
   const bar = '─'.repeat(width)
@@ -284,7 +317,7 @@ function buildQueueItemPrompt(record: IssueQueueRecord, mode: string): string {
 
 async function processQueueItem(
   item: { path: string; record: IssueQueueRecord },
-  candidates: Array<'claude' | 'codex'>,
+  candidates: IssueAgent[],
   opts: { dryRun?: boolean; yes?: boolean; mode: string },
 ): Promise<void> {
   const { record } = item
@@ -297,13 +330,11 @@ async function processQueueItem(
   let agentOutput: string | undefined
 
   for (let i = 0; i < candidates.length; i++) {
-    const agent = candidates[i] as 'claude' | 'codex'
+    const agent = candidates[i] as IssueAgent
     const reason = i === 0 ? 'primary' : `fallback — ${candidates[i - 1]} failed`
     console.log(chalk.dim(`  drafting with ${agent} (${reason})...`))
     try {
-      agentOutput = agent === 'claude'
-        ? await runWithClaude(prompt)
-        : await runWithCodex(prompt)
+      agentOutput = await runIssueAgent(agent, prompt)
       break
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -365,14 +396,14 @@ export async function runIssue(opts: {
     console.log(chalk.bold(`\n  Processing ${queue.length} queued issue record${queue.length !== 1 ? 's' : ''}...\n`))
 
     const config = loadConfig(opts.config)
-    const candidates: Array<'claude' | 'codex'> = []
+    const candidates: IssueAgent[] = []
     try {
       const sel = selectOptimizeAgent(config, buildDiagnoseReport(since, LOG_DIR))
       candidates.push(sel.agent)
     } catch {
       candidates.push('claude')
     }
-    const fallback = (['claude', 'codex'] as const).find(v => !candidates.includes(v) && config.vendors[v].enabled)
+    const fallback = (['claude', 'codex', 'opencode'] as const).find(v => !candidates.includes(v) && config.vendors[v].enabled)
     if (fallback) candidates.push(fallback)
 
     for (const item of queue) {
@@ -407,27 +438,25 @@ export async function runIssue(opts: {
 
     const prompt = buildOpportunityPrompt(harness, allEntries, days, config.mode)
 
-    const candidates: Array<'claude' | 'codex'> = []
+    const candidates: IssueAgent[] = []
     try {
       const sel = selectOptimizeAgent(config, buildDiagnoseReport(since, LOG_DIR))
       candidates.push(sel.agent)
     } catch {
       candidates.push('claude')
     }
-    const fallback = (['claude', 'codex'] as const).find(
+    const fallback = (['claude', 'codex', 'opencode'] as const).find(
       v => !candidates.includes(v) && config.vendors[v].enabled,
     )
     if (fallback) candidates.push(fallback)
 
     let agentOutput: string | undefined
     for (let i = 0; i < candidates.length; i++) {
-      const agent = candidates[i] as 'claude' | 'codex'
+      const agent = candidates[i] as IssueAgent
       const reason = i === 0 ? 'selected by optimize logic' : `fallback — ${candidates[i - 1]} failed`
       console.log(chalk.dim(`  analyzing with ${agent} (${reason})...`))
       try {
-        agentOutput = agent === 'claude'
-          ? await runWithClaude(prompt)
-          : await runWithCodex(prompt)
+        agentOutput = await runIssueAgent(agent, prompt)
         break
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -508,7 +537,7 @@ export async function runIssue(opts: {
   )
 
   // 4. Select agents — primary first, then other enabled vendor as fallback
-  const candidates: Array<'claude' | 'codex'> = []
+  const candidates: IssueAgent[] = []
   let primaryReason = 'default'
   try {
     const sel = selectOptimizeAgent(config, report)
@@ -517,7 +546,7 @@ export async function runIssue(opts: {
   } catch {
     candidates.push('claude')
   }
-  const fallbackVendor = (['claude', 'codex'] as const).find(
+  const fallbackVendor = (['claude', 'codex', 'opencode'] as const).find(
     v => !candidates.includes(v) && config.vendors[v].enabled,
   )
   if (fallbackVendor) candidates.push(fallbackVendor)
@@ -534,13 +563,11 @@ export async function runIssue(opts: {
 
   let agentOutput: string | undefined
   for (let i = 0; i < candidates.length; i++) {
-    const agent = candidates[i] as 'claude' | 'codex'
+    const agent = candidates[i] as IssueAgent
     const reason = i === 0 ? primaryReason : `fallback — ${candidates[i - 1]} failed`
     console.log(chalk.dim(`  drafting issue with ${agent} (${reason})...`))
     try {
-      agentOutput = agent === 'claude'
-        ? await runWithClaude(prompt)
-        : await runWithCodex(prompt)
+      agentOutput = await runIssueAgent(agent, prompt)
       break
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -695,25 +722,23 @@ export async function runIssueFromWatchIdle(opts: {
 
   const prompt = buildOpportunityPrompt(harness, allEntries, days, config.mode)
 
-  const candidates: Array<'claude' | 'codex'> = []
+  const candidates: IssueAgent[] = []
   try {
     const sel = selectOptimizeAgent(config, buildDiagnoseReport(since, LOG_DIR))
     candidates.push(sel.agent)
   } catch {
     candidates.push('claude')
   }
-  const fallback = (['claude', 'codex'] as const).find(v => !candidates.includes(v) && config.vendors[v].enabled)
+  const fallback = (['claude', 'codex', 'opencode'] as const).find(v => !candidates.includes(v) && config.vendors[v].enabled)
   if (fallback) candidates.push(fallback)
 
   let agentOutput: string | undefined
   for (let i = 0; i < candidates.length; i++) {
-    const agent = candidates[i] as 'claude' | 'codex'
+    const agent = candidates[i] as IssueAgent
     const reason = i === 0 ? 'selected by optimize logic' : `fallback — ${candidates[i - 1]} failed`
     console.log(chalk.dim(`  Analyzing with ${agent} (${reason})...`))
     try {
-      agentOutput = agent === 'claude'
-        ? await runWithClaude(prompt)
-        : await runWithCodex(prompt)
+      agentOutput = await runIssueAgent(agent, prompt)
       break
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

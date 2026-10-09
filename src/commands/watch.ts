@@ -34,6 +34,7 @@ import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
+import type { Vendor } from '../lib/vendor.js'
 import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
 import { fetchStepHistoryWithRetry, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
@@ -116,13 +117,14 @@ export async function runWithConcurrency(
   await Promise.all(workers)
 }
 
-function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
+function buildFallbackConfig(config: Config, fallbackVendor: Vendor): Config {
   return {
     ...config,
     mode: 'single-vendor',
     vendors: {
       codex: { ...config.vendors.codex, enabled: fallbackVendor === 'codex' },
       claude: { ...config.vendors.claude, enabled: fallbackVendor === 'claude' },
+      opencode: { ...config.vendors.opencode, enabled: fallbackVendor === 'opencode' },
     },
   }
 }
@@ -735,7 +737,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
           onVendorFailure: (failedVendor, fallbackVendor, reason) => {
             if (config.mode === 'cross-vendor' && fallbackVendor !== null && !getSmartSwitch().active) {
-              triggerSwitch(failedVendor, reason, bLog)
+              triggerSwitch(failedVendor, reason, bLog, fallbackVendor)
             }
           },
           ...(workflowStepsForRun !== undefined && { steps: workflowStepsForRun }),
@@ -875,7 +877,10 @@ export async function runWatch(opts: WatchOpts = {}) {
         // degrade to single-vendor with the healthy vendor for the next 30 minutes.
         if (config.mode === 'cross-vendor' && !getSmartSwitch().active && isVendorFailoverError(err)) {
           const failedVendor = detectFailedVendor(err)
-          if (failedVendor) triggerSwitch(failedVendor, message, bLog)
+          if (failedVendor) {
+            const fallback = (['claude', 'codex', 'opencode'] as const).find(v => v !== failedVendor && config.vendors[v].enabled) ?? null
+            triggerSwitch(failedVendor, message, bLog, fallback)
+          }
         }
       } finally {
         releasePRLock(owner, repoName, prNumber, params.headSha)

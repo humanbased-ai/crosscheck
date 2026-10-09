@@ -31,8 +31,10 @@ export interface AttributionFooterInput {
 export function buildAttributionFooter(input: AttributionFooterInput): string {
   // Same name the commit subjects credit, from the same helper — a card and the
   // commit it describes must not disagree about who did the work.
-  const vendor = input.vendor === 'codex' ? 'codex' : 'claude'
-  const vendorUrl = vendor === 'codex' ? 'https://openai.com/codex' : 'https://claude.ai/code'
+  const vendor = input.vendor === 'codex' ? 'codex' : input.vendor === 'opencode' ? 'opencode' : 'claude'
+  const vendorUrl = vendor === 'codex' ? 'https://openai.com/codex'
+    : vendor === 'opencode' ? 'https://opencode.ai'
+    : 'https://claude.ai/code'
   const vendorLink = `[${vendorDisplayName(vendor)}](${vendorUrl})`
   const sentence = input.override
     || `_${input.action} with ${vendorLink} via [Crosscheck](${CROSSCHECK_REPO_URL})_`

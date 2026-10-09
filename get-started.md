@@ -37,7 +37,7 @@
 
 ## Prerequisites
 
-You need GitHub CLI and at least one authenticated AI reviewer CLI before crosscheck can run a one-shot review. Install both Claude Code and Codex only if you want cross-vendor review routing.
+You need GitHub CLI and at least one authenticated AI reviewer CLI before crosscheck can run a one-shot review. Install both Claude Code and Codex only if you want cross-vendor review routing. OpenCode is an optional third harness, disabled by default.
 
 ### Claude Code
 
@@ -64,6 +64,15 @@ printenv OPENAI_API_KEY | codex login --with-api-key
 ```
 
 Then set `auth: api-key` in your config to enable model selection.
+
+### OpenCode
+
+```bash
+npm install -g @opencode/cli
+opencode auth login   # sign in to a provider (e.g. DeepSeek, Anthropic, OpenAI)
+```
+
+OpenCode is **opt-in**: enable it with `vendors.opencode.enabled: true` (or `crosscheck onboard`). Its model and provider come from your OpenCode config (`opencode auth login` / `opencode.json`) — crosscheck pins no model by default, so reviews run against whichever model OpenCode is configured to use. Reasoning effort is carried as the `#variant` suffix on `--model provider/model#variant`, so `vendors.opencode.effort` (none | high | max) applies only when `vendors.opencode.model` is also set.
 
 ### GitHub CLI
 
@@ -794,6 +803,7 @@ crosscheck status
   Auth
   ✓ codex                  authenticated
   ✓ claude                 2.1.x (Claude Code)
+  ✓ opencode               v2.x
   ✓ GITHUB_TOKEN           via gh auth login
   ✓ WEBHOOK_SECRET         auto-managed at ~/.crosscheck/webhook-secret
 
@@ -804,6 +814,8 @@ crosscheck status
     enabled skills         code-review-skill (by @awesome-skills, MIT), diagnosing-bugs (by @mattpocock, MIT)
     codex auth             subscription
     claude model           sonnet
+    opencode enabled       false
+    opencode model         configured in opencode.json
     per-review budget      $2.00/review
 
   Impact
@@ -817,6 +829,7 @@ crosscheck status
   CLIs
     codex                  codex-cli 0.128.0
     claude                 2.1.x (Claude Code)
+    opencode               v2.x
 ```
 
 | Flag | Description |
@@ -1192,8 +1205,8 @@ vendors:
   codex:
     enabled: true
     auth: subscription      # subscription | api-key
-    model: gpt-5.6-terra    # pins the review model; unset = tier model (api-key) / CLI default (subscription)
-    effort: medium          # low | medium | high | xhigh | max | ultra (ultra: terra/sol only)
+    model: gpt-6.1-sol      # pins the review model; unset = tier model (api-key) / CLI default (subscription)
+    effort: medium          # low | medium | high | xhigh | max | ultra
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
@@ -1201,6 +1214,16 @@ vendors:
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
+
+  # Opt-in third harness; disabled by default. Its model/provider come from
+  # `opencode auth login` / opencode.json, not from a crosscheck catalog.
+  # Reasoning effort rides the `--model provider/model#variant` suffix, so
+  # `effort` applies only when `model` is also set.
+  opencode:
+    enabled: false
+    # model: provider/model   # e.g. alibaba-cn/deepseek-v4-pro; unset = opencode.json default
+    effort: high              # none | high | max
+    # timeout_sec: 1200       # max seconds per CLI call; unset = tier-based (300/600/1200)
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:
@@ -1285,12 +1308,18 @@ routing:
   claude_reviews_patterns:
     - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
     - "Co-Authored-By: codex"               # commit trailer
+  opencode_reviews_patterns:
+    - "Generated with \\[OpenCode\\]"       # OpenCode attribution footer
+    - "Co-Authored-By: opencode"            # commit trailer
 
-  # Branch prefix detection (signal 3). Claude Code uses claude/, Codex uses codex/.
+  # Branch prefix detection (signal 3). Claude Code uses claude/, Codex uses
+  # codex/, OpenCode uses opencode/.
   claude_branch_prefixes:
     - "claude/"
   codex_branch_prefixes:
     - "codex/"
+  opencode_branch_prefixes:
+    - "opencode/"
 
   # Restrict reviews to PRs opened by these GitHub logins.
   # Auto-filled with your GitHub login by `crosscheck init` or first `crosscheck watch`.
@@ -1303,6 +1332,11 @@ routing:
   # the attribution footer (e.g. when creating PRs via gh CLI directly).
   author_routes:
     your-github-login: claude   # your PRs → treated as Claude-authored → Codex reviews
+
+  # Reviewer for PRs crosscheck cannot attribute (origin: human). 'auto' = the
+  # first authenticated vendor (codex, then claude, then opencode); an explicit
+  # 'codex' | 'claude' | 'opencode' always uses that vendor; null = skip the PR.
+  fallback_reviewer: auto
 
 # ── Tunnel (watch mode only) ──────────────────────────────────────────────────
 # localhost.run (default) — SSH tunnel, zero install, URL changes on reconnect.

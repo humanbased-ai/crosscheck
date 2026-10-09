@@ -8,6 +8,12 @@ import { z } from 'zod'
 // silently degrades to the `medium` fallback in claudeEffort/codexReasoningEffort.
 export const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'max'] as const
 export const CODEX_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
+// OpenCode's reasoning-effort ladder is the `#variant` suffix on
+// `--model provider/model#variant`. Variants are provider-defined, not one
+// global ladder like claude/codex: the opencode models crosscheck ships policy
+// for (deepseek-v4-*) expose none / high / max — there is no `low` or `medium`.
+// A crosscheck effort of low/medium clamps down to `none` via clampToLevels.
+export const OPENCODE_EFFORT_LEVELS = ['none', 'high', 'max'] as const
 
 export const VendorConfigSchema = z.object({
   enabled: z.boolean().default(true),
@@ -32,12 +38,26 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   // Optional per-tier model overrides, honored under both auth modes. When unset:
   // api-key auth falls back to the built-in tier mapping, subscription auth lets
   // the Codex CLI pick its default model.
-  // Example: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol' }
+  // Example: { fast: 'gpt-6-luna', balanced: 'gpt-6.1-sol', thorough: 'gpt-6-astra' }
   model_tiers: z.object({
     fast: z.string().optional(),
     balanced: z.string().optional(),
     thorough: z.string().optional(),
   }).optional(),
+})
+
+// OpenCode vendor config. OpenCode has no `medium` effort (its `--model
+// provider/model#variant` suffix accepts none/low/high/max), so this extends the
+// shared schema and narrows `effort` to that vocabulary. Auth is always via the
+// local OpenCode background service (`opencode auth login`), so `auth` from the
+// shared schema is not meaningful here and stays at its default.
+//
+// `enabled` defaults to false (IN-6033): OpenCode is opt-in — an existing
+// install must not start routing reviews to it until the operator enables it,
+// matching the issue's "disabled-by-default for OpenCode" requirement.
+export const OpenCodeVendorConfigSchema = VendorConfigSchema.extend({
+  enabled: z.boolean().default(false),
+  effort: z.enum(OPENCODE_EFFORT_LEVELS).default('high'),
 })
 
 export const QualityConfigSchema = z.object({
@@ -137,11 +157,16 @@ export const RoutingConfigSchema = z.object({
     'Generated with \\[OpenAI Codex\\]', // PR body attribution footer
     'Co-Authored-By: codex',             // commit trailer added by Codex
   ]),
+  opencode_reviews_patterns: z.array(z.string()).default([
+    'Generated with \\[OpenCode\\]',     // PR body attribution footer
+    'Co-Authored-By: opencode',          // commit trailer added by OpenCode
+  ]),
   // Branch prefix routing — checked when body and commit patterns don't match.
   // Agents should branch with these prefixes so crosscheck can identify origin
   // even without attribution text in the PR body.
   claude_branch_prefixes: z.array(z.string()).default(['claude/']),
   codex_branch_prefixes: z.array(z.string()).default(['codex/']),
+  opencode_branch_prefixes: z.array(z.string()).default(['opencode/']),
   // Only review PRs opened by these GitHub logins.
   // Empty list = no restriction (reviews all AI-authored PRs in cross-vendor mode,
   // or all PRs in single-vendor mode). Recommended: set to the logins of your AI agents.
@@ -155,12 +180,12 @@ export const RoutingConfigSchema = z.object({
   // and detection falls through to `fallback_reviewer` instead. A static author→vendor
   // map would silently mis-route PRs when the author switches between agents — set
   // `fallback_reviewer` to handle this case explicitly.
-  author_routes: z.record(z.enum(['claude', 'codex'])).default({}),
+  author_routes: z.record(z.enum(['claude', 'codex', 'opencode'])).default({}),
   // When origin detection cannot determine a vendor (origin: human), use this reviewer
   // instead of skipping the PR.
   // 'auto' = pick whichever vendor is currently enabled (codex first, then claude).
   // null   = skip the PR (legacy behaviour, cross-vendor mode only).
-  fallback_reviewer: z.enum(['auto', 'codex', 'claude']).nullable().default('auto'),
+  fallback_reviewer: z.enum(['auto', 'codex', 'claude', 'opencode']).nullable().default('auto'),
 })
 
 export const ServerConfigSchema = z.object({
@@ -363,6 +388,7 @@ export const ConfigSchema = z.object({
   vendors: z.object({
     codex: CodexVendorConfigSchema.default({}),
     claude: VendorConfigSchema.default({}),
+    opencode: OpenCodeVendorConfigSchema.default({}),
   }).default({}),
   quality: QualityConfigSchema.default({}),
   skills: SkillsConfigSchema.default({}),
@@ -388,6 +414,7 @@ export type Config = z.infer<typeof ConfigSchema>
 export type BrandConfig = z.infer<typeof BrandConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
 export type CodexVendorConfig = z.infer<typeof CodexVendorConfigSchema>
+export type OpenCodeVendorConfig = z.infer<typeof OpenCodeVendorConfigSchema>
 export type QualityConfig = z.infer<typeof QualityConfigSchema>
 export type SkillsConfig = z.infer<typeof SkillsConfigSchema>
 export type LogsConfig = z.infer<typeof LogsConfigSchema>

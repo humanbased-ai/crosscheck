@@ -1,10 +1,11 @@
 import { log as fileLog } from './logger.js'
+import type { Vendor } from './vendor.js'
 
 export interface SmartSwitchState {
   /** true = cross-vendor degraded; all PRs route to fallbackVendor */
   active: boolean
-  degradedVendor: 'claude' | 'codex' | null
-  fallbackVendor: 'claude' | 'codex' | null
+  degradedVendor: Vendor | null
+  fallbackVendor: Vendor | null
   reason: string
   since: Date | null
   restoreAttemptCount: number
@@ -12,7 +13,7 @@ export interface SmartSwitchState {
    * Set after _attemptRestore fires. Tracks which vendor needs to succeed at
    * a real review before we announce confirmed restoration.
    */
-  pendingRecoveryVendor: 'claude' | 'codex' | null
+  pendingRecoveryVendor: Vendor | null
 }
 
 export type SmartSwitchAnnounce = (line1: string, line2?: string) => void
@@ -135,10 +136,11 @@ export function classifyVendorFailure(err: unknown): VendorFailureKind | null {
  * Inspects the error message prefix emitted by runClaudeReview / runCodexReview
  * to determine which vendor threw.
  */
-export function detectFailedVendor(err: unknown): 'claude' | 'codex' | null {
+export function detectFailedVendor(err: unknown): Vendor | null {
   const msg = err instanceof Error ? err.message : String(err)
   if (/^claude:/i.test(msg)) return 'claude'
   if (/^codex:/i.test(msg)) return 'codex'
+  if (/^opencode:/i.test(msg)) return 'opencode'
   return null
 }
 
@@ -150,9 +152,14 @@ export function detectFailedVendor(err: unknown): 'claude' | 'codex' | null {
  * double-announcing.
  */
 export function triggerSwitch(
-  degradedVendor: 'claude' | 'codex',
+  degradedVendor: Vendor,
   reason: string,
   announce: SmartSwitchAnnounce,
+  // The fallback the runner actually selected (enabled and able to run the
+  // step). Callers with no computed fallback omit it and the historical
+  // claude<->codex default applies. Without this the switch hard-coded
+  // OpenCode -> Claude and ignored the enabled fallback the runner had chosen.
+  selectedFallback?: Vendor | null,
 ): void {
   if (_state.active && _state.degradedVendor === degradedVendor) {
     // Vendor is still down — reset the restore clock
@@ -160,7 +167,7 @@ export function triggerSwitch(
     return
   }
 
-  const fallbackVendor: 'claude' | 'codex' = degradedVendor === 'claude' ? 'codex' : 'claude'
+  const fallbackVendor: Vendor = selectedFallback ?? (degradedVendor === 'claude' ? 'codex' : 'claude')
   // Carry over attempt count if this is a re-trigger after a failed restore attempt
   const prevAttempts =
     _state.degradedVendor === degradedVendor || _state.pendingRecoveryVendor === degradedVendor
@@ -209,7 +216,7 @@ export function triggerSwitch(
  * Call after every successful review. When a restore attempt is pending and this
  * reviewer matches the recovering vendor, announces confirmed restoration.
  */
-export function notifyReviewSuccess(reviewer: 'claude' | 'codex', announce: SmartSwitchAnnounce): void {
+export function notifyReviewSuccess(reviewer: Vendor, announce: SmartSwitchAnnounce): void {
   if (_state.pendingRecoveryVendor !== reviewer) return
   const recovered = _state.pendingRecoveryVendor
   _state = { ..._state, pendingRecoveryVendor: null, restoreAttemptCount: 0 }

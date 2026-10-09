@@ -409,10 +409,11 @@ describe('buildWorkflowCompleteEvent', () => {
 
 describe('resolveFixVendor', () => {
    
-  const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
+  const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | 'opencode' | null = 'auto', opencodeEnabled = false) => ({
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
+      opencode: { enabled: opencodeEnabled },
     },
     routing: { fallback_reviewer: fallbackReviewer },
     // Partial fixture: these resolvers read only vendors.* and routing.*, and
@@ -482,10 +483,11 @@ describe('resolveFixVendor', () => {
 
 describe('resolveConflictResolveVendor', () => {
    
-  const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
+  const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | 'opencode' | null = 'auto', opencodeEnabled = false) => ({
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
+      opencode: { enabled: opencodeEnabled },
     },
     routing: { fallback_reviewer: fallbackReviewer },
     // Partial fixture: these resolvers read only vendors.* and routing.*, and
@@ -572,6 +574,16 @@ describe('resolveConflictResolveVendor', () => {
     it('codex origin with claude disabled: no capable vendor, stays codex so the caller reports the precise skip', () => {
       expect(resolveConflictResolveVendor('origin', 'codex', cfg(false, true)))
         .toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+
+    it('opencode origin substitutes claude — opencode cannot resolve conflicts', () => {
+      expect(resolveConflictResolveVendor('origin', 'opencode', cfg(true, true, 'auto', true)))
+        .toEqual({ vendor: 'claude', usedHumanFallback: false, substitutedOriginVendor: 'opencode' })
+    })
+
+    it('opencode origin with claude disabled: no capable vendor, stays opencode so the caller reports the precise skip', () => {
+      expect(resolveConflictResolveVendor('origin', 'opencode', cfg(false, true, 'auto', true)))
+        .toEqual({ vendor: 'opencode', usedHumanFallback: false })
     })
   })
 

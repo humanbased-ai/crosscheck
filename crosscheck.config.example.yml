@@ -28,9 +28,9 @@ repository_cache: true
 vendors:
   codex:
     enabled: true
-    model: gpt-5.6-terra    # gpt-5.6-luna | gpt-5.6-terra | gpt-5.6-sol; unset = tier model (api-key) / CLI default (subscription)
+    model: gpt-6.1-sol      # gpt-6-luna | gpt-6.1-sol | gpt-6-astra; unset = tier model (api-key) / CLI default (subscription)
     auth: subscription      # subscription (device-auth OAuth) | api-key
-    effort: medium          # low | medium | high | xhigh | max | ultra (ultra: terra/sol only)
+    effort: medium          # low | medium | high | xhigh | max | ultra
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
@@ -38,6 +38,16 @@ vendors:
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
     # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
+
+  # OpenCode is opt-in (disabled by default). It runs with the model and provider
+  # you configure in `opencode auth login` / opencode.json; pin `model` here only
+  # to override it. Reasoning effort is OpenCode's `--model provider/model#variant`
+  # suffix, so `effort` (none | high | max) is honored only when `model` is set.
+  opencode:
+    enabled: false
+    # model: provider/model   # e.g. alibaba-cn/deepseek-v4-pro; unset = opencode.json default
+    effort: high              # none | high | max (applied as the #variant suffix when model is set)
+    # timeout_sec: 1200       # max seconds per CLI call; unset = tier-based (300/600/1200)
 
 # ─── Quality & Focus ─────────────────────────────────────────────────────────
 quality:
@@ -170,6 +180,7 @@ routing:
   # footer requirement when an author consistently uses a single agent.
   #   beingzy: claude    → PRs from beingzy treated as Claude-authored → Codex reviews them
   #   my-bot: codex      → PRs from my-bot treated as Codex-authored → Claude reviews them
+  #   my-oc-bot: opencode → PRs from my-oc-bot treated as OpenCode-authored → Claude reviews them
   # NOTE: in `mode: cross-vendor` with BOTH vendors enabled, this map is bypassed —
   # if the same author commits via both agents, a static route is structurally wrong.
   # In that case, rely on attribution detection (body / commits / branch) and
@@ -178,8 +189,8 @@ routing:
   #   beingzy: claude
 
   # Fallback reviewer when origin cannot be determined (no pattern/branch/route matched).
-  # 'auto'  = pick whichever vendor is currently authenticated (codex first, then claude).
-  # 'codex' / 'claude' = always use that vendor.
+  # 'auto'  = pick whichever vendor is currently authenticated (codex first, then claude, then opencode).
+  # 'codex' / 'claude' / 'opencode' = always use that vendor.
   # null    = skip the PR (legacy cross-vendor behaviour).
   fallback_reviewer: auto
 
@@ -190,6 +201,8 @@ routing:
     - "claude/"
   codex_branch_prefixes:
     - "codex/"
+  opencode_branch_prefixes:
+    - "opencode/"
 
   # Body and commit pattern matching — checked first, before branch prefix.
   # Patterns are matched against both the PR body and commit messages (Co-Authored-By trailers).
@@ -208,6 +221,9 @@ routing:
   claude_reviews_patterns:
     - "Generated with \\[OpenAI Codex\\]"   # PR body attribution footer
     - "Co-Authored-By: codex"               # commit trailer added by Codex
+  opencode_reviews_patterns:
+    - "Generated with \\[OpenCode\\]"       # PR body attribution footer
+    - "Co-Authored-By: opencode"            # commit trailer added by OpenCode
 
 # ─── Tunnel (watch mode only) ────────────────────────────────────────────────
 # Controls how crosscheck watch receives GitHub webhook events on your laptop.

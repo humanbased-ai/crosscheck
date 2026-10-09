@@ -1,6 +1,6 @@
 import { createRequire } from 'module'
 import { z } from 'zod'
-import type { CodexVendorConfig, QualityConfig, VendorConfig } from '../config/schema.js'
+import type { CodexVendorConfig, OpenCodeVendorConfig, QualityConfig, VendorConfig } from '../config/schema.js'
 
 const require = createRequire(import.meta.url)
 
@@ -62,6 +62,19 @@ export function resolveCodexModel(
   if (explicit) return explicit
   if (vendor.auth !== 'api-key') return 'default'
   return CODEX_TIER_MODELS_API[tier] || CODEX_TIER_MODELS_API.balanced
+}
+
+// OpenCode's model is user-configured in opencode.json, not a vendor catalog
+// crosscheck ships. So there is no built-in tier mapping: crosscheck only pins
+// a model when `vendors.opencode.model` is set, and otherwise leaves the choice
+// to the OpenCode CLI (which reads the user's configured default). Tier drives
+// effort — the `--model provider/model#variant` suffix — in opencodeEffort.
+export function resolveOpenCodeModel(
+  _quality: QualityConfig,
+  vendor: OpenCodeVendorConfig,
+  _strategy?: { tier: QualityConfig['tier'] | null } | null,
+): string | undefined {
+  return vendor?.model ?? undefined
 }
 
 // Derives a display name from the regular claude model ID shape:

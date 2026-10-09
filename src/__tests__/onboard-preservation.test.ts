@@ -11,7 +11,7 @@ const BASE_DECISIONS: OnboardDecisions = {
   login: 'alice',
   selectedRepos: ['alice/myapp'],
   selectedOrgs: [],
-  vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true },
+  vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true, opencodeEnabled: false },
   authorVendor: 'claude',
   qualityTier: 'balanced',
   qualityMode: 'smart' as const,
@@ -75,6 +75,32 @@ describe('applyOnboardConfig — first run', () => {
     expect(routing.fallback_reviewer).toBe('auto')
   })
 
+  it('writes vendors.opencode.enabled from the vendor decision', () => {
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true, opencodeEnabled: true },
+    }, workflowDir)
+
+    const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
+    expect(vendors.opencode.enabled).toBe(true)
+  })
+
+  it('writes claude/codex disabled for the opencode-only path', () => {
+    // The neither-Claude-nor-Codex onboarding branch runs single-vendor with
+    // claude/codex disabled, so `reviewer: auto` cannot pick an unavailable Codex.
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      vendorConfig: { mode: 'single-vendor', claudeEnabled: false, codexEnabled: false, opencodeEnabled: true },
+    }, workflowDir)
+
+    const cfg = readConfig()
+    const vendors = cfg.vendors as Record<string, Record<string, unknown>>
+    expect(vendors.claude.enabled).toBe(false)
+    expect(vendors.codex.enabled).toBe(false)
+    expect(vendors.opencode.enabled).toBe(true)
+    expect(cfg.mode).toBe('single-vendor')
+  })
+
   it('pins the codex model under fixed mode', () => {
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityTier: 'thorough', qualityMode: 'fixed' }, workflowDir)
 
@@ -86,7 +112,7 @@ describe('applyOnboardConfig — first run', () => {
     expect(vendors.claude.model).toBeUndefined()
     expect(vendors.claude.effort).toBe('max')
     // One model on every PR is exactly what `fixed` means.
-    expect(vendors.codex.model).toBe('gpt-5.6-sol')
+    expect(vendors.codex.model).toBe('gpt-6-astra')
   })
 
   it('pins no vendor model under smart mode', () => {
@@ -112,12 +138,12 @@ describe('applyOnboardConfig — first run', () => {
     // and smart mode is a no-op for codex.
     const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
     expect(vendors.codex.model_tiers).toEqual({
-      fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol',
+      fast: 'gpt-6-luna', balanced: 'gpt-6.1-sol', thorough: 'gpt-6-astra',
     })
   })
 
   it('clears a model pinned by an earlier fixed-mode run when switching to smart', () => {
-    writeFileSync(configPath, yaml.dump({ vendors: { codex: { model: 'gpt-5.6-terra' } } }))
+    writeFileSync(configPath, yaml.dump({ vendors: { codex: { model: 'gpt-6.1-sol' } } }))
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityMode: 'smart' }, workflowDir)
 
     const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
@@ -222,7 +248,7 @@ describe('applyOnboardConfig — authorVendor routing', () => {
     }))
     applyOnboardConfig(configPath, {
       ...BASE_DECISIONS,
-      vendorConfig: { mode: 'single-vendor', claudeEnabled: true, codexEnabled: false },
+      vendorConfig: { mode: 'single-vendor', claudeEnabled: true, codexEnabled: false, opencodeEnabled: false },
       authorVendor: 'both',  // default when step is skipped
     }, workflowDir)
     const routing = (readConfig().routing as Record<string, unknown>)

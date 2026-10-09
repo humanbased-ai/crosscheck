@@ -2,8 +2,9 @@ import type { Config } from '../config/schema.js'
 import { getPRCommits } from './client.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
+import { checkOpenCodeAuth } from '../reviewers/opencode.js'
 
-export type PROrigin = 'claude' | 'codex' | 'human'
+export type PROrigin = 'claude' | 'codex' | 'opencode' | 'human'
 
 // Crosscheck's own attribution on work crosscheck wrote. Not part of
 // routing.*_reviews_patterns on purpose: Zod defaults apply only when a field is
@@ -20,11 +21,13 @@ const SELF_AUTHORED_PATTERNS: ReadonlyArray<{ pattern: RegExp; origin: PROrigin 
   // Fix-PR body footer — buildAttributionFooter({ action: 'Fixed', ... }).
   { pattern: /Fixed with \[Claude Code\]/i, origin: 'claude' },
   { pattern: /Fixed with \[OpenAI Codex\]/i, origin: 'codex' },
+  { pattern: /Fixed with \[OpenCode\]/i, origin: 'opencode' },
   // Commit trailer — buildCommitTrailers on fix and conflict-resolve commits.
   // Anchored to its own line: the field name is quoted in prose (this repo's
   // changelog and docs do it), and prose is not a trailer.
   { pattern: /^Crosscheck-Reviewer:[^\S\n]*claude[^\S\n]*$/im, origin: 'claude' },
   { pattern: /^Crosscheck-Reviewer:[^\S\n]*codex[^\S\n]*$/im, origin: 'codex' },
+  { pattern: /^Crosscheck-Reviewer:[^\S\n]*opencode[^\S\n]*$/im, origin: 'opencode' },
 ]
 
 // Applies codex_reviews_patterns / claude_reviews_patterns against a single text
@@ -37,6 +40,9 @@ function matchPatterns(text: string, config: Config): PROrigin | null {
   }
   for (const pattern of config.routing.claude_reviews_patterns) {
     if (new RegExp(pattern, 'i').test(text)) return 'codex'
+  }
+  for (const pattern of config.routing.opencode_reviews_patterns) {
+    if (new RegExp(pattern, 'i').test(text)) return 'opencode'
   }
   for (const { pattern, origin } of SELF_AUTHORED_PATTERNS) {
     if (pattern.test(text)) return origin
@@ -65,6 +71,9 @@ export function detectOriginFromBranch(headRef: string, config: Config): PROrigi
   }
   for (const prefix of config.routing.codex_branch_prefixes) {
     if (headRef.startsWith(prefix)) return 'codex'
+  }
+  for (const prefix of config.routing.opencode_branch_prefixes) {
+    if (headRef.startsWith(prefix)) return 'opencode'
   }
   return null
 }
@@ -103,14 +112,16 @@ export async function detectOriginFull(
   if (fromBranch !== null) return { origin: fromBranch, method: 'branch' }
 
   if (author && config.routing.author_routes[author]) {
-    const bothEnabled = config.mode === 'cross-vendor'
-      && config.vendors.claude.enabled
-      && config.vendors.codex.enabled
-    if (!bothEnabled) {
+    // Any two vendors enabled in cross-vendor mode defeat a static author→vendor
+    // map (the author may write via either), not just the claude+codex pair.
+    const enabledVendors = [config.vendors.claude, config.vendors.codex, config.vendors.opencode]
+      .filter(v => v.enabled).length
+    const bypassed = config.mode === 'cross-vendor' && enabledVendors >= 2
+    if (!bypassed) {
       return { origin: config.routing.author_routes[author], method: 'author_routes' }
     }
-    // Cross-vendor with both vendors enabled: log the bypass so users can spot it
-    // in logs without changing reviewer selection silently.
+    // Cross-vendor with multiple vendors enabled: log the bypass so users can spot
+    // it in logs without changing reviewer selection silently.
     return { origin: 'human', method: 'author_routes_bypassed' }
   }
 
@@ -125,27 +136,42 @@ export function detectPROrigin(prBody: string, config: Config, author?: string):
     ?? 'human'
 }
 
-async function resolveFallback(config: Config): Promise<'claude' | 'codex' | null> {
+async function resolveFallback(config: Config): Promise<'claude' | 'codex' | 'opencode' | null> {
   const fb = config.routing.fallback_reviewer
   if (fb === null) return null
   if (fb === 'codex') return config.vendors.codex.enabled ? 'codex' : null
   if (fb === 'claude') return config.vendors.claude.enabled ? 'claude' : null
+  if (fb === 'opencode') return config.vendors.opencode.enabled ? 'opencode' : null
   // 'auto': use runtime capability checks so a Claude-only install doesn't
   // attempt Codex just because both vendors are enabled in config by default.
-  const [codexAuth, claudeAuth] = await Promise.all([checkCodexAuth(), checkClaudeAuth()])
+  // OpenCode is opt-in, so its auth check alone is not enough — a configured
+  // opt-out must never be overridden by an authenticated CLI.
+  const [codexAuth, claudeAuth, opencodeAuth] = await Promise.all([checkCodexAuth(), checkClaudeAuth(), checkOpenCodeAuth()])
   if (codexAuth.ok) return 'codex'
   if (claudeAuth.ok) return 'claude'
+  if (opencodeAuth.ok && config.vendors.opencode.enabled) return 'opencode'
   return null
 }
 
-export async function assignReviewer(origin: PROrigin, config: Config): Promise<'claude' | 'codex' | null> {
+export async function assignReviewer(origin: PROrigin, config: Config): Promise<'claude' | 'codex' | 'opencode' | null> {
   if (config.mode === 'single-vendor') {
     if (config.vendors.codex.enabled) return 'codex'
     if (config.vendors.claude.enabled) return 'claude'
+    if (config.vendors.opencode.enabled) return 'opencode'
     return null
   }
-  if (origin === 'claude' && config.vendors.codex.enabled) return 'codex'
-  if (origin === 'codex' && config.vendors.claude.enabled) return 'claude'
+  if (origin === 'claude') {
+    if (config.vendors.codex.enabled) return 'codex'
+    if (config.vendors.opencode.enabled) return 'opencode'
+  }
+  if (origin === 'codex') {
+    if (config.vendors.claude.enabled) return 'claude'
+    if (config.vendors.opencode.enabled) return 'opencode'
+  }
+  if (origin === 'opencode') {
+    if (config.vendors.claude.enabled) return 'claude'
+    if (config.vendors.codex.enabled) return 'codex'
+  }
   if (origin === 'human') return resolveFallback(config)
   return null
 }
