@@ -29,6 +29,7 @@ import {
   detectGitHubLogin,
   getLinearCredentials,
 } from '../config/loader.js'
+import { reconcileCodexModels } from '../lib/codex-model-fallback.js'
 import { randomFortune } from '../lib/fortune.js'
 import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
@@ -236,6 +237,7 @@ export interface WatchOpts {
 
 export async function runWatch(opts: WatchOpts = {}) {
   const configPath = opts.config
+  reconcileCodexModels(resolveConfigPath(configPath))
   let config = loadConfig(configPath)
   // --port forces the webhook server port for this session only. Overriding
   // config.server.port here propagates to server.listen and both tunnels.

@@ -7,6 +7,7 @@ import { delimiter, join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveCodexModel } from '../lib/review-models.js'
+import { withCodexModelFallback } from '../lib/codex-model-fallback.js'
 import type { ReviewResult } from './claude.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { vendorFailureSummary } from '../lib/vendor-error-summary.js'
@@ -150,7 +151,8 @@ function extractErrorSummary(stderr: string): string | undefined {
   ).at(-1)
 }
 
-export async function runCodexReview(
+async function reviewWithCodexModel(
+  model: string,
   repoDir: string,
   baseBranch: string,
   prTitle: string,
@@ -171,7 +173,6 @@ export async function runCodexReview(
   // so this is what decides whether skills are offered to codex at all.
   codexFullAccess = false,
 ): Promise<ReviewResult> {
-  const model = resolveCodexModel(quality, vendor)
   const tierTimeout = tierTimeoutMs(quality.tier)
   // timeoutMs: 0 → no cap (crazy/halfcrazy); undefined → tier-based default; positive → user-specified
   const resolvedTimeout = timeoutMs === undefined ? tierTimeout : timeoutMs === 0 ? undefined : timeoutMs
@@ -305,6 +306,18 @@ export async function runCodexReview(
   // Should not reach here, but handle the case where all retries were consumed
   if (lastErr) throw lastErr
   throw new Error('codex: unexpected retry loop exit')
+}
+
+type CodexReviewArgs = Parameters<typeof reviewWithCodexModel> extends [string, ...infer Rest] ? Rest : never
+
+export function runCodexReview(...args: CodexReviewArgs): Promise<ReviewResult> {
+  const [, , , quality, vendor, , onLog, , onRetry] = args
+  return withCodexModelFallback(
+    resolveCodexModel(quality, vendor),
+    'review',
+    model => reviewWithCodexModel(model, ...args),
+    onRetry ?? onLog,
+  )
 }
 
 export async function checkCodexAuth(): Promise<{ ok: boolean; detail: string }> {

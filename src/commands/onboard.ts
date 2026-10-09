@@ -19,6 +19,7 @@ import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes } from '../lib/repo-
 import { initLogger, log as fileLog } from '../lib/logger.js'
 import { LogsConfigSchema } from '../config/schema.js'
 import type { Vendor } from '../lib/vendor.js'
+import { CODEX_TIER_MODELS_API, CODEX_TIER_MODELS_SUBSCRIPTION } from '../lib/review-models.js'
 import {
   BUNDLED_SKILL_RECOMMENDATIONS,
   findCompetingSkill,
@@ -730,6 +731,7 @@ export function applyOnboardConfig(
   qualityRaw.tier = qualityTier
   qualityRaw.mode = qualityMode
   const tierCfg = QUALITY_TIERS[qualityTier]
+  const codexTierModels = vendors.codex.auth === 'api-key' ? CODEX_TIER_MODELS_API : CODEX_TIER_MODELS_SUBSCRIPTION
   vendors.claude.effort = tierCfg.claude.effort
   vendors.codex.effort = tierCfg.codex.effort
   if (qualityMode === 'smart') {
@@ -749,13 +751,9 @@ export function applyOnboardConfig(
     // same run. `model_tiers` is honored ahead of the auth check, so writing it
     // is what makes smart mode mean anything for codex. Claude needs no
     // equivalent — its tier map applies under either auth.
-    ;(vendors.codex as Record<string, unknown>).model_tiers = {
-      fast: QUALITY_TIERS.fast.codex.model,
-      balanced: QUALITY_TIERS.balanced.codex.model,
-      thorough: QUALITY_TIERS.thorough.codex.model,
-    }
+    ;(vendors.codex as Record<string, unknown>).model_tiers = { ...codexTierModels }
   } else {
-    vendors.codex.model = tierCfg.codex.model
+    vendors.codex.model = codexTierModels[qualityTier]
   }
 
   // ── Fix delivery mechanism (operational config, not pipeline logic) ──────────

@@ -1,3 +1,4 @@
+import { codexModelRejection, withCodexModelFallback } from '../lib/codex-model-fallback.js'
 import { execSync } from 'child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
@@ -299,23 +300,26 @@ export async function runCodexFixStep(
     .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', humanFeedback ?? '', codexSkillsReachable(skillSession, codexFullAccess) ? renderSkillBrokerInstructions(skillSession) : ''].filter(Boolean).join('\n\n'))
 
   const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
-  const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
 
   try {
-    await withCredentialFreeOrigin(tmpDir, () => execa(
+    await withCodexModelFallback(model, 'fix', usedModel => withCredentialFreeOrigin(tmpDir, () => execa(
       'codex',
       // --ignore-user-config and the env allowlist for the same reason as the
       // review path: this step reads an untrusted diff, and with
       // skills.codex_full_access it runs unsandboxed.
-      ['exec', '--ignore-user-config', ...modelArgs, '-c', `model_reasoning_effort="${effort}"`, ...codexSkillBrokerArgs(skillSession, codexFullAccess), prompt],
+      ['exec', '--ignore-user-config', ...(usedModel !== 'default' ? ['-c', `model="${usedModel}"`] : []), '-c', `model_reasoning_effort="${effort}"`, ...codexSkillBrokerArgs(skillSession, codexFullAccess), prompt],
       {
         cwd: tmpDir,
         timeout: resolvedTimeout,
         extendEnv: false,
         env: buildCodexEnv({ CODEX_QUIET_MODE: '1' }),
       },
-    ))
+    )))
   } catch (err) {
+    // Before the auth test: its pattern matches the prompt echoed in the error,
+    // so a rejected model on a diff mentioning "auth" was reported as a login failure.
+    const rejection = codexModelRejection(err)
+    if (rejection) throw new Error(`codex rejected the configured model during fix step — ${rejection}`)
     const msg = err instanceof Error ? err.message : String(err)
     if (/not logged in|auth|credential/i.test(msg)) {
       throw new Error('codex auth failure during fix step — run: codex login')
