@@ -20,6 +20,7 @@ import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
 import { initLogger, log as fileLog } from '../lib/logger.js'
 import { LogsConfigSchema } from '../config/schema.js'
+import type { Vendor } from '../lib/vendor.js'
 import {
   BUNDLED_SKILL_RECOMMENDATIONS,
   findCompetingSkill,
@@ -49,6 +50,27 @@ type VendorModeConfig = {
   claudeEnabled: boolean
   codexEnabled: boolean
   opencodeEnabled: boolean
+}
+
+export function enabledOnboardVendors(config: VendorModeConfig): Vendor[] {
+  return (['claude', 'codex', 'opencode'] as const).filter(vendor =>
+    vendor === 'claude' ? config.claudeEnabled : vendor === 'codex' ? config.codexEnabled : config.opencodeEnabled,
+  )
+}
+
+function vendorSelection(mode: VendorModeConfig['mode'], selected: Vendor[]): VendorModeConfig {
+  if (selected.length === 0) {
+    throw new Error('No enabled reviewer is available. Authenticate an enabled tool or rerun onboard interactively; config was not written.')
+  }
+  if (mode === 'single-vendor' && selected.length !== 1) {
+    throw new Error('Single-vendor mode requires exactly one enabled reviewer; rerun onboard interactively. Config was not written.')
+  }
+  return {
+    mode: selected.length === 1 ? 'single-vendor' : mode,
+    claudeEnabled: selected.includes('claude'),
+    codexEnabled: selected.includes('codex'),
+    opencodeEnabled: selected.includes('opencode'),
+  }
 }
 
 // Effort settings and display hints per quality tier.
@@ -159,7 +181,7 @@ async function checkEnv(): Promise<EnvCheckResult> {
   return { ok: true, claudeOk, codexOk, opencodeOk }
 }
 
-async function promptVendorMode(
+export async function promptVendorMode(
   claudeOk: boolean,
   codexOk: boolean,
   opencodeOk: boolean,
@@ -168,106 +190,72 @@ async function promptVendorMode(
   existingCodexEnabled: boolean,
   existingOpenCodeEnabled: boolean,
   opts: OnboardOpts,
+  hasExistingConfig = existingMode !== undefined,
 ): Promise<VendorModeConfig> {
-  const availableVendors = [claudeOk, codexOk, opencodeOk].filter(Boolean).length
-  const bothAvailable = availableVendors >= 2
-
-  let mode: 'cross-vendor' | 'single-vendor'
-  let claudeEnabled: boolean
-  let codexEnabled: boolean
-  let opencodePickedAsSingleVendor = false
-
-  if (!bothAvailable) {
-    if (claudeOk) {
-      console.log(`  Mode: ${chalk.cyan('single-vendor')} (only ${chalk.bold('claude')} is available)`)
-      mode = 'single-vendor'
-      claudeEnabled = true
-      codexEnabled = false
-    } else if (codexOk) {
-      console.log(`  Mode: ${chalk.cyan('single-vendor')} (only ${chalk.bold('codex')} is available)`)
-      mode = 'single-vendor'
-      claudeEnabled = false
-      codexEnabled = true
-    } else {
-      // Neither claude nor codex is available — only OpenCode (opt-in) remains.
-      // Leave claude/codex disabled and run single-vendor so the assigned
-      // reviewer is OpenCode itself; enabling both would make the default
-      // workflow's `reviewer: auto` prefer an unavailable Codex.
-      console.log(`  Mode: ${chalk.cyan('single-vendor')} (${chalk.yellow('no claude/codex available — enable OpenCode below')})`)
-      mode = 'single-vendor'
-      claudeEnabled = false
-      codexEnabled = false
-    }
-  } else if (opts.yes) {
-    mode = (existingMode ?? 'cross-vendor') as 'cross-vendor' | 'single-vendor'
-    claudeEnabled = existingClaudeEnabled
-    codexEnabled = existingCodexEnabled
-    console.log(`  Mode: ${chalk.cyan(mode)}`)
-  } else {
-    const modeItems: PickerItem[] = [
-      { label: 'cross-vendor', description: 'Claude reviews Codex PRs; Codex reviews Claude PRs' },
-      { label: 'single-vendor', description: 'one AI reviews all PRs' },
-    ]
-    const defaultModeIdx = existingMode === 'single-vendor' ? 1 : 0
-    const modeIdx = await promptSinglePicker(modeItems, {
-      title: 'How should reviews be assigned?',
-      defaultIndex: defaultModeIdx,
-    })
-    console.log()
-
-    if (modeIdx === 0) {
-      mode = 'cross-vendor'
-      // Enable exactly the claude/codex vendors that are available; OpenCode is
-      // handled by the additional-agent decision below.
-      claudeEnabled = claudeOk
-      codexEnabled = codexOk
-    } else {
-      // Single-vendor: ask which one
-      const defaultVendorIdx = (existingMode === 'single-vendor' && existingCodexEnabled && !existingClaudeEnabled) ? 1 : 0
-      const vendorItems: PickerItem[] = [
-        { label: 'claude', description: 'Claude Code reviews all PRs' },
-        { label: 'codex', description: 'OpenAI Codex reviews all PRs' },
-        ...(opencodeOk ? [{ label: 'opencode', description: 'OpenCode reviews all PRs' }] : []),
-      ]
-      const vendorIdx = await promptSinglePicker(vendorItems, {
-        title: 'Which AI should review all PRs?',
-        defaultIndex: defaultVendorIdx,
-      })
-      console.log()
-
-      mode = 'single-vendor'
-      claudeEnabled = vendorIdx === 0
-      codexEnabled = vendorIdx === 1
-      // OpenCode chosen as the single vendor — the opt-in decision below must
-      // not turn it back off.
-      if (vendorIdx === 2) opencodePickedAsSingleVendor = true
-    }
+  const candidates: Array<PickerItem & { vendor: Vendor; available: boolean; enabled: boolean }> = [
+    { vendor: 'claude', label: 'claude', description: 'Claude Code reviews all PRs', available: claudeOk, enabled: existingClaudeEnabled },
+    { vendor: 'codex', label: 'codex', description: 'OpenAI Codex reviews all PRs', available: codexOk, enabled: existingCodexEnabled },
+    { vendor: 'opencode', label: 'opencode', description: 'OpenCode reviews all PRs', available: opencodeOk, enabled: existingOpenCodeEnabled },
+  ]
+  const available = candidates.filter(candidate => candidate.available)
+  if (available.length === 0) {
+    throw new Error('No authenticated reviewer is available; config was not written.')
   }
 
-  // OpenCode is opt-in (vendors.opencode.enabled defaults to false): it is asked
-  // only when the CLI is authenticated, and never silently flipped on for an
-  // existing install. The exception is an OpenCode-only install (no claude/codex
-  // available) — there it is the only vendor that can run, so it is enabled
-  // without asking (including under --yes) rather than leaving every vendor off.
-  const opencodeIsOnlyVendor = opencodeOk && !claudeOk && !codexOk
-  let opencodeEnabled = opencodeIsOnlyVendor || opencodePickedAsSingleVendor || existingOpenCodeEnabled
-  if (opencodeOk && !opts.yes && !opencodeIsOnlyVendor && !opencodePickedAsSingleVendor) {
-    const items: PickerItem[] = [
+  if (opts.yes) {
+    // Preserve opt-outs in existing configs. Fresh OpenCode-only installs keep
+    // the supported default, but mixed installs never silently opt into it.
+    const selected = available.filter(candidate => candidate.enabled).map(candidate => candidate.vendor)
+    if (!hasExistingConfig && available.length === 1 && available[0].vendor === 'opencode') selected.push('opencode')
+    const config = vendorSelection((existingMode ?? 'cross-vendor') as VendorModeConfig['mode'], selected)
+    const unavailable = candidates.filter(candidate => candidate.enabled && !candidate.available)
+    if (unavailable.length > 0) console.log(chalk.yellow(`  Disabled unavailable tools: ${unavailable.map(candidate => candidate.vendor).join(', ')}`))
+    console.log(`  Mode: ${chalk.cyan(config.mode)} (${enabledOnboardVendors(config).join(', ')})`)
+    return config
+  }
+
+  if (available.length === 1) {
+    const vendor = available[0].vendor
+    console.log(`  Mode: ${chalk.cyan('single-vendor')} (only ${chalk.bold(vendor)} is available)`)
+    return vendorSelection('single-vendor', [vendor])
+  }
+
+  const modeIdx = await promptSinglePicker([
+    { label: 'cross-vendor', description: 'enabled tools review PRs written by another tool' },
+    { label: 'single-vendor', description: 'one AI reviews all PRs' },
+  ], {
+    title: 'How should reviews be assigned?',
+    defaultIndex: existingMode === 'single-vendor' ? 1 : 0,
+  })
+  console.log()
+
+  if (modeIdx === 1) {
+    const preferredIdx = available.findIndex(candidate => candidate.enabled)
+    const vendorIdx = await promptSinglePicker(available, {
+      title: 'Which AI should review all PRs?',
+      defaultIndex: preferredIdx < 0 ? 0 : preferredIdx,
+    })
+    const selected = available[vendorIdx]
+    if (!selected) throw new Error('Invalid reviewer selection; config was not written.')
+    console.log()
+    // Single-vendor means exactly one tool: no additional-agent prompt can
+    // re-enable an old OpenCode selection after a different tool was chosen.
+    return vendorSelection('single-vendor', [selected.vendor])
+  }
+
+  const selected = available.filter(candidate => candidate.vendor !== 'opencode').map(candidate => candidate.vendor)
+  if (opencodeOk) {
+    const idx = await promptSinglePicker([
       { label: 'no', description: 'leave OpenCode disabled (default)' },
       { label: 'yes', description: 'enable OpenCode as an additional reviewer' },
-    ]
-    const idx = await promptSinglePicker(items, {
+    ], {
       title: 'Enable OpenCode as an additional coding agent?',
       defaultIndex: existingOpenCodeEnabled ? 1 : 0,
     })
     console.log()
-    opencodeEnabled = idx === 1
+    if (idx === 1) selected.push('opencode')
   }
-  if (opencodeOk && opts.yes) {
-    console.log(`  OpenCode: ${chalk.cyan(opencodeEnabled ? 'enabled' : 'disabled')}`)
-  }
-
-  return { mode, claudeEnabled, codexEnabled, opencodeEnabled }
+  return vendorSelection('cross-vendor', selected)
 }
 
 async function promptAuthorVendor(
@@ -661,6 +649,9 @@ export function applyOnboardConfig(
   workflowDir = join(homedir(), '.crosscheck'),
 ): void {
   const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, qualityMode, enabledSkills, pipelinePreset, maxRounds, conflictResolve, tunnelBackend, smeeChannel, cloneProtocol, linear } = decisions
+
+  // Reject invalid selections before creating or changing config/workflow files.
+  vendorSelection(vendorConfig.mode, enabledOnboardVendors(vendorConfig))
 
   mkdirSync(dirname(configPath), { recursive: true })
 
@@ -1114,16 +1105,24 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log(chalk.bold('Step 4 — who reviews'))
   console.log(chalk.dim('  Cross-vendor keeps the reviewer independent of the author — self-review is where early victory hides.'))
 
-  const vendorConfig = await promptVendorMode(
-    env.claudeOk,
-    env.codexOk,
-    env.opencodeOk,
-    existingConfig?.mode,
-    existingConfig?.vendors?.claude?.enabled ?? true,
-    existingConfig?.vendors?.codex?.enabled ?? true,
-    existingConfig?.vendors?.opencode?.enabled ?? false,
-    opts,
-  )
+  let vendorConfig: VendorModeConfig
+  try {
+    vendorConfig = await promptVendorMode(
+      env.claudeOk,
+      env.codexOk,
+      env.opencodeOk,
+      existingConfig?.mode,
+      existingConfig?.vendors?.claude?.enabled ?? true,
+      existingConfig?.vendors?.codex?.enabled ?? true,
+      existingConfig?.vendors?.opencode?.enabled ?? false,
+      opts,
+      existingConfig !== null,
+    )
+  } catch (err: unknown) {
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    onboardAbandoned('reviewer_selection_failed')
+    process.exit(1)
+  }
   console.log()
 
   // ── Step 5: Primary author (cross-vendor + personal only) ───────────────────
@@ -1274,14 +1273,9 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log(`  clone        ${chalk.cyan(cloneProtocol)}`)
   console.log(`  linear       ${chalk.cyan(linear.mode === 'off' ? 'off' : linear.mode)}${linear.mode !== 'off' && linear.teamKeys.length > 0 ? chalk.dim(` (${linear.teamKeys.join(', ')})`) : ''} ${chalk.yellow('(beta)')}`)
   console.log(`  mode         ${chalk.cyan(vendorConfig.mode)}`)
-  if (vendorConfig.mode === 'single-vendor') {
-    const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
-    console.log(`  vendor       ${chalk.cyan(activeVendor)}`)
-  }
+  console.log(`  vendors      ${enabledOnboardVendors(vendorConfig).map(vendor => chalk.cyan(vendor)).join(', ')}`)
   if (vendorConfig.mode === 'cross-vendor' && deployment === 'personal') {
-    const routingLabel = authorVendor === 'both'
-      ? 'both (attribution detection only)'
-      : `${authorVendor} → reviewed by ${authorVendor === 'claude' ? 'codex' : 'claude'}`
+    const routingLabel = 'attribution detection; enabled fallback for unknown authors'
     console.log(`  routing      ${chalk.cyan(routingLabel)}`)
   }
   console.log(qualityMode === 'smart'

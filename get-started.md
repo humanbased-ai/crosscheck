@@ -393,6 +393,8 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, GitHub auth, and webhook-se
 
 ### `crosscheck onboard`
 
+Onboarding only offers reviewer tools detected as available. Single-vendor mode enables exactly one tool; cross-vendor mode can enable multiple tools. With `--yes`, existing opt-outs are preserved and unavailable tools are disabled. If no enabled reviewer is available, setup stops without writing config. A fresh OpenCode-only installation enables OpenCode; on mixed installations it remains opt-in. These checks verify tool installation and configured authentication, not a live request to each model.
+
 The recommended first-time setup command. Walks through ten steps interactively and writes a ready-to-use config.
 
 ```bash
