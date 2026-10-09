@@ -9,7 +9,8 @@ import { createGithubClient, fetchIssueComment } from '../github/client.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { fetchStandingVerdictRecords, fetchStepHistoryWithRetry, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken, getLinearApiKey, getLinearCredentials } from '../config/loader.js'
+import { loadConfig, resolveConfigPath, getGithubToken, getLinearApiKey, getLinearCredentials } from '../config/loader.js'
+import { reconcileCodexModels } from '../lib/codex-model-fallback.js'
 import { enrichIssueContext } from '../issues/enrich.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
@@ -264,6 +265,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     }
   }
 
+  reconcileCodexModels(resolveConfigPath(opts.config))
   const config = loadConfig(opts.config)
   initLogger(config.logs)
   fileLog({ level: 'info', event: 'session_start', command: 'run', pr_url: prUrl, ...(opts.roundMode && { round_mode: opts.roundMode }) })

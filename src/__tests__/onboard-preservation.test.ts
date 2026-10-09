@@ -138,8 +138,25 @@ describe('applyOnboardConfig — first run', () => {
     // and smart mode is a no-op for codex.
     const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
     expect(vendors.codex.model_tiers).toEqual({
+      fast: 'gpt-6-luna', balanced: 'gpt-6-sol', thorough: 'gpt-6-astra',
+    })
+  })
+
+  it('writes the API tier map when codex authenticates with an api key', () => {
+    writeFileSync(configPath, yaml.dump({ vendors: { codex: { auth: 'api-key' } } }))
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityMode: 'smart' }, workflowDir)
+
+    const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
+    expect(vendors.codex.model_tiers).toEqual({
       fast: 'gpt-6-luna', balanced: 'gpt-6.1-sol', thorough: 'gpt-6-astra',
     })
+  })
+
+  it('pins a ChatGPT-compatible model for a fixed balanced tier under subscription auth', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, qualityTier: 'balanced', qualityMode: 'fixed' }, workflowDir)
+
+    const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
+    expect(vendors.codex.model).toBe('gpt-6-sol')
   })
 
   it('clears a model pinned by an earlier fixed-mode run when switching to smart', () => {

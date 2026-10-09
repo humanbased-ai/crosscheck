@@ -200,6 +200,29 @@ describe('runCodexFixStep', () => {
     ).rejects.toThrow('codex auth failure')
   })
 
+  it('reports a rejected model instead of an auth failure when the prompt mentions auth', async () => {
+    const { runCodexFixStep } = await import('../reviewers/fix.js')
+    const rejection = `ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}`
+    execaMock.mockRejectedValueOnce(Object.assign(
+      new Error(`Command failed with exit code 1: codex exec "fix the author lookup in auth.ts"\n${rejection}`),
+      { stderr: `user\nfix the author lookup in auth.ts\n${rejection}` },
+    ))
+    const failure = runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '')
+    await expect(failure).rejects.toThrow("The 'gpt-6.1-sol' model is not supported")
+    await expect(failure).rejects.not.toThrow('codex auth failure')
+  })
+
+  it('retries the fix on a ChatGPT-compatible model when codex rejects the configured one', async () => {
+    const { runCodexFixStep } = await import('../reviewers/fix.js')
+    const rejection = `ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}`
+    execaMock.mockRejectedValueOnce(Object.assign(new Error('Command failed with exit code 1: codex exec'), { stderr: rejection }))
+
+    await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '', 'gpt-6.1-sol')
+
+    const models = execaMock.mock.calls.map(call => (call[1] as string[]).find(arg => arg.startsWith('model=')))
+    expect(models).toEqual(['model="gpt-6.1-sol"', 'model="gpt-6-sol"'])
+  })
+
   it('re-throws non-auth errors unchanged', async () => {
     const { runCodexFixStep } = await import('../reviewers/fix.js')
     execaMock.mockRejectedValueOnce(new Error('network timeout'))

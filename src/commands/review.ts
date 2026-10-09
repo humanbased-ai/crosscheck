@@ -9,7 +9,8 @@ import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detec
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runOpenCodeReview } from '../reviewers/opencode.js'
-import { loadConfig, getGithubToken, getLinearCredentials } from '../config/loader.js'
+import { loadConfig, resolveConfigPath, getGithubToken, getLinearCredentials } from '../config/loader.js'
+import { reconcileCodexModels } from '../lib/codex-model-fallback.js'
 import { resolveLinearAuth, withWorker, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
@@ -40,6 +41,7 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
 }
 
 export async function runReview(prUrl: string, configPath?: string, forceReviewer?: string, force = false) {
+  reconcileCodexModels(resolveConfigPath(configPath))
   const config = loadConfig(configPath)
   initLogger(config.logs)
   fileLog({ level: 'info', event: 'session_start', command: 'review', pr_url: prUrl })
