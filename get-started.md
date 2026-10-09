@@ -393,6 +393,10 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, GitHub auth, and webhook-se
 
 ### `crosscheck onboard`
 
+Interactive onboarding starts with a checklist of Claude, Codex, and OpenCode, including tools that are not installed or need login. Select one or more tools first, then choose to run the displayed installation/login command, handle setup in another terminal and check again, skip that tool, or cancel. Commands run only when explicitly chosen. Setup rechecks each tool after installation/login and again before saving; skipped or unready tools are never enabled. One ready selection uses single-vendor mode; multiple ready selections use cross-vendor mode. Existing choices are preselected, and OpenCode is unchecked by default on fresh mixed installs.
+
+With `--yes`, no installation/login commands run and no tools are selected interactively: existing opt-outs are preserved and unavailable tools are disabled. If no enabled reviewer is available, setup stops without writing config. A fresh OpenCode-only installation enables OpenCode. These checks verify installation and saved login/provider configuration, not a live request to each model or provider account permissions.
+
 The recommended first-time setup command. Walks through ten steps interactively and writes a ready-to-use config.
 
 ```bash
@@ -405,7 +409,7 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 **The ten steps:**
 
-**Step 1 — Environment check.** Verifies codex CLI, claude CLI, gh CLI, and GitHub token. At least one AI CLI must be authenticated; gh auth is always required. Prints ✓/✗ with fix hints.
+**Step 1 — Environment check.** Verifies codex CLI, claude CLI, gh CLI, and GitHub token. GitHub auth is required. Interactive setup can start without an installed AI tool and then guides tool selection, installation, and login; `--yes` requires an enabled ready tool.
 
 **Step 2 — Deployment mode.** Choose how crosscheck scopes itself:
 - `personal` — monitors your personal repos + all orgs you belong to; reviews only PRs you author
@@ -413,9 +417,9 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 **Step 3 — Repo selection.** Lists accessible repos and orgs; you pick which ones to watch. Org-level selection covers all repos in the org with one webhook.
 
-**Step 4 — Review mode.** If both CLIs are available, choose:
-- `cross-vendor` — Claude reviews Codex PRs; Codex reviews Claude PRs (recommended when using both agents)
-- `single-vendor` — one AI reviews all PRs (default when only one CLI is installed)
+**Step 4 — Review mode.** Uses the tools retained after guided setup:
+- `cross-vendor` — enabled tools review PRs written by another tool (used for multiple ready selections)
+- `single-vendor` — one AI reviews all PRs (used for one ready selection)
 
 **Step 5 — Primary author.** In personal cross-vendor mode, choose which agent usually authors your PRs so Crosscheck can route reviews to the other vendor.
 
