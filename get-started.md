@@ -1887,8 +1887,11 @@ Every previously open finding must remain open or have an explicit resolved or
 dismissed entry; an incremental review may resolve a previous finding but may
 not dismiss it or lower its priority. Previous findings replayed into the prompt
 are truncated and capped in size. Missing findings, duplicate identities,
-malformed JSON, and incomplete coverage never approve: crosscheck posts the raw
-output with a warning and no verdict, and saves no memory. Open P0/P1 findings produce
+and malformed JSON never approve: crosscheck posts the raw output with a warning
+and no verdict, and saves no memory. A report whose `coverage` is anything but
+`complete` is the reviewer saying the review did not run, so nothing is posted:
+the run fails as an inconclusive review (`review_inconclusive`), the same as a
+prose review that says it could not review. Open P0/P1 findings produce
 BLOCK, open P2 findings NEEDS WORK, and P3-only/empty findings APPROVE, subject
 to the existing documentation-only policy. Existing prose reviews are unaffected.
 

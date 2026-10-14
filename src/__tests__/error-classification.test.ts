@@ -125,6 +125,10 @@ describe('crosscheck fail-closed categories', () => {
     expect(classifyError('codex review inconclusive — reviewer reported it could not perform the review')).toBe('inconclusive')
   })
 
+  it('classifies a structured review that reported it did not run, whatever its summary says', () => {
+    expect(classifyError('codex review inconclusive — reviewer reported coverage "blocked": the token budget for the 1,721-file diff ran out')).toBe('inconclusive')
+  })
+
   it('classifies a checkout whose review range is not the PR diff', () => {
     // humanbased-ai/monorepo#5681: git's two merge bases, against GitHub's one.
     const err = new ReviewRangeMismatchError('staging', 'c2390f27bdadfae974c3e0c63157d696ebaaded6',
