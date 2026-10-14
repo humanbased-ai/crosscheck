@@ -1862,6 +1862,15 @@ as a fresh clone; if the cache fails anyway it is discarded and the review falls
 back to a fresh clone. Caches unused for 30 days are pruned. Disable the option
 to always use fresh clones.
 
+Every checkout, cached or fresh, is checked before anything reads it: the merge
+base git uses for `origin/<base>...HEAD` must equal the one GitHub reports for the
+same two commits, so the range under review is exactly the PR's diff. A cached
+checkout holds the PR's last 50 commits, so a PR whose merge base lies deeper
+fails this check and is retried once from a fresh clone (logged as
+`repository_cache_failed`). If the fresh clone fails it too, the run fails with
+`origin/<base>...HEAD is not this PR's diff` (error category `review_range`)
+rather than review a different change.
+
 Review memory lives in `~/.crosscheck/review-memory`, keyed by repository and PR.
 It is saved only after publication. First reviews are full reviews. Small
 descendant changes on the same base and quality policy receive the previous

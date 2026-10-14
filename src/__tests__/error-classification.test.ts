@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { classifyError } from '../lib/logger.js'
+import { ReviewRangeMismatchError } from '../lib/clone.js'
 
 // Regression coverage for #191: transient model-API errors (429 / 529 / budget)
 // were misclassified as `auth` because the broad auth pattern (which matches the
@@ -122,6 +123,13 @@ describe('crosscheck fail-closed categories', () => {
 
   it('classifies a reviewer that reported it could not review', () => {
     expect(classifyError('codex review inconclusive — reviewer reported it could not perform the review')).toBe('inconclusive')
+  })
+
+  it('classifies a checkout whose review range is not the PR diff', () => {
+    // humanbased-ai/monorepo#5681: git's two merge bases, against GitHub's one.
+    const err = new ReviewRangeMismatchError('staging', 'c2390f27bdadfae974c3e0c63157d696ebaaded6',
+      ['0abccf00aee2e8c965891dce6a2a27421d4b0f44', 'eca060d032000000000000000000000000000000'])
+    expect(classifyError(err.message)).toBe('review_range')
   })
 
   it('does not let the base-ref message fall through to auth', () => {
