@@ -208,8 +208,8 @@ export async function clonePRForReview(params: {
   isolateGitConfig()
   const { owner, repo, prNumber, baseRef, baseSha, tmpDir, token, protocol, onBaseFetchFailed, onBaseRefRecovered, onProgress } = params
   const cloneUrl = buildCloneUrl(owner, repo, token, protocol)
-  const checkout = (): Promise<CloneResult> => checkoutPRAgainstBase({
-    tmpDir, baseRef, prNumber,
+  const checkout = (deepenOnMismatch: boolean): Promise<CloneResult> => checkoutPRAgainstBase({
+    tmpDir, baseRef, prNumber, deepenOnMismatch,
     githubMergeBase: (base, head) => getMergeBase(owner, repo, base, head, token),
     ...(baseSha !== undefined && { baseSha }),
     ...(onBaseFetchFailed !== undefined && { onBaseFetchFailed }),
@@ -234,7 +234,7 @@ export async function clonePRForReview(params: {
     }
     if (cached) {
       try {
-        return await checkout()
+        return await checkout(false)
       } catch (err) {
         // The cached checkout holds the PR's last 50 commits; a PR whose merge base
         // lies deeper cannot be diffed from it. A fresh clone fetches the PR's whole
@@ -254,7 +254,7 @@ export async function clonePRForReview(params: {
   // --progress forces git to emit stderr progress even when piped; without a
   // progress consumer, stay --quiet so error output remains clean.
   await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress)
-  return checkout()
+  return checkout(true)
 }
 
 async function checkoutPRAgainstBase(params: {
@@ -262,12 +262,14 @@ async function checkoutPRAgainstBase(params: {
   baseRef: string
   prNumber: number
   baseSha?: string
+  /** Fetch the base's whole history when its range proves wrong. Only a fresh clone is worth that. */
+  deepenOnMismatch: boolean
   githubMergeBase: (base: string, head: string) => Promise<string>
   onBaseFetchFailed?: () => void
   onBaseRefRecovered?: (status: BaseRefStatus) => void
   onProgress?: (line: string) => void
 }): Promise<CloneResult> {
-  const { tmpDir, baseRef, prNumber, baseSha, githubMergeBase, onBaseFetchFailed, onBaseRefRecovered, onProgress } = params
+  const { tmpDir, baseRef, prNumber, baseSha, deepenOnMismatch, githubMergeBase, onBaseFetchFailed, onBaseRefRecovered, onProgress } = params
   await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir, true, onProgress)
   await runGit(['checkout', `pr-${prNumber}`], tmpDir)
 
@@ -287,8 +289,37 @@ async function checkoutPRAgainstBase(params: {
     ...(onBaseRefRecovered !== undefined && { onBaseRefRecovered }),
   })
   // An unavailable base has no range to check, and every caller refuses it.
-  if (baseRefStatus !== 'unavailable') await verifyReviewRange({ tmpDir, baseRef, githubMergeBase })
+  if (baseRefStatus !== 'unavailable') {
+    try {
+      await verifyReviewRange({ tmpDir, baseRef, githubMergeBase })
+    } catch (err) {
+      // A fresh clone is depth-50 of the default branch. When that is also this PR's
+      // base, fetching the PR head and the base ref adds nothing below the base's
+      // shallow boundary — the commits between it and the merge base were never
+      // fetched, and a ref that is already present is not deepened by fetching it
+      // again. A PR branched more than 50 commits back then has no path to its merge
+      // base. Deepening the base is the only fix, and it costs history, so it is
+      // reserved for a range that was just proven wrong, in a clone that has no
+      // cheaper fallback — the cached checkout falls back to this clone instead.
+      if (!deepenOnMismatch || !(err instanceof ReviewRangeMismatchError) || !isShallowRepository(tmpDir)) throw err
+      await deepenBaseRef({ tmpDir, baseRef, onProgress })
+      await verifyReviewRange({ tmpDir, baseRef, githubMergeBase })
+    }
+  }
   return { baseRefStatus }
+}
+
+function isShallowRepository(tmpDir: string): boolean {
+  return execFileSync('git', ['rev-parse', '--is-shallow-repository'], { cwd: tmpDir, encoding: 'utf8' }).trim() === 'true'
+}
+
+// Fetched by commit, not name: the base ref may have been recovered from a sha or a
+// merge ref and exist only locally, and `--unshallow` lifts the depth limit on
+// everything the fetch reaches, which is the base's whole history.
+async function deepenBaseRef(params: { tmpDir: string; baseRef: string; onProgress?: (line: string) => void }): Promise<void> {
+  const { tmpDir, baseRef, onProgress } = params
+  const tip = execFileSync('git', ['rev-parse', '--verify', `refs/remotes/origin/${baseRef}^{commit}`], { cwd: tmpDir, encoding: 'utf8' }).trim()
+  await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), '--unshallow', 'origin', tip], tmpDir, true, onProgress)
 }
 
 /**

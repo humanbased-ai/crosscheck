@@ -143,7 +143,9 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true })
 })
 
-describe('the review range of a cached checkout', () => {
+// Each test builds a ~370-commit origin and clones it more than once: about 5s on a
+// quiet machine, which is vitest's whole default timeout.
+describe('the review range of a cached checkout', { timeout: 60_000 }, () => {
   it("is the PR's own diff when another PR's shallow boundary sits on the base branch", async () => {
     // humanbased-ai/monorepo#5681 round 2: earlier reviews of other PRs had left
     // their depth-50 boundaries in the shared cache. One sat on staging between
@@ -180,6 +182,29 @@ describe('the review range of a cached checkout', () => {
 
     expect(cacheFailures).toHaveLength(1)
     expect(cacheFailures[0]).toMatch(/no merge base/)
+    expect(mergeBases(tmpDir)).toEqual(['s100'])
+    expect(changedFiles(tmpDir)).toHaveLength(60)
+  })
+
+  it("reaches the merge base of an old PR whose base is the repository's default branch", async () => {
+    // A fresh clone is depth-50 of the default branch. Here that is the PR's base, so
+    // the base ends 150 commits above the PR's branch point at a shallow boundary, and
+    // fetching the PR head and the already-present base ref added nothing below it.
+    git(origin, 'symbolic-ref', 'HEAD', 'refs/heads/staging')
+    at('t2')
+    const { tmpDir } = await review(3)
+
+    expect(mergeBases(tmpDir)).toEqual(['s100'])
+    expect(changedFiles(tmpDir)).toHaveLength(60)
+    // The cache cannot reach it either; the fresh clone it falls back to deepens.
+    expect(cacheFailures).toHaveLength(1)
+  })
+
+  it('does the same from a fresh clone, with no cache', async () => {
+    git(origin, 'symbolic-ref', 'HEAD', 'refs/heads/staging')
+    at('t2')
+    const { tmpDir } = await review(3, { repositoryCache: false })
+
     expect(mergeBases(tmpDir)).toEqual(['s100'])
     expect(changedFiles(tmpDir)).toHaveLength(60)
   })
