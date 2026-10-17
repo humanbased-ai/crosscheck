@@ -881,6 +881,17 @@ describe('PRBoard \u2014 session stats panel', () => {
   const setStart = (ms: number) =>
     ((board as unknown as { stats: { sessionStart: number } }).stats.sessionStart = ms)
 
+  it('separates distinct PRs from processing runs across rounds and repos', () => {
+    board.addPR('first@sha1', 42, 'acme/api', 'feature', 1)
+    board.completePR('first@sha1', { elapsedMs: 1000, url: 'u1' })
+    board.addPR('first@sha2', 42, 'acme/api', 'feature', 2)
+    board.addPR('second@sha1', 42, 'acme/web', 'feature', 1)
+
+    // The totals remain cumulative after old display rows are removed.
+    ;(board as unknown as { slots: Map<string, unknown> }).slots.delete('first@sha1')
+    expect(stripAnsi(invokeRender())).toContain('PRs: 2 · processing runs: 3')
+  })
+
   it('shows the local start time and the session age', () => {
     const start = Date.now() - (3 * 60 + 32) * 60_000
     setStart(start)
