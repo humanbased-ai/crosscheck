@@ -52,6 +52,19 @@ export async function getPRDiff(
   return data as unknown as string
 }
 
+/**
+ * The merge base GitHub diffs `base...head` against — the commit a PR's diff starts
+ * from. Takes exact shas rather than branch names, so the answer describes the very
+ * commits a clone holds and cannot race a push to either branch.
+ */
+export async function getMergeBase(owner: string, repo: string, base: string, head: string, token: string): Promise<string> {
+  // per_page=1: only merge_base_commit is read, and the commit list is what pages.
+  const { data } = await createGithubClient(token).rest.repos.compareCommitsWithBasehead({
+    owner, repo, basehead: `${base}...${head}`, per_page: 1,
+  })
+  return data.merge_base_commit.sha
+}
+
 export async function registerRepoWebhook(
   owner: string,
   repo: string,

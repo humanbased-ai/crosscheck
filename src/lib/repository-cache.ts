@@ -107,7 +107,18 @@ export async function cloneFromCache(input: {
       await git('init', ['--bare', '--quiet', cache], { network: false })
       await git('fetch', ['--no-tags', '--depth=50', input.source,
         '+HEAD:refs/heads/cache-default', `+refs/pull/${input.prNumber}/head:refs/heads/${branch}`], { cwd: cache, network: true })
-      await git('clone', ['--quiet', '--no-hardlinks', '--branch', branch, cache, input.destination], { network: false })
+      // --single-branch: the checkout takes this PR's history and nothing else. The
+      // cache holds every PR it has served, each fetched 50 commits deep, and each of
+      // those fetches left a shallow boundary in the cache. A boundary is a graft — the
+      // commit has no parents from then on — so cloning every branch carried every
+      // other PR's boundaries into this checkout. Those sitting on the base branch above
+      // this PR's branch point cut the base off from the true merge base, and
+      // `origin/<base>...HEAD` diffed against older common ancestors reached through
+      // merges instead (humanbased-ai/monorepo#5681: a 1,721-file range for a 3-file PR).
+      //
+      // This PR's own boundaries cannot cut that path: every commit on it is a
+      // descendant of the merge base, and none of those is in this PR's history.
+      await git('clone', ['--quiet', '--no-hardlinks', '--single-branch', '--branch', branch, cache, input.destination], { network: false })
       await git('remote', ['set-url', 'origin', input.source], { cwd: input.destination, network: false })
     } catch (err) {
       // A killed fetch can leave the cache corrupt, and `git init --bare` does not

@@ -19,6 +19,7 @@ export type ErrorCategory =
   | 'network'     // connection refused, DNS failure, git framing errors
   | 'git'         // git-specific errors (non-fast-forward, clone failures)
   | 'base_ref'    // the PR's base ref could not be resolved, so there is no diff
+  | 'review_range' // the checkout's origin/<base>...HEAD is not the PR's diff
   | 'inconclusive' // the reviewer ran but reported it could not review
   | 'subprocess'  // CLI exited non-zero
   | 'unknown'
@@ -99,8 +100,9 @@ export function classifyError(message: string): ErrorCategory {
   // Word-boundary the numeric codes so they don't match digits embedded in
   // durations/counts/ports (e.g. "timed out after 5290ms" must not read as 529).
   // Crosscheck's own fail-closed conditions, matched first: they are the reason the
-  // run stopped, and both messages are prose that later patterns would mislabel.
+  // run stopped, and their messages are prose that later patterns would mislabel.
   if (/base ref origin\/.* could not be resolved|base ref unavailable/.test(m)) return 'base_ref'
+  if (/\.\.\.head is not this pr's diff/.test(m)) return 'review_range'
   if (/review inconclusive/.test(m)) return 'inconclusive'
   if (/rate limit|secondary rate|\b429\b/.test(m)) return 'rate_limit'
   if (/\b529\b|overloaded/.test(m)) return 'overloaded'

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { execFileSync } from 'child_process'
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { ConfigSchema } from '../config/schema.js'
 import { runReview } from '../commands/review.js'
@@ -218,5 +219,32 @@ describe('crosscheck review under quality.mode: fixed', () => {
     expect(eventsNamed('strategy_resolved')).toHaveLength(0)
     expect(eventsNamed('strategy_unresolved')).toHaveLength(0)
     expect(printed()).not.toMatch(/strategy v/)
+  })
+})
+
+describe('crosscheck review when the structured review did not run', () => {
+  it('fails the run and posts nothing when the reviewer reports coverage other than complete', async () => {
+    // humanbased-ai/monorepo#5681 round 2 posted this as a verdict-less review with
+    // next_step=fix. The review never ran, so the run failed — it did not review.
+    const home = process.env.HOME
+    process.env.HOME = mkdtempSync(join(tmpdir(), 'review-memory-home-'))
+    try {
+      h.config = ConfigSchema.parse({ quality: { mode: 'smart', tier: 'balanced', review_memory: true } })
+      h.files = ['docs/specs/design.md']
+      const summary = 'Full review blocked by ambiguous ancestry: the requested range has two merge bases.'
+      vi.mocked(runCodexReview).mockResolvedValueOnce({ review: JSON.stringify({ summary, coverage: 'blocked', findings: [] }), model: 'gpt-6-astra', effort: 'high' })
+      vi.spyOn(process, 'exit').mockImplementation(code => { throw new Error(`process.exit(${code})`) })
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+      await expect(review('codex')).rejects.toThrow('process.exit(2)')
+
+      expect(vi.mocked(postReviewComment)).not.toHaveBeenCalled()
+      expect(eventsNamed('review_inconclusive')[0]).toMatchObject({ reviewer: 'codex' })
+      expect(String(eventsNamed('review_inconclusive')[0]?.reason)).toMatch(/blocked.*ambiguous ancestry/)
+      expect(eventsNamed('structured_review_fallback')).toHaveLength(0)
+    } finally {
+      rmSync(process.env.HOME, { recursive: true, force: true })
+      process.env.HOME = home
+    }
   })
 })

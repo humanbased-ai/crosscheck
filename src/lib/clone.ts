@@ -1,11 +1,12 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { randomUUID } from 'crypto'
 import { execFileSync } from 'child_process'
-import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
-import { isAbsolute, resolve } from 'path'
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+import { isAbsolute, join, resolve } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 import { getGitIdentityFromEnv } from '../config/loader.js'
+import { getMergeBase } from '../github/client.js'
 import { cloneFromCache } from './repository-cache.js'
 
 const GIT_RESILIENCE_ARGS = [
@@ -143,6 +144,30 @@ export function isBaseRefUnavailableError(err: unknown): err is BaseRefUnavailab
   return err instanceof BaseRefUnavailableError
 }
 
+/**
+ * `origin/<base>...HEAD` in the review checkout is not the PR's diff. Everything
+ * downstream reads that range — the vendor's own `git diff`, classification, the
+ * diff hash, the fixer — so carrying on reviews a different change and posts the
+ * result as this PR's.
+ */
+export class ReviewRangeMismatchError extends Error {
+  constructor(
+    public readonly baseRef: string,
+    public readonly expectedMergeBase: string,
+    public readonly localMergeBases: readonly string[],
+  ) {
+    const short = (sha: string): string => sha.slice(0, 10)
+    const local = localMergeBases.length === 0
+      ? 'finds no merge base'
+      : `finds merge base${localMergeBases.length > 1 ? 's' : ''} ${localMergeBases.map(short).join(' and ')}`
+    super(
+      `origin/${baseRef}...HEAD is not this PR's diff: the review checkout ${local}, but GitHub's is `
+      + `${short(expectedMergeBase)}, so a review would read a different change than the PR's — refusing to review it.`,
+    )
+    this.name = 'ReviewRangeMismatchError'
+  }
+}
+
 function refExists(tmpDir: string, ref: string): boolean {
   try {
     execFileSync('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: tmpDir, stdio: ['ignore', 'pipe', 'ignore'] })
@@ -153,8 +178,9 @@ function refExists(tmpDir: string, ref: string): boolean {
 }
 
 // Clone the repo, fetch & checkout the PR head, and fetch the base ref into
-// refs/remotes/origin/<base>. onBaseFetchFailed lets callers log a warning;
-// other failures bubble up.
+// refs/remotes/origin/<base>, then prove `origin/<base>...HEAD` is the PR's diff.
+// onBaseFetchFailed lets callers log a warning; other failures bubble up, including
+// ReviewRangeMismatchError when no checkout reproduces the PR's diff.
 export async function clonePRForReview(params: {
   owner: string
   repo: string
@@ -182,13 +208,17 @@ export async function clonePRForReview(params: {
   isolateGitConfig()
   const { owner, repo, prNumber, baseRef, baseSha, tmpDir, token, protocol, onBaseFetchFailed, onBaseRefRecovered, onProgress } = params
   const cloneUrl = buildCloneUrl(owner, repo, token, protocol)
-  // Clone is retryable — transient network issues (curl 16/18, framing errors) are common.
-  // GIT_RESILIENCE_ARGS inline (-c flags) apply HTTP buffer/timeout settings without
-  // requiring a local repo to already exist.
-  // --progress forces git to emit stderr progress even when piped; without a
-  // progress consumer, stay --quiet so error output remains clean.
-  let cloned = false
+  const checkout = (deepenOnMismatch: boolean): Promise<CloneResult> => checkoutPRAgainstBase({
+    tmpDir, baseRef, prNumber, deepenOnMismatch,
+    githubMergeBase: (base, head) => getMergeBase(owner, repo, base, head, token),
+    ...(baseSha !== undefined && { baseSha }),
+    ...(onBaseFetchFailed !== undefined && { onBaseFetchFailed }),
+    ...(onBaseRefRecovered !== undefined && { onBaseRefRecovered }),
+    ...(onProgress !== undefined && { onProgress }),
+  })
+
   if (params.repositoryCache) {
+    let cached = false
     try {
       await cloneFromCache({
         source: cloneUrl, repository: `${owner}/${repo}`, prNumber, destination: tmpDir,
@@ -198,14 +228,48 @@ export async function clonePRForReview(params: {
           ? runGit([...GIT_RESILIENCE_ARGS, subcommand, ...(onProgress ? ['--progress'] : []), ...args], cwd, true, onProgress)
           : runGit([subcommand, ...args], cwd),
       })
-      cloned = true
+      cached = true
     } catch (err) {
       params.onCacheFailed?.(redactCloneSecrets(err instanceof Error ? err.message : String(err)))
     }
+    if (cached) {
+      try {
+        return await checkout(false)
+      } catch (err) {
+        // The cached checkout holds the PR's last 50 commits; a PR whose merge base
+        // lies deeper cannot be diffed from it. A fresh clone fetches the PR's whole
+        // history, so a wrong range earns it one retry. Any other failure is not the
+        // cache's and would fail the same way again.
+        if (!(err instanceof ReviewRangeMismatchError)) throw err
+        params.onCacheFailed?.(err.message)
+        // Emptied rather than removed: the caller's mkdtemp gave it owner-only access.
+        for (const entry of readdirSync(tmpDir)) rmSync(join(tmpDir, entry), { recursive: true, force: true })
+      }
+    }
   }
-  if (!cloned) {
-    await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress)
-  }
+
+  // Clone is retryable — transient network issues (curl 16/18, framing errors) are common.
+  // GIT_RESILIENCE_ARGS inline (-c flags) apply HTTP buffer/timeout settings without
+  // requiring a local repo to already exist.
+  // --progress forces git to emit stderr progress even when piped; without a
+  // progress consumer, stay --quiet so error output remains clean.
+  await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress)
+  return checkout(true)
+}
+
+async function checkoutPRAgainstBase(params: {
+  tmpDir: string
+  baseRef: string
+  prNumber: number
+  baseSha?: string
+  /** Fetch the base's whole history when its range proves wrong. Only a fresh clone is worth that. */
+  deepenOnMismatch: boolean
+  githubMergeBase: (base: string, head: string) => Promise<string>
+  onBaseFetchFailed?: () => void
+  onBaseRefRecovered?: (status: BaseRefStatus) => void
+  onProgress?: (line: string) => void
+}): Promise<CloneResult> {
+  const { tmpDir, baseRef, prNumber, baseSha, deepenOnMismatch, githubMergeBase, onBaseFetchFailed, onBaseRefRecovered, onProgress } = params
   await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir, true, onProgress)
   await runGit(['checkout', `pr-${prNumber}`], tmpDir)
 
@@ -224,7 +288,38 @@ export async function clonePRForReview(params: {
     ...(onBaseFetchFailed !== undefined && { onBaseFetchFailed }),
     ...(onBaseRefRecovered !== undefined && { onBaseRefRecovered }),
   })
+  // An unavailable base has no range to check, and every caller refuses it.
+  if (baseRefStatus !== 'unavailable') {
+    try {
+      await verifyReviewRange({ tmpDir, baseRef, githubMergeBase })
+    } catch (err) {
+      // A fresh clone is depth-50 of the default branch. When that is also this PR's
+      // base, fetching the PR head and the base ref adds nothing below the base's
+      // shallow boundary — the commits between it and the merge base were never
+      // fetched, and a ref that is already present is not deepened by fetching it
+      // again. A PR branched more than 50 commits back then has no path to its merge
+      // base. Deepening the base is the only fix, and it costs history, so it is
+      // reserved for a range that was just proven wrong, in a clone that has no
+      // cheaper fallback — the cached checkout falls back to this clone instead.
+      if (!deepenOnMismatch || !(err instanceof ReviewRangeMismatchError) || !isShallowRepository(tmpDir)) throw err
+      await deepenBaseRef({ tmpDir, baseRef, onProgress })
+      await verifyReviewRange({ tmpDir, baseRef, githubMergeBase })
+    }
+  }
   return { baseRefStatus }
+}
+
+function isShallowRepository(tmpDir: string): boolean {
+  return execFileSync('git', ['rev-parse', '--is-shallow-repository'], { cwd: tmpDir, encoding: 'utf8' }).trim() === 'true'
+}
+
+// Fetched by commit, not name: the base ref may have been recovered from a sha or a
+// merge ref and exist only locally, and `--unshallow` lifts the depth limit on
+// everything the fetch reaches, which is the base's whole history.
+async function deepenBaseRef(params: { tmpDir: string; baseRef: string; onProgress?: (line: string) => void }): Promise<void> {
+  const { tmpDir, baseRef, onProgress } = params
+  const tip = execFileSync('git', ['rev-parse', '--verify', `refs/remotes/origin/${baseRef}^{commit}`], { cwd: tmpDir, encoding: 'utf8' }).trim()
+  await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), '--unshallow', 'origin', tip], tmpDir, true, onProgress)
 }
 
 /**
@@ -266,11 +361,14 @@ export async function resolveBaseRef(params: {
   }
 
   // Recovery 1 — by commit. A deleted or renamed base branch has no name to fetch,
-  // but the commit stays reachable and GitHub still serves it. Depth matches the
-  // clone so the recovered ref carries the same history a by-name fetch would.
+  // but the commit stays reachable and GitHub still serves it. No --depth, so the
+  // recovered ref carries the same history a by-name fetch would: an unbounded fetch
+  // stops at commits the checkout already has, while --depth=50 draws a new shallow
+  // boundary 50 commits below the base tip — above the PR's branch point whenever
+  // the PR is further behind than that, which cuts the base off from the merge base.
   if (baseRefStatus === 'unavailable' && baseSha) {
     try {
-      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', '--depth=50', 'origin', baseSha], tmpDir, true)
+      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', baseSha], tmpDir, true)
       execFileSync('git', ['update-ref', `refs/remotes/origin/${baseRef}`, 'FETCH_HEAD'], { cwd: tmpDir, stdio: 'ignore' })
       if (refExists(tmpDir, `refs/remotes/origin/${baseRef}`)) baseRefStatus = 'recovered_by_sha'
     } catch { /* fall through to the merge-ref recovery */ }
@@ -278,10 +376,11 @@ export async function resolveBaseRef(params: {
 
   // Recovery 2 — via the PR's merge ref. GitHub keeps refs/pull/<n>/merge for an
   // open, mergeable PR; its first parent is the base tip. This survives even when
-  // the base commit itself is no longer directly fetchable.
+  // the base commit itself is no longer directly fetchable. Unbounded for the same
+  // reason as recovery 1.
   if (baseRefStatus === 'unavailable') {
     try {
-      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', '--depth=50', 'origin', `pull/${prNumber}/merge:refs/crosscheck/pr-${prNumber}-merge`], tmpDir, true)
+      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `pull/${prNumber}/merge:refs/crosscheck/pr-${prNumber}-merge`], tmpDir, true)
       const parent = execFileSync('git', ['rev-parse', `refs/crosscheck/pr-${prNumber}-merge^1`], { cwd: tmpDir, encoding: 'utf8' }).trim()
       execFileSync('git', ['update-ref', `refs/remotes/origin/${baseRef}`, parent], { cwd: tmpDir, stdio: 'ignore' })
       if (refExists(tmpDir, `refs/remotes/origin/${baseRef}`)) baseRefStatus = 'recovered_by_merge_ref'
@@ -292,6 +391,40 @@ export async function resolveBaseRef(params: {
     onBaseRefRecovered?.(baseRefStatus)
   }
   return baseRefStatus
+}
+
+/**
+ * Proves `origin/<baseRef>...HEAD` is the PR's diff, or throws ReviewRangeMismatchError.
+ *
+ * A shallow checkout's graph is only as good as its shallow boundaries, each a commit
+ * git treats as having no parents. One on the base branch's path to the merge base
+ * leaves git to answer with an older common ancestor reached some other way — or with
+ * none — and nothing downstream notices, because a diff of the wrong range is still a
+ * diff. GitHub holds the whole graph, so its merge base for the same two commits is
+ * the reference: matching it means the range is exactly the PR's.
+ *
+ * Compared against the merge base `git diff A...B` actually uses, the first of git's,
+ * so a history with several legitimate merge bases passes when git picks GitHub's.
+ */
+export async function verifyReviewRange(params: {
+  tmpDir: string
+  baseRef: string
+  /** GitHub's merge base for two exact commits. */
+  githubMergeBase: (base: string, head: string) => Promise<string>
+}): Promise<void> {
+  isolateGitConfig()
+  const { tmpDir, baseRef, githubMergeBase } = params
+  const git = (...args: string[]): string =>
+    execFileSync('git', args, { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  const base = git('rev-parse', '--verify', `refs/remotes/origin/${baseRef}^{commit}`)
+  const head = git('rev-parse', '--verify', 'HEAD^{commit}')
+  const expected = await githubMergeBase(base, head)
+  const mergeBases = (...flags: string[]): string[] => {
+    // Exits 1, printing nothing, when the two commits share no history.
+    try { return git('merge-base', ...flags, base, head).split('\n').filter(Boolean) } catch { return [] }
+  }
+  if (mergeBases()[0] === expected) return
+  throw new ReviewRangeMismatchError(baseRef, expected, mergeBases('--all'))
 }
 
 const HOOKS_DISABLED = NULL_DEVICE
