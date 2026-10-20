@@ -9,7 +9,7 @@ import type { CodexVendorConfig, QualityConfig } from '../config/schema.js'
 
 vi.mock('execa', () => ({ execa: vi.fn() }))
 
-const REJECTION = `ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}`
+const REJECTION = JSON.stringify({ type: 'turn.failed', error: { message: "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account." } })
 
 let repoDir: string
 
@@ -37,9 +37,9 @@ describe('runCodexReview model fallback', () => {
     const execaMock = vi.mocked(execa) as ReturnType<typeof vi.fn>
     execaMock.mockImplementation(async (_command: string, args: string[]) => {
       if (args.includes('model="gpt-6.1-sol"')) {
-        throw Object.assign(new Error('Command failed with exit code 1: codex exec'), { exitCode: 1, stderr: `model: gpt-6.1-sol\n${REJECTION}` })
+        throw Object.assign(new Error('Command failed with exit code 1: codex exec -'), { exitCode: 1, stdout: REJECTION, stderr: `model: gpt-6.1-sol\n${REJECTION}` })
       }
-      return { stdout: 'No issues found.\n\nVERDICT: APPROVE', stderr: '' } as never
+      return { stdout: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'No issues found.\n\nVERDICT: APPROVE' } }), stderr: '' } as never
     })
     const quality = { tier: 'balanced', mode: 'smart', review_memory: true, focus: [] } as unknown as QualityConfig
     const vendor = {
@@ -54,5 +54,10 @@ describe('runCodexReview model fallback', () => {
     expect(result.model).toBe('gpt-6-sol')
     expect(result.review).toContain('VERDICT: APPROVE')
     expect(notices).toContain('  codex rejected model gpt-6.1-sol — retrying review with gpt-6-sol')
+    const [command, args, options] = execaMock.mock.calls.at(-1) as [string, string[], { input: string }]
+    expect(command).toBe('codex')
+    expect(args).toContain('--json')
+    expect(args.at(-1)).toBe('-')
+    expect(options.input).toContain('Review only the changes introduced in this PR')
   })
 })
