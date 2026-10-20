@@ -1,5 +1,3 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs'
-import yaml from 'js-yaml'
 import { log as fileLog } from './logger.js'
 import { CODEX_TIER_MODELS_API, CODEX_TIER_MODELS_SUBSCRIPTION } from './review-models.js'
 
@@ -66,43 +64,4 @@ export async function withCodexModelFallback<T>(
       current = next
     }
   }
-}
-
-export interface CodexModelReconcileChange { key: string; from: string; to: string }
-
-// An earlier onboard wrote the API tier map into every config. Under
-// subscription auth those IDs are replaced with their subscription twins; a
-// value that is not a shipped API default was chosen by the user and is kept.
-export function reconcileCodexModels(configPath: string | null): CodexModelReconcileChange[] {
-  if (!configPath || !existsSync(configPath)) return []
-  const raw = yaml.load(readFileSync(configPath, 'utf8'))
-  if (!raw || typeof raw !== 'object') return []
-  const codex = (raw as { vendors?: { codex?: Record<string, unknown> } }).vendors?.codex
-  if (!codex || typeof codex !== 'object' || codex.auth === 'api-key') return []
-
-  const changes: CodexModelReconcileChange[] = []
-  if (typeof codex.model === 'string') {
-    const twin = subscriptionTwin(codex.model)
-    if (twin) {
-      changes.push({ key: 'vendors.codex.model', from: codex.model, to: twin })
-      codex.model = twin
-    }
-  }
-  const tiers = codex.model_tiers
-  if (tiers && typeof tiers === 'object') {
-    const tierMap = tiers as Record<string, unknown>
-    for (const tier of TIERS) {
-      const configured = tierMap[tier]
-      if (configured !== CODEX_TIER_MODELS_API[tier] || configured === CODEX_TIER_MODELS_SUBSCRIPTION[tier]) continue
-      changes.push({ key: `vendors.codex.model_tiers.${tier}`, from: String(configured), to: CODEX_TIER_MODELS_SUBSCRIPTION[tier] })
-      tierMap[tier] = CODEX_TIER_MODELS_SUBSCRIPTION[tier]
-    }
-  }
-  if (changes.length === 0) return []
-
-  writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
-  for (const change of changes) {
-    console.log(`  updated ${change.key}: ${change.from} → ${change.to} (${change.from} is not available to a ChatGPT-account codex login)`)
-  }
-  return changes
 }

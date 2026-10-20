@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { execFileSync } from 'child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { ConfigSchema } from '../config/schema.js'
@@ -136,6 +136,30 @@ beforeEach(() => {
 })
 
 describe('crosscheck review under quality.mode: smart', () => {
+  it('reads a read-only Codex config without rewriting it at review startup', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'codex-config-readonly-'))
+    const configPath = join(configDir, 'crosscheck.config.yml')
+    const original = [
+      '# Keep the operator comment and their selected model.',
+      'vendors:',
+      '  codex:',
+      '    auth: subscription',
+      '    model: gpt-6.1-sol # intentionally selected',
+      '',
+    ].join('\n')
+    writeFileSync(configPath, original)
+    chmodSync(configPath, 0o444)
+
+    try {
+      h.files = ['src/a.ts']
+      await runReview('https://github.com/acme/app/pull/7', configPath, 'claude', true)
+      expect(readFileSync(configPath, 'utf8')).toBe(original)
+    } finally {
+      chmodSync(configPath, 0o644)
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  })
+
   it('reviews a standard PR at the standard class tier and cites it', async () => {
     h.files = ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts']
     await review()
