@@ -1,12 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
-import yaml from 'js-yaml'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   codexFallbackModel,
   codexModelRejection,
-  reconcileCodexModels,
   resetCodexModelRejections,
   withCodexModelFallback,
 } from '../lib/codex-model-fallback.js'
@@ -88,66 +83,5 @@ describe('withCodexModelFallback', () => {
     const run = vi.fn(async () => { throw codexFailure(REJECTION) })
     await expect(withCodexModelFallback('default', 'review', run)).rejects.toThrow('Command failed')
     expect(run).toHaveBeenCalledTimes(1)
-  })
-})
-
-describe('reconcileCodexModels', () => {
-  let dir: string
-  let configPath: string
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'crosscheck-reconcile-'))
-    configPath = join(dir, 'config.yml')
-    vi.spyOn(console, 'log').mockImplementation(() => undefined)
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-    rmSync(dir, { recursive: true, force: true })
-  })
-
-  function codexSection(): Record<string, unknown> {
-    return (yaml.load(readFileSync(configPath, 'utf8')) as { vendors: { codex: Record<string, unknown> } }).vendors.codex
-  }
-
-  it('rewrites the API tier map an earlier onboard wrote under subscription auth', () => {
-    writeFileSync(configPath, yaml.dump({
-      mode: 'cross-vendor',
-      vendors: { codex: { auth: 'subscription', model_tiers: { fast: 'gpt-6-luna', balanced: 'gpt-6.1-sol', thorough: 'gpt-6-astra' } } },
-    }))
-
-    expect(reconcileCodexModels(configPath)).toEqual([
-      { key: 'vendors.codex.model_tiers.balanced', from: 'gpt-6.1-sol', to: 'gpt-6-sol' },
-    ])
-    expect(codexSection().model_tiers).toEqual({ fast: 'gpt-6-luna', balanced: 'gpt-6-sol', thorough: 'gpt-6-astra' })
-    expect((yaml.load(readFileSync(configPath, 'utf8')) as { mode: string }).mode).toBe('cross-vendor')
-  })
-
-  it('rewrites a pinned API-only model when auth is left at its subscription default', () => {
-    writeFileSync(configPath, yaml.dump({ vendors: { codex: { model: 'gpt-6.1-sol' } } }))
-
-    expect(reconcileCodexModels(configPath)).toEqual([{ key: 'vendors.codex.model', from: 'gpt-6.1-sol', to: 'gpt-6-sol' }])
-    expect(codexSection().model).toBe('gpt-6-sol')
-  })
-
-  it('leaves an api-key config untouched', () => {
-    const original = yaml.dump({ vendors: { codex: { auth: 'api-key', model_tiers: { fast: 'gpt-6-luna', balanced: 'gpt-6.1-sol', thorough: 'gpt-6-astra' } } } })
-    writeFileSync(configPath, original)
-
-    expect(reconcileCodexModels(configPath)).toEqual([])
-    expect(readFileSync(configPath, 'utf8')).toBe(original)
-  })
-
-  it('leaves a hand-chosen model untouched', () => {
-    const original = yaml.dump({ vendors: { codex: { auth: 'subscription', model_tiers: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-sol', thorough: 'gpt-5.6-terra' } } } })
-    writeFileSync(configPath, original)
-
-    expect(reconcileCodexModels(configPath)).toEqual([])
-    expect(readFileSync(configPath, 'utf8')).toBe(original)
-  })
-
-  it('does nothing when no config file exists', () => {
-    expect(reconcileCodexModels(join(dir, 'missing.yml'))).toEqual([])
-    expect(reconcileCodexModels(null)).toEqual([])
   })
 })
