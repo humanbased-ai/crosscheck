@@ -60,4 +60,16 @@ describe('runCodexReview model fallback', () => {
     expect(args.at(-1)).toBe('-')
     expect(options.input).toContain('Review only the changes introduced in this PR')
   })
+
+  it('preserves the spawn error when Codex returns no stdout or stderr', async () => {
+    const { execa } = await import('execa')
+    const execaMock = vi.mocked(execa) as ReturnType<typeof vi.fn>
+    execaMock.mockRejectedValueOnce(Object.assign(new Error('spawn EACCES: permission denied'), { code: 'EACCES' }))
+    const quality = { tier: 'balanced', mode: 'smart', review_memory: true, focus: [] } as unknown as QualityConfig
+    const vendor = { auth: 'subscription', effort: 'medium' } as unknown as CodexVendorConfig
+
+    await expect(
+      runCodexReview(repoDir, 'main', 'Add appeal audit trail', quality, vendor),
+    ).rejects.toThrow('codex: spawn EACCES: permission denied')
+  })
 })

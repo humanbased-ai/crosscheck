@@ -315,7 +315,7 @@ async function reviewWithCodexModel(
       const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
       const summary = execa.timedOut
         ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large (tier: ${quality.tier})`
-        : vendorFailureSummary({ ...execa, stderr: turnFailure || rawStderr, stdout: turnFailure ? undefined : execa.stdout }, extractErrorSummary)
+        : vendorFailureSummary({ ...execa, message: execa.message, stderr: turnFailure || rawStderr, stdout: turnFailure ? undefined : execa.stdout }, extractErrorSummary)
       const thrown = Object.assign(new Error(`codex: ${summary}`), {
         exitCode: execa.exitCode,
         code: execa.code,
