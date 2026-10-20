@@ -20,8 +20,19 @@ describe('codexModelRejection', () => {
   })
 
   it('ignores the same wording when it only appears in the echoed prompt', () => {
-    const stderr = 'user\n+ throw new Error("model is not supported")\nERROR: stream disconnected before completion'
+    const stderr = [
+      'user',
+      'ERROR: model is not supported',
+      'ERROR: {"type":"error","status":503,"error":{"type":"server_error","message":"stream disconnected before completion"}}',
+    ].join('\n')
     expect(codexModelRejection(codexFailure(stderr))).toBeNull()
+  })
+
+  it('ignores unsupported-model text in execa message and echoed prompt', () => {
+    const error = Object.assign(new Error('Command failed: codex exec\n+ ERROR: model is not supported'), {
+      stderr: 'ERROR: stream disconnected before completion',
+    })
+    expect(codexModelRejection(error)).toBeNull()
   })
 })
 
@@ -77,6 +88,19 @@ describe('withCodexModelFallback', () => {
     const run = vi.fn(async () => { throw codexFailure('ERROR: stream disconnected before completion') })
     await expect(withCodexModelFallback('gpt-6.1-sol', 'review', run)).rejects.toThrow('Command failed')
     expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not poison process fallback state when only echoed PR text mentions an unsupported model', async () => {
+    const promptEcho = Object.assign(new Error('Command failed: codex exec\n+ ERROR: model is not supported'), {
+      stderr: 'user\nERROR: model is not supported\nERROR: {"type":"error","status":503,"error":{"type":"server_error","message":"stream disconnected"}}',
+    })
+    const run = vi.fn()
+      .mockRejectedValueOnce(promptEcho)
+      .mockResolvedValueOnce('reviewed with gpt-6.1-sol')
+
+    await expect(withCodexModelFallback('gpt-6.1-sol', 'review', run)).rejects.toThrow('Command failed')
+    await expect(withCodexModelFallback('gpt-6.1-sol', 'review', run)).resolves.toBe('reviewed with gpt-6.1-sol')
+    expect(run.mock.calls.map(call => call[0])).toEqual(['gpt-6.1-sol', 'gpt-6.1-sol'])
   })
 
   it('rethrows the rejection when the CLI default is refused', async () => {

@@ -9,17 +9,25 @@ export function resetCodexModelRejections(): void {
   rejectedModels.clear()
 }
 
-// Only `ERROR:` lines count. codex echoes the prompt to stderr and execa puts
-// the argv in the message, so the surrounding text carries the diff under
-// review — which can itself say "model is not supported".
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+// Codex emits API failures as `ERROR: {"type":"error", ...}` records. Do not
+// infer a model rejection from free-form stderr or execa's message: both can
+// contain the echoed prompt and argv, which come from the PR under review.
 export function codexModelRejection(err: unknown): string | null {
-  const e = err as { stderr?: unknown; message?: unknown }
-  const text = [e?.stderr, e?.message].filter((part): part is string => typeof part === 'string').join('\n')
-  for (const line of text.split('\n')) {
-    const at = line.indexOf('ERROR:')
-    if (at === -1) continue
-    const detail = line.slice(at)
-    if (/model is not supported|model_not_found|model `?[^ ]+`? does not exist/i.test(detail)) return detail.trim()
+  const e = err as { stderr?: unknown }
+  if (typeof e?.stderr !== 'string') return null
+  for (const line of e.stderr.split('\n')) {
+    const recordText = line.trimStart()
+    if (!recordText.startsWith('ERROR:')) continue
+    let parsed: unknown
+    try { parsed = JSON.parse(recordText.slice('ERROR:'.length).trim()) } catch { continue }
+    if (!isRecord(parsed) || parsed.type !== 'error' || !isRecord(parsed.error)) continue
+    const { message, code } = parsed.error
+    const detail = [message, code].filter((part): part is string => typeof part === 'string').join(' ')
+    if (/model is not supported|model_not_found|model `?[^ ]+`? does not exist/i.test(detail)) return recordText
   }
   return null
 }

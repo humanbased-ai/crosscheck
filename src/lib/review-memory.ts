@@ -214,7 +214,7 @@ export const STRUCTURED_FALLBACK_WARNING =
 
 // Read apart from Report so a report that is otherwise invalid still says why it
 // did not run.
-const Coverage = z.object({ coverage: z.string(), summary: z.string().optional() })
+const Coverage = z.object({ coverage: z.string() }).passthrough()
 
 /**
  * The reviewer's own statement that the requested review did not run — any
@@ -227,7 +227,9 @@ function notRunReason(raw: string): string | undefined {
   const parsed = Coverage.safeParse(json)
   if (!parsed.success || parsed.data.coverage === 'complete') return undefined
   // Model output, bound for logs and the run's error line.
-  const summary = parsed.data.summary ? `: ${clip(parsed.data.summary.replace(/\s+/g, ' '))}` : ''
+  const summary = typeof parsed.data.summary === 'string'
+    ? `: ${clip(parsed.data.summary.replace(/\s+/g, ' '))}`
+    : ''
   return `reviewer reported coverage "${clip(parsed.data.coverage)}"${summary}`
 }
 
