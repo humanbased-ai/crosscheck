@@ -13,6 +13,7 @@ const TierModelSchema = z.object({
 const ReviewModelTierConfigSchema = z.object({
   claude: TierModelSchema,
   codex_api: TierModelSchema,
+  codex_subscription: TierModelSchema,
 })
 
 const rawReviewModelTierConfig: unknown = require('../config/review-model-tiers.json')
@@ -20,6 +21,8 @@ const reviewModelTierConfig = ReviewModelTierConfigSchema.parse(rawReviewModelTi
 
 export const CLAUDE_TIER_MODELS: Record<QualityConfig['tier'], string> = reviewModelTierConfig.claude
 export const CODEX_TIER_MODELS_API: Record<QualityConfig['tier'], string> = reviewModelTierConfig.codex_api
+// A ChatGPT-account login is served a different model catalog than an API key.
+export const CODEX_TIER_MODELS_SUBSCRIPTION: Record<QualityConfig['tier'], string> = reviewModelTierConfig.codex_subscription
 
 /**
  * The tier in force for one call. Under `quality.mode: 'smart'` the per-PR

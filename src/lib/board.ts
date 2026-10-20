@@ -98,7 +98,7 @@ export type Outcome = 'APPROVE' | 'NEEDS WORK' | 'BLOCK' | 'no verdict' | 'skipp
 const OUTCOME_ORDER: readonly Outcome[] = ['APPROVE', 'NEEDS WORK', 'BLOCK', 'no verdict', 'skipped', 'error']
 
 interface Stats {
-  prsReceived: number
+  processingRuns: number
   crsCompleted: number
   fixesApplied: number
   errorsOccurred: number
@@ -393,6 +393,7 @@ const LAYOUT_COMPACT: LayoutOpts = { foldAll: true, connLogLines: COMPACT_CONN_L
 
 export class PRBoard {
   private slots = new Map<string, PRSlot>()
+  private seenPRs = new Set<string>()
   private frameIdx = 0
   private timer: ReturnType<typeof setInterval> | null = null
   private liveLines = 0
@@ -405,7 +406,7 @@ export class PRBoard {
   private stdinWasRaw = false
 
   private stats: Stats = {
-    prsReceived: 0,
+    processingRuns: 0,
     crsCompleted: 0,
     fixesApplied: 0,
     errorsOccurred: 0,
@@ -482,7 +483,8 @@ export class PRBoard {
       }
     }
     this.slots.set(key, { prNumber, repo, branch, label: 'cloning...', startedAt: Date.now(), phase: 'queued', round: round ?? 1 })
-    this.stats.prsReceived++
+    this.seenPRs.add(`${repo}#${prNumber}`)
+    this.stats.processingRuns++
   }
 
   updatePR(key: string, updates: PRUpdate): void {
@@ -669,14 +671,14 @@ export class PRBoard {
   }
 
   private statsRow(): string {
-    const { prsReceived, crsCompleted, fixesApplied, errorsOccurred, crTotalMs } = this.stats
+    const { processingRuns, crsCompleted, fixesApplied, errorsOccurred, crTotalMs } = this.stats
     const avgCr = crsCompleted > 0
       ? `  │  avg CR: ${fmtDuration(Math.round(crTotalMs / crsCompleted))}`
       : ''
     const errorPart = errorsOccurred > 0
       ? ` · ${chalk.red(`errors: ${errorsOccurred}`)}`
       : ''
-    return `PRs: ${prsReceived} · CRs: ${crsCompleted}${errorPart} · fixes: ${fixesApplied}${avgCr}`
+    return `PRs: ${this.seenPRs.size} · processing runs: ${processingRuns} · CRs: ${crsCompleted}${errorPart} · fixes: ${fixesApplied}${avgCr}`
   }
 
   private renderPRSlot(slot: PRSlot, frame: string, numWidth = 0): string {
@@ -1073,7 +1075,7 @@ export class PRBoard {
     const position = this.page === 0
       ? `${t.success('live')}${this.pageCount > 1 ? t.dim(` · page 1/${this.pageCount}`) : ''}`
       : t.dim(`history · page ${this.page + 1}/${this.pageCount}`)
-    // "shown of retained", not of stats.prsReceived: rounds add rows, and the
+    // "shown of retained", not of the cumulative processing runs: rounds add rows, and the
     // history cap eventually drops the oldest, so the two counts diverge.
     const counts = t.dim(`showing ${shown} of ${total}`)
     // A key with nowhere to go fades to the muted colour: ← on the live page,

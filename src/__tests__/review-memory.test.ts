@@ -147,6 +147,22 @@ describe('review memory', () => {
     expect(blocked.text).not.toMatch(/VERDICT/); expect(blocked.text).toContain('could not run')
     expect(finishReviewOrFallback(plan(), report()).fallbackReason).toBeUndefined()
   })
+  it('reports a review whose coverage is not complete as not run, rather than as a postable fallback', () => {
+    // humanbased-ai/monorepo#5681 round 2: the reviewer said in `coverage` that the
+    // requested review never ran, and crosscheck posted its raw JSON anyway — no
+    // verdict, next_step=fix.
+    const raw = JSON.stringify({ summary: 'Full review blocked by ambiguous ancestry: the range has two merge bases.', coverage: 'blocked', findings: [{ ...issue, status: 'resolved' }] })
+    const result = finishReviewOrFallback(plan(), `${raw}\n\nVERDICT: APPROVE`)
+    expect(result.notRun).toContain('blocked'); expect(result.notRun).toContain('ambiguous ancestry')
+    expect(result.snapshot).toBeUndefined(); expect(result.fallbackReason).toBeUndefined()
+    expect(result.text).not.toMatch(/VERDICT/)
+    expect(finishReviewOrFallback(plan(), '{"summary":"Partly read","coverage":"partial","findings":[]}').notRun).toContain('partial')
+    const malformedSummary = finishReviewOrFallback(plan(), '{"summary":null,"coverage":"partial","findings":[]}')
+    expect(malformedSummary.notRun).toContain('partial')
+    expect(malformedSummary.fallbackReason).toBeUndefined()
+    expect(malformedSummary.text).not.toMatch(/VERDICT/)
+    expect(finishReviewOrFallback(plan(), report()).notRun).toBeUndefined()
+  })
   it.each([['P0', 'BLOCK'], ['P1', 'BLOCK'], ['P2', 'NEEDS WORK'], ['P3', 'APPROVE']])('computes %s verdict independently of summary wording', (priority, verdict) => {
     expect(finishReview(plan(), report([{ ...issue, priority }])).text).toMatch(`VERDICT: ${verdict}`)
   })

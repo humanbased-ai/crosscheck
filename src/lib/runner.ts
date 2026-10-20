@@ -1478,8 +1478,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // reports it could not review produces a findings-free body, which the
       // severity gate reads as "nits only" and upgrades to APPROVE: a PR cleared
       // to merge on the strength of a review that never ran. Refuse to post at
-      // all instead, the same way an unverifiable sha is refused below.
-      const inconclusive = detectInconclusiveReview(clean)
+      // all instead, the same way an unverifiable sha is refused below. A
+      // structured review states this outright, in its `coverage` field.
+      const inconclusive = structured?.notRun
+        ? { inconclusive: true, reason: structured.notRun }
+        : detectInconclusiveReview(clean)
       if (inconclusive.inconclusive) {
         fileLog({ level: 'error', event: 'review_inconclusive', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, reason: inconclusive.reason, raw_verdict: parsed.verdict, output_length: rawReview.length, ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
         log(chalk.red(`✗ ${reviewer} did not review PR #${prNumber} — ${inconclusive.reason}`))

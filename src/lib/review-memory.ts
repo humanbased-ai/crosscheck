@@ -212,17 +212,46 @@ export function finishReview(plan: ReviewPlan, raw: string): { text: string; sna
 export const STRUCTURED_FALLBACK_WARNING =
   '> ⚠️ The reviewer did not return a valid structured review, so crosscheck is posting its raw output without a verdict. Findings were not tracked for the next review.'
 
+// Read apart from Report so a report that is otherwise invalid still says why it
+// did not run.
+const Coverage = z.object({ coverage: z.string() }).passthrough()
+
+/**
+ * The reviewer's own statement that the requested review did not run — any
+ * `coverage` other than "complete" — or undefined when it claims it did, or the
+ * output carries no report at all.
+ */
+function notRunReason(raw: string): string | undefined {
+  let json: unknown
+  try { json = extractJson(raw) } catch { return undefined }
+  const parsed = Coverage.safeParse(json)
+  if (!parsed.success || parsed.data.coverage === 'complete') return undefined
+  // Model output, bound for logs and the run's error line.
+  const summary = typeof parsed.data.summary === 'string'
+    ? `: ${clip(parsed.data.summary.replace(/\s+/g, ' '))}`
+    : ''
+  return `reviewer reported coverage "${clip(parsed.data.coverage)}"${summary}`
+}
+
 /**
  * finishReview, but a malformed or contract-violating report degrades to the raw
  * output with every VERDICT line removed, so it can never be posted as an approval.
+ *
+ * A report whose coverage is not "complete" is the exception: the reviewer says
+ * the review never ran, so there is nothing to post, verdict or not. That comes
+ * back as `notRun`, and the caller fails the run the way it fails any review that
+ * did not happen — posting it instead put a verdict-less review on the PR with
+ * next_step=fix, after a review of the wrong diff (humanbased-ai/monorepo#5681).
  */
-export function finishReviewOrFallback(plan: ReviewPlan, raw: string): { text: string; snapshot?: Snapshot; fallbackReason?: string; adjustments?: string[] } {
+export function finishReviewOrFallback(plan: ReviewPlan, raw: string): { text: string; snapshot?: Snapshot; fallbackReason?: string; adjustments?: string[]; notRun?: string } {
+  const body = (): string => raw.split('\n').filter(line => !/VERDICT\s*:/i.test(line)).join('\n').trim()
+  const notRun = notRunReason(raw)
+  if (notRun) return { text: body(), notRun }
   try {
     return finishReview(plan, raw)
   } catch (err) {
     const fallbackReason = err instanceof z.ZodError ? 'structured review failed schema validation' : err instanceof Error ? err.message : String(err)
-    const body = raw.split('\n').filter(line => !/VERDICT\s*:/i.test(line)).join('\n').trim()
-    return { text: `${STRUCTURED_FALLBACK_WARNING}\n\n${body}`, fallbackReason }
+    return { text: `${STRUCTURED_FALLBACK_WARNING}\n\n${body()}`, fallbackReason }
   }
 }
 

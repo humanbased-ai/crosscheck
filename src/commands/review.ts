@@ -331,7 +331,9 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
     // Inconclusive gate, ahead of the severity gate for the reason spelled out in
     // runner.ts: a findings-free non-review would otherwise be upgraded to APPROVE.
-    const inconclusive = detectInconclusiveReview(clean)
+    const inconclusive = structured?.notRun
+      ? { inconclusive: true, reason: structured.notRun }
+      : detectInconclusiveReview(clean)
     if (inconclusive.inconclusive) {
       fileLog({ level: 'error', event: 'review_inconclusive', repo: `${owner}/${repo}`, pr: number, reviewer, model, reason: inconclusive.reason, raw_verdict: parsed.verdict ?? undefined, output_length: reviewText.length })
       console.log(chalk.red(`\n✗ ${reviewer} did not review PR #${number} — ${inconclusive.reason}`))
