@@ -205,6 +205,17 @@ describe('buildCodexReviewPrompt', () => {
 })
 
 describe('parseCodexTokensUsed', () => {
+  it('reads input and output token counts from the completed JSONL event', () => {
+    const event = JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1250, output_tokens: 315 } })
+    expect(parseCodexTokensUsed(`${JSON.stringify({ type: 'thread.started' })}\n${event}`)).toBe(1565)
+  })
+
+  it('uses the latest completed JSONL event when the run retried', () => {
+    const first = JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 100, output_tokens: 20 } })
+    const last = JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 250, output_tokens: 30 } })
+    expect(parseCodexTokensUsed(`${first}\n${last}`)).toBe(280)
+  })
+
   // `codex exec` reports usage as a "tokens used" heading with the count on the
   // next line; `codex review` used an inline "tokens: N". Both are accepted so
   // the telemetry survived the move between subcommands.

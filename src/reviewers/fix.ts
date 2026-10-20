@@ -1,4 +1,4 @@
-import { codexModelRejection, withCodexModelFallback } from '../lib/codex-model-fallback.js'
+import { codexModelRejection, codexTurnFailureMessage, withCodexJsonlOutput, withCodexModelFallback } from '../lib/codex-model-fallback.js'
 import { execSync } from 'child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
@@ -6,7 +6,7 @@ import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeEffort } from './claude.js'
-import { codexReasoningEffort } from './codex.js'
+import { codexReasoningEffort, parseCodexTokensUsed } from './codex.js'
 import { opencodeEffort, isolateCheckoutOpenCodeConfig, parseOpenCodeOutput } from './opencode.js'
 import { claudeSkillBrokerArgs, codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { buildCodexEnv } from './codex-env.js'
@@ -301,26 +301,29 @@ export async function runCodexFixStep(
 
   const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
 
+  let tokensUsed: number | undefined
   try {
-    await withCodexModelFallback(model, 'fix', usedModel => withCredentialFreeOrigin(tmpDir, () => execa(
+    const result = await withCodexModelFallback(model, 'fix', usedModel => withCredentialFreeOrigin(tmpDir, () => withCodexJsonlOutput(() => execa(
       'codex',
       // --ignore-user-config and the env allowlist for the same reason as the
       // review path: this step reads an untrusted diff, and with
       // skills.codex_full_access it runs unsandboxed.
-      ['exec', '--ignore-user-config', ...(usedModel !== 'default' ? ['-c', `model="${usedModel}"`] : []), '-c', `model_reasoning_effort="${effort}"`, ...codexSkillBrokerArgs(skillSession, codexFullAccess), prompt],
+      ['exec', '--json', '--ignore-user-config', ...(usedModel !== 'default' ? ['-c', `model="${usedModel}"`] : []), '-c', `model_reasoning_effort="${effort}"`, ...codexSkillBrokerArgs(skillSession, codexFullAccess), '-'],
       {
         cwd: tmpDir,
         timeout: resolvedTimeout,
+        input: prompt,
         extendEnv: false,
         env: buildCodexEnv({ CODEX_QUIET_MODE: '1' }),
       },
-    )))
+    ))))
+    tokensUsed = parseCodexTokensUsed(result.stdout ?? '')
   } catch (err) {
     // Before the auth test: its pattern matches the prompt echoed in the error,
     // so a rejected model on a diff mentioning "auth" was reported as a login failure.
     const rejection = codexModelRejection(err)
     if (rejection) throw new Error(`codex rejected the configured model during fix step — ${rejection}`)
-    const msg = err instanceof Error ? err.message : String(err)
+    const msg = codexTurnFailureMessage((err as { codexJsonl?: unknown })?.codexJsonl) ?? ''
     if (/not logged in|auth|credential/i.test(msg)) {
       throw new Error('codex auth failure during fix step — run: codex login')
     }
@@ -334,7 +337,7 @@ export async function runCodexFixStep(
     ...(changedOutput ? changedOutput.split('\n').filter(Boolean) : []),
     ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
   ]
-  return { appliedCount: changedFiles.length, changedFiles, effort }
+  return { appliedCount: changedFiles.length, changedFiles, tokensUsed, effort }
 }
 
 // OpenCode fix: like codex, opencode is an agentic tool that edits files

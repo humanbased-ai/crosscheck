@@ -13,23 +13,42 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-// Codex emits API failures as `ERROR: {"type":"error", ...}` records. Do not
-// infer a model rejection from free-form stderr or execa's message: both can
-// contain the echoed prompt and argv, which come from the PR under review.
-export function codexModelRejection(err: unknown): string | null {
-  const e = err as { stderr?: unknown }
-  if (typeof e?.stderr !== 'string') return null
-  for (const line of e.stderr.split('\n')) {
-    const recordText = line.trimStart()
-    if (!recordText.startsWith('ERROR:')) continue
-    let parsed: unknown
-    try { parsed = JSON.parse(recordText.slice('ERROR:'.length).trim()) } catch { continue }
-    if (!isRecord(parsed) || parsed.type !== 'error' || !isRecord(parsed.error)) continue
-    const { message, code } = parsed.error
-    const detail = [message, code].filter((part): part is string => typeof part === 'string').join(' ')
-    if (/model is not supported|model_not_found|model `?[^ ]+`? does not exist/i.test(detail)) return recordText
+// Only trust the CLI's top-level JSONL terminal event. Stderr, execa's message,
+// and nested agent text can all contain content copied from the PR under review.
+export function codexTurnFailureMessage(jsonl: unknown): string | null {
+  if (typeof jsonl !== 'string') return null
+  let message: string | null = null
+  for (const line of jsonl.split('\n')) {
+    let event: unknown
+    try { event = JSON.parse(line) } catch { continue }
+    if (!isRecord(event) || event.type !== 'turn.failed' || !isRecord(event.error)) continue
+    if (typeof event.error.message === 'string') message = event.error.message
   }
-  return null
+  return message
+}
+
+export function codexModelRejection(err: unknown): string | null {
+  const e = err as { codexJsonl?: unknown }
+  const detail = codexTurnFailureMessage(e?.codexJsonl)
+  return detail && /model is not supported|model_not_found|model `?[^ ]+`? does not exist/i.test(detail)
+    ? detail
+    : null
+}
+
+// Keep the machine-readable stream on execa errors so the fallback classifier
+// can inspect a CLI event without trusting stderr or an echoed prompt.
+export async function withCodexJsonlOutput<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (err) {
+    const stdout = (err as { stdout?: unknown } | null)?.stdout
+    if (typeof stdout === 'string') {
+      const wrapped = err instanceof Error ? err : new Error(String(err))
+      Object.assign(wrapped, { codexJsonl: stdout })
+      throw wrapped
+    }
+    throw err
+  }
 }
 
 function subscriptionTwin(model: string): string | undefined {

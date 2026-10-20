@@ -7,7 +7,7 @@ import { delimiter, join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveCodexModel } from '../lib/review-models.js'
-import { withCodexModelFallback } from '../lib/codex-model-fallback.js'
+import { codexTurnFailureMessage, withCodexModelFallback } from '../lib/codex-model-fallback.js'
 import type { ReviewResult } from './claude.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { vendorFailureSummary } from '../lib/vendor-error-summary.js'
@@ -102,17 +102,42 @@ export function buildCodexReviewPrompt(input: CodexReviewPromptInput): string {
   ].filter(Boolean).join('\n\n')
 }
 
-// `codex exec` prints usage as a "tokens used" heading with the count beneath it;
-// `codex review` used an inline "tokens: N". Both are read so the move between
-// subcommands did not silently drop token telemetry. Anchored to the start of a
-// line so the word "tokens" in review prose cannot be mistaken for a usage
-// report, and takes the last match because a retried run reports more than once.
+function codexJsonlEvents(output: string): Record<string, unknown>[] {
+  const events: Record<string, unknown>[] = []
+  for (const line of output.split('\n')) {
+    try {
+      const event: unknown = JSON.parse(line)
+      if (typeof event === 'object' && event !== null && !Array.isArray(event)) events.push(event as Record<string, unknown>)
+    } catch { /* ignore non-event lines */ }
+  }
+  return events
+}
+
+// JSONL usage is authoritative; keep the older text forms for compatibility
+// with captured logs and older Codex CLI versions.
 export function parseCodexTokensUsed(output: string): number | undefined {
+  const events = codexJsonlEvents(output)
+  const completed = events.filter(event => event.type === 'turn.completed').at(-1)
+  const usage = completed?.usage
+  if (typeof usage === 'object' && usage !== null && !Array.isArray(usage)) {
+    const { input_tokens, output_tokens } = usage as Record<string, unknown>
+    if (typeof input_tokens === 'number' && typeof output_tokens === 'number') return input_tokens + output_tokens
+  }
   const matches = [...output.matchAll(/^[^\S\n]*tokens(?:\s+used\s*\n|\s*:)[^\S\n]*([\d,]+)/gim)]
   const last = matches.at(-1)
   if (!last) return undefined
   const parsed = parseInt(last[1].replace(/,/g, ''), 10)
   return Number.isNaN(parsed) ? undefined : parsed
+}
+
+function parseCodexFinalMessage(output: string): string | undefined {
+  const messages = codexJsonlEvents(output)
+    .filter(event => event.type === 'item.completed')
+    .map(event => event.item)
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null && !Array.isArray(item))
+    .filter(item => item.type === 'agent_message' && typeof item.text === 'string')
+    .map(item => item.text as string)
+  return messages.at(-1)
 }
 
 function isRetryableCodexError(message: string): boolean {
@@ -232,7 +257,7 @@ async function reviewWithCodexModel(
             // reachable from a prompt injection. Crosscheck passes everything it
             // needs with -c, so there is nothing to lose by ignoring the rest.
             // Auth is unaffected: it lives in auth.json, not config.toml.
-            ['exec', '--ignore-user-config', '-c', 'project_doc_max_bytes=0', ...modelArgs, ...effortArgs, ...skillArgs, '--output-last-message', lastMessagePath, '-'],
+            ['exec', '--json', '--ignore-user-config', '-c', 'project_doc_max_bytes=0', ...modelArgs, ...effortArgs, ...skillArgs, '--output-last-message', lastMessagePath, '-'],
             {
               cwd: repoDir,
               timeout: t,
@@ -257,8 +282,8 @@ async function reviewWithCodexModel(
         // aborted run leaves the file empty and stdout is then all there is.
         let lastMessage = ''
         try { lastMessage = readFileSync(lastMessagePath, 'utf8').trim() } catch { /* no final message */ }
-        const rawReview = stripRepoDirPaths(lastMessage || result.stdout.trim() || result.stderr.trim(), repoDir)
-        const tokensUsed = parseCodexTokensUsed(`${result.stdout ?? ''}\n${result.stderr ?? ''}`)
+        const rawReview = stripRepoDirPaths(lastMessage || parseCodexFinalMessage(result.stdout ?? '') || '', repoDir)
+        const tokensUsed = parseCodexTokensUsed(result.stdout ?? '')
         // Safety net for a run that ignored the verdict rule. `codex exec` follows
         // it (unlike `codex review`, whose own format emits [P0]-[P3] markers and
         // never a VERDICT line), so this should now be the rare path.
@@ -273,7 +298,8 @@ async function reviewWithCodexModel(
       if (err instanceof CompromisedCloneError) throw err
       const execa = err as { stdout?: string; stderr?: string; message?: string; code?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
       const rawStderr = execa.stderr ?? ''
-      const fullMessage = rawStderr || execa.message || ''
+      const turnFailure = codexTurnFailureMessage(execa.stdout)
+      const fullMessage = turnFailure || rawStderr || execa.message || ''
 
       // Check if this is a retryable error
       if (isRetryableCodexError(fullMessage) && attempt < MAX_CODEX_RETRIES) {
@@ -289,13 +315,14 @@ async function reviewWithCodexModel(
       const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
       const summary = execa.timedOut
         ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large (tier: ${quality.tier})`
-        : vendorFailureSummary(execa, extractErrorSummary)
+        : vendorFailureSummary({ ...execa, stderr: turnFailure || rawStderr, stdout: turnFailure ? undefined : execa.stdout }, extractErrorSummary)
       const thrown = Object.assign(new Error(`codex: ${summary}`), {
         exitCode: execa.exitCode,
         code: execa.code,
         vendorExecutableMissing: isCodexExecutableMissing(execa.code),
         timedOut: execa.timedOut,
         stderr: rawStderr,
+        codexJsonl: execa.stdout,
         effectiveTimeoutMs: effectiveMs,
         retryDelayMs: execa.retryDelayMs,
       })
