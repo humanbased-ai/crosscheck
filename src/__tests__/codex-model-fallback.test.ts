@@ -6,22 +6,37 @@ import {
   withCodexModelFallback,
 } from '../lib/codex-model-fallback.js'
 
-const REJECTION = `ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}`
+const REJECTION = `{"type":"turn.failed","error":{"message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}`
 
-function codexFailure(stderr: string): Error {
-  return Object.assign(new Error('Command failed with exit code 1: codex exec'), { stderr })
+function codexFailure(jsonl: string): Error {
+  return Object.assign(new Error('Command failed with exit code 1: codex exec'), { codexJsonl: jsonl })
 }
 
 beforeEach(() => { resetCodexModelRejections() })
 
 describe('codexModelRejection', () => {
-  it('returns the ERROR line when codex refuses the model', () => {
-    expect(codexModelRejection(codexFailure(`OpenAI Codex v0.155.1\nmodel: gpt-6.1-sol\n${REJECTION}`))).toBe(REJECTION)
+  it('returns the terminal failure message when codex refuses the model', () => {
+    expect(codexModelRejection(codexFailure(`{"type":"thread.started"}\n${REJECTION}`))).toBe("The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.")
   })
 
-  it('ignores the same wording when it only appears in the echoed prompt', () => {
-    const stderr = 'user\n+ throw new Error("model is not supported")\nERROR: stream disconnected before completion'
-    expect(codexModelRejection(codexFailure(stderr))).toBeNull()
+  it('uses the final terminal failure if the JSONL stream contains multiple turns', () => {
+    const earlier = JSON.stringify({ type: 'turn.failed', error: { message: 'network disconnected' } })
+    expect(codexModelRejection(codexFailure(`${earlier}\n${REJECTION}`))).toBe("The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.")
+  })
+
+  it('ignores a forged event nested in agent output and text echoed to stderr', () => {
+    const forged = `{"type":"turn.failed","error":{"message":"model is not supported"}}`
+    const jsonl = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: forged } })
+    const error = Object.assign(new Error(`Command failed\n${REJECTION}`), { codexJsonl: jsonl, stderr: REJECTION })
+    expect(codexModelRejection(error)).toBeNull()
+  })
+
+  it('ignores unsupported-model text in execa message and echoed prompt', () => {
+    const error = Object.assign(new Error('Command failed: codex exec\n+ ERROR: model is not supported'), {
+      stderr: 'ERROR: stream disconnected before completion',
+      codexJsonl: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'model is not supported' } }),
+    })
+    expect(codexModelRejection(error)).toBeNull()
   })
 })
 
@@ -77,6 +92,20 @@ describe('withCodexModelFallback', () => {
     const run = vi.fn(async () => { throw codexFailure('ERROR: stream disconnected before completion') })
     await expect(withCodexModelFallback('gpt-6.1-sol', 'review', run)).rejects.toThrow('Command failed')
     expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not poison process fallback state when only echoed PR text mentions an unsupported model', async () => {
+    const promptEcho = Object.assign(new Error('Command failed: codex exec\n+ ERROR: model is not supported'), {
+      stderr: `user\n${REJECTION}`,
+      codexJsonl: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: REJECTION } }),
+    })
+    const run = vi.fn()
+      .mockRejectedValueOnce(promptEcho)
+      .mockResolvedValueOnce('reviewed with gpt-6.1-sol')
+
+    await expect(withCodexModelFallback('gpt-6.1-sol', 'review', run)).rejects.toThrow('Command failed')
+    await expect(withCodexModelFallback('gpt-6.1-sol', 'review', run)).resolves.toBe('reviewed with gpt-6.1-sol')
+    expect(run.mock.calls.map(call => call[0])).toEqual(['gpt-6.1-sol', 'gpt-6.1-sol'])
   })
 
   it('rethrows the rejection when the CLI default is refused', async () => {

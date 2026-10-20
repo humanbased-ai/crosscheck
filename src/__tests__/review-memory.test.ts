@@ -157,6 +157,10 @@ describe('review memory', () => {
     expect(result.snapshot).toBeUndefined(); expect(result.fallbackReason).toBeUndefined()
     expect(result.text).not.toMatch(/VERDICT/)
     expect(finishReviewOrFallback(plan(), '{"summary":"Partly read","coverage":"partial","findings":[]}').notRun).toContain('partial')
+    const malformedSummary = finishReviewOrFallback(plan(), '{"summary":null,"coverage":"partial","findings":[]}')
+    expect(malformedSummary.notRun).toContain('partial')
+    expect(malformedSummary.fallbackReason).toBeUndefined()
+    expect(malformedSummary.text).not.toMatch(/VERDICT/)
     expect(finishReviewOrFallback(plan(), report()).notRun).toBeUndefined()
   })
   it.each([['P0', 'BLOCK'], ['P1', 'BLOCK'], ['P2', 'NEEDS WORK'], ['P3', 'APPROVE']])('computes %s verdict independently of summary wording', (priority, verdict) => {
