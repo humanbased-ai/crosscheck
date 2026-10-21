@@ -301,29 +301,45 @@ export async function runOpenCodeReview(
 
 // `--standalone` exists only in the v2 CLI. The v1 `opencode` rejects the flag
 // before reading stdin, so every review and fix fails with yargs help text and
-// exit code 1. Probe `run --help` once per process and pass the flag only when
-// the installed binary actually lists it.
+// exit code 1. Probe `run --help` for each invocation and pass the flag only
+// when the installed binary actually lists it. The probe is deliberately not
+// cached: a long-lived crosscheck process can outlive an OpenCode upgrade, and
+// either cached answer would then be wrong. A probe that fails or returns
+// output we cannot recognise must fail the run rather than guess "unsupported":
+// running without `--standalone` would share the operator's server with
+// untrusted PR content.
 export function parseOpenCodeStandaloneSupport(helpOutput: string): boolean {
   return /(?:^|\s)--standalone\b/m.test(stripVTControlCharacters(helpOutput))
 }
 
-let standaloneSupport: Promise<boolean> | undefined
+function looksLikeOpenCodeRunHelp(helpOutput: string): boolean {
+  return /(?:^|\n)[ \t]*Options:[ \t]*(?:\n|$)/.test(stripVTControlCharacters(helpOutput))
+}
 
-export function opencodeSupportsStandalone(): Promise<boolean> {
-  standaloneSupport ??= (async () => {
-    try {
-      const { stdout, stderr } = await execa('opencode', ['run', '--help'], {
-        timeout: 10_000,
-        reject: false,
-        extendEnv: false,
-        env: buildOpenCodeEnv(),
-      })
-      return parseOpenCodeStandaloneSupport(`${stdout}\n${stderr}`)
-    } catch {
-      return false
-    }
-  })()
-  return standaloneSupport
+export async function opencodeSupportsStandalone(): Promise<boolean> {
+  let stdout = ''
+  let stderr = ''
+  let exitCode: number | undefined
+  try {
+    const result = await execa('opencode', ['run', '--help'], {
+      timeout: 10_000,
+      reject: false,
+      extendEnv: false,
+      env: buildOpenCodeEnv(),
+    })
+    stdout = result.stdout ?? ''
+    stderr = result.stderr ?? ''
+    exitCode = result.exitCode
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    throw new Error(`opencode: --standalone support probe failed (${detail}); refusing to run without session isolation`)
+  }
+  const help = `${stdout}\n${stderr}`
+  if (parseOpenCodeStandaloneSupport(help)) return true
+  if (exitCode !== 0 || !looksLikeOpenCodeRunHelp(help)) {
+    throw new Error(`opencode: could not read 'opencode run --help' (exit ${exitCode ?? 'unknown'}); refusing to run without session isolation`)
+  }
+  return false
 }
 
 // `opencode auth list` has no machine-readable mode: `--format json`,
