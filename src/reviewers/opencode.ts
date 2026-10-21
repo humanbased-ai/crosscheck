@@ -2,6 +2,7 @@ import { execa } from 'execa'
 import { rmSync, mkdtempSync, renameSync, existsSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
+import { stripVTControlCharacters } from 'util'
 import type { QualityConfig, OpenCodeVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveOpenCodeModel } from '../lib/review-models.js'
@@ -296,19 +297,36 @@ export async function runOpenCodeReview(
   throw new Error('opencode: unexpected retry loop exit')
 }
 
+// `opencode auth list` has no machine-readable mode: `--format json`,
+// `--format=json`, and `--json` all exit 1 and print help on every CLI tested
+// (1.2 and 1.19). The previous probe passed `--format json`, so even a logged-in
+// install failed readiness with the help text as its "error". Parse the plain
+// summary instead. Strip ANSI escapes first — opencode styles the table even
+// when stdout is not a TTY.
+export function parseOpenCodeAuthList(raw: string): number | null {
+  const clean = stripVTControlCharacters(raw)
+  // Anchor to the summary row. Provider labels and other table text can contain
+  // a `<n> credential(s)` sequence earlier in the listing; an unanchored first
+  // match would report that number as the total.
+  const match = clean.match(/└\s+(\d+)\s+credentials?\b/i)
+  if (!match) return null
+  const count = Number(match[1])
+  return Number.isFinite(count) ? count : null
+}
+
 export async function checkOpenCodeAuth(): Promise<{ ok: boolean; detail: string }> {
   try {
-    // `--format json` returns one record per provider, so human-readable headers
-    // and summaries can never be miscounted as authenticated providers the way
-    // the text form's line count could.
-    const { stdout } = await execa('opencode', ['auth', 'list', '--format', 'json'], { timeout: 10_000 })
-    let parsed: unknown
-    try { parsed = JSON.parse(stdout) } catch { parsed = null }
-    const providers = Array.isArray(parsed) ? parsed : []
-    if (providers.length === 0) {
+    const { stdout } = await execa('opencode', ['auth', 'list'], { timeout: 10_000 })
+    const providerCount = parseOpenCodeAuthList(stdout ?? '')
+    // Fail closed on unrecognised output: an unreadable listing must not claim
+    // authentication, and it must not silently look like a logged-out install.
+    if (providerCount === null) {
+      return { ok: false, detail: 'could not read opencode auth list output — run: opencode auth list' }
+    }
+    if (providerCount === 0) {
       return { ok: false, detail: 'no providers configured — run: opencode auth login' }
     }
-    return { ok: true, detail: `${providers.length} provider(s) configured` }
+    return { ok: true, detail: `${providerCount} provider(s) configured` }
   } catch (err: unknown) {
     const error = err as { stderr?: string; message?: string }
     return { ok: false, detail: error.stderr ?? error.message ?? 'not found' }
