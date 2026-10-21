@@ -42,6 +42,7 @@ import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession, type SkillActivationSession } from '../skills/broker.js'
 import { formatSkillAttribution } from '../skills/attribution.js'
+import { parseAuthorAttribution } from './author-attribution.js'
 import { CompromisedCloneError, runGitWithoutHooks, changedFilesVsBase } from './clone.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
@@ -1110,6 +1111,9 @@ export async function pushWithNonFastForwardHandling(params: {
 export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult> {
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange, trigger } = ctx
   const triggerField = trigger !== undefined ? { trigger } : {}
+  // The author's declaration lives in the PR body. Parsing it once here means
+  // every card this run posts names the same author, model and effort.
+  const authorAttribution = parseAuthorAttribution(pr.body ?? '')
   const configuredSteps = (ctx.steps ?? loadWorkflow(process.cwd())).map(step => {
     if (!step.harness || step.instructions) return step
     const resolved = loadHarnessSection(step.harness, process.cwd())
@@ -1588,6 +1592,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           // citing a tier the run did not use would assert a routing decision
           // that never happened.
           strategyCitation(reviewer === 'codex' ? config.vendors.codex : reviewer === 'opencode' ? config.vendors.opencode : config.vendors.claude, strategy, roundStrategy, model),
+          authorAttribution ?? undefined,
         )
         if (memoryPlan && structured?.snapshot) {
           // The review is already posted; a memory write failure only costs the next review its delta.
@@ -1865,6 +1870,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
                 vendor: activeVendor,
                 model: activeVendor === 'codex' ? codexFixModel : activeVendor === 'opencode' ? opencodeFixModel : claudeFixModel,
                 effort: fixEffort,
+                author: authorAttribution ?? undefined,
                 skills: activatedSkills,
               }),
             })
@@ -1951,6 +1957,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             reviewCommentBody,
             model: activeVendor === 'codex' ? codexFixModel : activeVendor === 'opencode' ? opencodeFixModel : claudeFixModel,
             effort: fixEffort,
+            author: authorAttribution ?? undefined,
             skills: activatedSkills,
           })
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
@@ -2024,6 +2031,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
               reviewCommentBody,
               model: activeVendor === 'codex' ? codexFixModel : activeVendor === 'opencode' ? opencodeFixModel : claudeFixModel,
               effort: fixEffort,
+              author: authorAttribution ?? undefined,
               skills: activatedSkills,
             })
             await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
@@ -2479,6 +2487,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           files: resolvedPaths.length > 0 ? resolvedPaths : conflictedFiles,
           model: conflictResolveModel,
           effort: resolveEffort,
+          author: authorAttribution ?? undefined,
           skills: activatedSkills,
         })
         await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })

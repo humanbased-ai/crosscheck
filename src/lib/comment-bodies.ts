@@ -7,6 +7,25 @@ import { modelDisplayName } from './review-models.js'
 import { vendorDisplayName } from './vendor.js'
 import { renderSkillAttributionLine } from '../skills/attribution.js'
 import type { SkillMetadata } from '../skills/broker.js'
+import type { AuthorAttribution } from './author-attribution.js'
+
+function vendorProfileUrl(vendor: string): string {
+  return vendor === 'codex' ? 'https://openai.com/codex'
+    : vendor === 'opencode' ? 'https://opencode.ai'
+    : 'https://claude.ai/code'
+}
+
+// Names the coding agent that wrote the PR, plus whatever model and effort it
+// declared. Kept separate from the footer (which names the agent that ran this
+// step) so a fallback fixer cannot be confused with the PR's author.
+export function renderAuthorLine(author?: AuthorAttribution): string {
+  if (!author) return ''
+  const details = [
+    modelDisplayName(author.model ?? 'default'),
+    author.effort ? `${author.effort} effort` : null,
+  ].filter(Boolean).join(' · ')
+  return `> **PR author:** [${vendorDisplayName(author.vendor)}](${vendorProfileUrl(author.vendor)})${details ? ` · ${details}` : ''}`
+}
 
 // Every card crosscheck posts closes the same way: a rule, one italic line
 // naming the CLI that did the work and how it was configured, then the skill
@@ -32,10 +51,7 @@ export function buildAttributionFooter(input: AttributionFooterInput): string {
   // Same name the commit subjects credit, from the same helper — a card and the
   // commit it describes must not disagree about who did the work.
   const vendor = input.vendor === 'codex' ? 'codex' : input.vendor === 'opencode' ? 'opencode' : 'claude'
-  const vendorUrl = vendor === 'codex' ? 'https://openai.com/codex'
-    : vendor === 'opencode' ? 'https://opencode.ai'
-    : 'https://claude.ai/code'
-  const vendorLink = `[${vendorDisplayName(vendor)}](${vendorUrl})`
+  const vendorLink = `[${vendorDisplayName(vendor)}](${vendorProfileUrl(vendor)})`
   const sentence = input.override
     || `_${input.action} with ${vendorLink} via [Crosscheck](${CROSSCHECK_REPO_URL})_`
   // Its own italic run so a branded override keeps whatever markdown it uses.
@@ -91,12 +107,14 @@ export interface FixAppliedCommentInput {
   model?: string
   /** Reasoning effort the fix ran with. Rendered in the attribution. */
   effort?: string
+  /** Declared author of the original PR, when the PR states it. */
+  author?: AuthorAttribution
   /** Skills the fix step activated. Rendered beneath the attribution. */
   skills?: SkillMetadata[]
 }
 
 export function buildFixAppliedCommentBody(input: FixAppliedCommentInput): string {
-  const { owner, repo, sha, appliedCount, reviewCommentId, changedFiles, vendor, reviewCommentBody, model, effort, skills } = input
+  const { owner, repo, sha, appliedCount, reviewCommentId, changedFiles, vendor, reviewCommentBody, model, effort, author, skills } = input
   const shortSha = sha.slice(0, 7)
   const commitUrl = `https://github.com/${owner}/${repo}/commit/${sha}`
   const backlink = reviewCommentId
@@ -109,6 +127,9 @@ export function buildFixAppliedCommentBody(input: FixAppliedCommentInput): strin
     '',
     `Pushed [\`${shortSha}\`](${commitUrl})${backlink}: **${appliedCount} change${plural} applied**.`,
   ]
+
+  const authorLine = renderAuthorLine(author)
+  if (authorLine) lines.push('', authorLine)
 
   if (reviewCommentBody) {
     const issues = extractIssuePoints(reviewCommentBody, MAX_ISSUES_LISTED)
@@ -141,6 +162,7 @@ export interface FixFailedCommentInput {
   vendor?: string
   model?: string
   effort?: string
+  author?: AuthorAttribution
   skills?: SkillMetadata[]
 }
 
@@ -148,11 +170,13 @@ export interface FixFailedCommentInput {
 // the footer reports rather than claims credit — but it still names the model
 // and effort that timed out, which is the first thing worth knowing.
 export function buildFixFailedCommentBody(input: FixFailedCommentInput): string {
+  const authorLine = renderAuthorLine(input.author)
   return [
     '⚠️ **Auto-fix failed**',
     '',
     `The fix step timed out after retrying. Push a new commit or run \`crosscheck run ${input.prUrl}\` to retry manually.`,
     '',
+    ...(authorLine ? [authorLine, ''] : []),
     buildAttributionFooter({
       action: 'Attempted',
       vendor: input.vendor,
@@ -242,12 +266,14 @@ export interface ConflictResolvedCommentInput {
   model?: string
   /** Reasoning effort the resolver ran with. Rendered in the attribution. */
   effort?: string
+  /** Declared author of the original PR, when the PR states it. */
+  author?: AuthorAttribution
   /** Skills the conflict-resolve step activated. Rendered beneath the attribution. */
   skills?: SkillMetadata[]
 }
 
 export function buildConflictResolvedCommentBody(input: ConflictResolvedCommentInput): string {
-  const { owner, repo, sha, conflictCount, files, model, effort, skills } = input
+  const { owner, repo, sha, conflictCount, files, model, effort, author, skills } = input
   const shortSha = sha.slice(0, 7)
   const commitUrl = `https://github.com/${owner}/${repo}/commit/${sha}`
   const plural = conflictCount !== 1 ? 's' : ''
@@ -256,6 +282,7 @@ export function buildConflictResolvedCommentBody(input: ConflictResolvedCommentI
   const remainder = files.length - shown.length
   const fileLines = shown.map(p => `- \`${p}\``)
   if (remainder > 0) fileLines.push(`- _...and ${remainder} more_`)
+  const authorLine = renderAuthorLine(author)
 
   return [
     '### 🔀 Conflicts resolved',
@@ -265,6 +292,7 @@ export function buildConflictResolvedCommentBody(input: ConflictResolvedCommentI
     '',
     `Pushed [\`${shortSha}\`](${commitUrl}).`,
     '',
+    ...(authorLine ? [authorLine, ''] : []),
     // Conflict resolution is Claude-only today; the footer still routes through
     // the shared builder so the wording matches review and fix.
     buildAttributionFooter({ action: 'Resolved', vendor: 'claude', model, effort, skills }),
