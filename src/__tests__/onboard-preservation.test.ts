@@ -75,6 +75,24 @@ describe('applyOnboardConfig — first run', () => {
     expect(routing.fallback_reviewer).toBe('auto')
   })
 
+  it('writes the per-task agent priority from the decisions', () => {
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      agentPriority: { review: ['codex', 'claude'], fix: ['claude', 'codex'], conflict_resolve: ['codex', 'claude'] },
+    }, workflowDir)
+
+    expect(readConfig().agent_priority).toEqual({
+      review: ['codex', 'claude'],
+      fix: ['claude', 'codex'],
+      conflict_resolve: ['codex', 'claude'],
+    })
+  })
+
+  it('leaves agent_priority untouched when the decision is omitted', () => {
+    applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
+    expect(readConfig().agent_priority).toBeUndefined()
+  })
+
   it('writes vendors.opencode.enabled from the vendor decision', () => {
     applyOnboardConfig(configPath, {
       ...BASE_DECISIONS,

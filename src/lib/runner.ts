@@ -12,7 +12,7 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runOpenCodeReview } from '../reviewers/opencode.js'
 import { runFixStep, runCodexFixStep, runOpenCodeFixStep } from '../reviewers/fix.js'
-import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
+import { runConflictResolveForVendor, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, DOC_ONLY_GATE_NOTE, detectInconclusiveReview, reviewHasNoFindings } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
 import { fetchCommentsAfter, selectHumanFeedback, formatHumanFeedback } from '../lib/human-feedback.js'
@@ -525,29 +525,81 @@ function countComments(reviewText: string): number {
   return bullets + numbered
 }
 
+type PriorityTask = 'review' | 'fix' | 'conflict_resolve'
+
+function priorityTaskForStep(stepType: string): PriorityTask {
+  if (stepType === 'conflict-resolve') return 'conflict_resolve'
+  if (stepType === 'fix') return 'fix'
+  return 'review'
+}
+
+function originVendorOf(origin: PROrigin): Vendor | null {
+  return origin === 'claude' || origin === 'codex' || origin === 'opencode' ? origin : null
+}
+
+// Configured order first, then any other enabled/capable vendor so a newly
+// enabled agent is still usable without re-running onboard. An empty configured
+// list returns [] — callers then use the legacy codex-first order, which keeps
+// pre-priority configs byte-for-byte behaviourally identical.
+function priorityOrder(task: PriorityTask, config: Config, stepType: string): Vendor[] {
+  const configured = config.agent_priority?.[task] ?? []
+  if (configured.length === 0) return []
+  const usable = (vendor: Vendor): boolean => config.vendors[vendor].enabled && supportsStep(vendor, stepType)
+  const ordered = configured.filter(usable)
+  for (const vendor of ['claude', 'codex', 'opencode'] as const) {
+    if (usable(vendor) && !ordered.includes(vendor)) ordered.push(vendor)
+  }
+  return ordered
+}
+
+function legacyAutoReviewer(origin: PROrigin, config: Config): Vendor | null {
+  if (origin === 'claude' && config.vendors.codex.enabled) return 'codex'
+  if (origin === 'claude' && config.vendors.opencode.enabled) return 'opencode'
+  if (origin === 'codex' && config.vendors.claude.enabled) return 'claude'
+  if (origin === 'codex' && config.vendors.opencode.enabled) return 'opencode'
+  if (origin === 'opencode' && config.vendors.claude.enabled) return 'claude'
+  if (origin === 'opencode' && config.vendors.codex.enabled) return 'codex'
+  if (config.vendors.codex.enabled) return 'codex'
+  if (config.vendors.claude.enabled) return 'claude'
+  if (config.vendors.opencode.enabled) return 'opencode'
+  return null
+}
+
 function resolveReviewer(
   reviewer: string,
   origin: PROrigin,
   config: Config,
   fallback?: Vendor,
+  stepType: string = 'review',
 ): Vendor | null {
+  const originVendor = originVendorOf(origin)
+  const task = priorityTaskForStep(stepType)
+  const writesCode = stepType === 'fix' || stepType === 'conflict-resolve'
+
   if (reviewer === 'origin') {
-    if (origin === 'claude' && config.vendors.claude.enabled) return 'claude'
-    if (origin === 'codex' && config.vendors.codex.enabled) return 'codex'
-    if (origin === 'opencode' && config.vendors.opencode.enabled) return 'opencode'
+    // Fix and conflict-resolve deliberately start from the PR author's own
+    // agent — it has the most context on the change. The configured order only
+    // decides who runs when the author is human or that agent is unavailable.
+    if (originVendor && config.vendors[originVendor].enabled && supportsStep(originVendor, stepType)) return originVendor
+    if (writesCode) {
+      const preferred = priorityOrder(task, config, stepType)[0]
+      if (preferred) return preferred
+    }
     return fallback && config.vendors[fallback].enabled ? fallback : null
   }
   if (reviewer === 'auto') {
-    if (origin === 'claude' && config.vendors.codex.enabled) return 'codex'
-    if (origin === 'claude' && config.vendors.opencode.enabled) return 'opencode'
-    if (origin === 'codex' && config.vendors.claude.enabled) return 'claude'
-    if (origin === 'codex' && config.vendors.opencode.enabled) return 'opencode'
-    if (origin === 'opencode' && config.vendors.claude.enabled) return 'claude'
-    if (origin === 'opencode' && config.vendors.codex.enabled) return 'codex'
-    if (config.vendors.codex.enabled) return 'codex'
-    if (config.vendors.claude.enabled) return 'claude'
-    if (config.vendors.opencode.enabled) return 'opencode'
-    return null
+    if (writesCode && originVendor && config.vendors[originVendor].enabled && supportsStep(originVendor, stepType)) {
+      return originVendor
+    }
+    let ordered = priorityOrder(task, config, stepType)
+    if (ordered.length === 0) return legacyAutoReviewer(origin, config)
+    // Review is cross-vendor even when the author's agent tops the list. Fall
+    // back to it only when it is the sole enabled/capable vendor.
+    if (!writesCode && ordered.length > 1 && originVendor) {
+      const crossVendor = ordered.filter(vendor => vendor !== originVendor)
+      if (crossVendor.length > 0) ordered = crossVendor
+    }
+    return ordered[0] ?? null
   }
   if (reviewer === 'claude') return config.vendors.claude.enabled ? 'claude' : (fallback && config.vendors[fallback].enabled ? fallback : null)
   if (reviewer === 'codex') return config.vendors.codex.enabled ? 'codex' : (fallback && config.vendors[fallback].enabled ? fallback : null)
@@ -555,13 +607,26 @@ function resolveReviewer(
   return null
 }
 
+// Exported for tests and for review call sites that need the cross-vendor rule.
+export function resolveReviewVendor(
+  stepReviewer: string,
+  origin: PROrigin,
+  config: Config,
+  fallback?: Vendor,
+): Vendor | null {
+  return resolveReviewer(stepReviewer, origin, config, fallback, 'review')
+}
+
 function supportsStep(vendor: Vendor, stepType: string): boolean {
-  if (stepType === 'review' || stepType === 'recheck' || stepType === 'fix') return true
-  // Conflict resolution is Claude-only until Codex/OpenCode conflict resolution exists.
-  return vendor === 'claude'
+  void vendor
+  return stepType === 'review' || stepType === 'recheck' || stepType === 'fix' || stepType === 'conflict-resolve'
 }
 
 function resolveLimitFallbackVendor(failedVendor: Vendor, stepType: string, config: Config): Vendor | null {
+  const ordered = priorityOrder(priorityTaskForStep(stepType), config, stepType)
+    .filter(vendor => vendor !== failedVendor)
+  if (ordered.length > 0) return ordered[0]
+
   const candidates: Vendor[] = failedVendor === 'claude'
     ? ['codex', 'opencode']
     : failedVendor === 'codex'
@@ -623,17 +688,13 @@ function resolveStepVendor(
   config: Config,
   fallback?: Vendor,
 ): { vendor: Vendor | null; usedHumanFallback: boolean; substitutedOriginVendor?: Vendor } {
-  const vendor = resolveReviewer(stepReviewer, origin, config, fallback)
+  const vendor = resolveReviewer(stepReviewer, origin, config, fallback, stepType)
 
-  // Origin detection can assign a vendor that cannot run the step: conflict
-  // resolution is Claude-only, so a Codex-origin PR (reviewer: 'origin', origin:
-  // 'codex') resolves to 'codex' and the dispatch skips it as unsupported — the
-  // conflicts never get resolved. (#284's `Crosscheck-Reviewer: codex` detection
-  // introduced this: these crosscheck-authored fix PRs used to detect as 'human'
-  // and the auto fallback picked Claude.) Substitute a capable, enabled vendor.
-  // Scoped to origin-derived assignment only — an explicit reviewer: claude|codex,
-  // reviewer: auto, or routing.fallback_reviewer is an operator decision, left as
-  // written so the caller can report the precise unsupported-step skip.
+  // Every current step supports every vendor, so this substitution is a guard
+  // for future step capabilities rather than a live path. It stays scoped to
+  // origin-derived assignment: an explicit reviewer choice or
+  // routing.fallback_reviewer is an operator decision and must be reported
+  // precisely instead of silently swapped.
   if (
     stepReviewer === 'origin' &&
     (origin === 'claude' || origin === 'codex' || origin === 'opencode') &&
@@ -646,6 +707,13 @@ function resolveStepVendor(
     }
   }
 
+  // A configured task order is the human-origin fallback now, so report it as
+  // one: the fix/conflict-resolve callers use this flag for their fallback log.
+  const humanOriginPriority = stepReviewer === 'origin' && origin === 'human'
+    && priorityOrder(priorityTaskForStep(stepType), config, stepType).length > 0
+  if (vendor !== null && humanOriginPriority) {
+    return { vendor, usedHumanFallback: true }
+  }
   if (vendor !== null || origin !== 'human' || stepReviewer !== 'origin') {
     return { vendor, usedHumanFallback: false }
   }
@@ -655,10 +723,12 @@ function resolveStepVendor(
   else if (fb === 'codex') humanFallback = config.vendors.codex.enabled ? 'codex' : null
   else if (fb === 'opencode') humanFallback = config.vendors.opencode.enabled ? 'opencode' : null
   else if (fb !== null) {
-    // 'auto': prefer codex then claude then opencode, same as resolveReviewer's
-    // auto path, narrowed to vendors that support this step type.
+    // 'auto': the configured task order wins; with no order configured, keep
+    // the legacy codex-first preference. Either way, narrow to vendors that
+    // support this step type.
     const usable = (v: Vendor): boolean => config.vendors[v].enabled && supportsStep(v, stepType)
-    humanFallback = usable('codex') ? 'codex' : usable('claude') ? 'claude' : usable('opencode') ? 'opencode' : null
+    humanFallback = priorityOrder(priorityTaskForStep(stepType), config, stepType)[0]
+      ?? (usable('codex') ? 'codex' : usable('claude') ? 'claude' : usable('opencode') ? 'opencode' : null)
   }
   if (!humanFallback) return { vendor: null, usedHumanFallback: false }
   return { vendor: humanFallback, usedHumanFallback: true }
@@ -1323,7 +1393,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     if (effectiveType === 'review' || effectiveType === 'recheck') {
       const isRecheck = effectiveType === 'recheck'
-      let reviewer = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      let reviewer = resolveReviewVendor(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
         results[step.name] = { skipped: true, skipReason: 'no_reviewer' }
@@ -2326,14 +2396,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         fileLog({ level: 'info', event: 'conflict_resolve_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: substitutedOriginVendor, to: vendor, reason: 'unsupported_vendor' })
       }
       if (!vendor) { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
-      if (vendor === 'codex') { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
-      if (vendor === 'opencode') { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('opencode_conflict_resolve_unsupported'); continue }
       // Conflict-resolve is mechanical text surgery bounded by the markers —
       // measured at 37s against ~643s for a review — so it always runs fast.
-      const conflictResolveModel = resolveClaudeModel(
-        { ...config.quality, tier: config.quality.mode === 'smart' ? 'fast' : config.quality.tier },
-        config.vendors.claude,
-      )
+      const conflictResolveQuality = { ...config.quality, tier: config.quality.mode === 'smart' ? 'fast' as const : config.quality.tier }
+      const conflictResolveModel = vendor === 'claude'
+        ? resolveClaudeModel(conflictResolveQuality, config.vendors.claude)
+        : vendor === 'codex'
+          ? resolveCodexModel(conflictResolveQuality, config.vendors.codex)
+          : resolveOpenCodeModel(conflictResolveQuality, config.vendors.opencode)
 
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
       if (isFork) { try { runGitWithoutHooks(tmpDir, ['merge', '--abort']) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
@@ -2358,9 +2428,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const skillSession = skillSessionFor(step.name, effectiveType)
 
       try {
-        ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed, effort: resolveEffort } = await runConflictResolveStep(
-          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), skillSession,
-          config.vendors.claude.effort,
+        ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed, effort: resolveEffort } = await runConflictResolveForVendor(
+          vendor, tmpDir, pr.title, step.instructions ?? '', conflictResolveModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors[vendor].timeout_sec), skillSession,
+          config.vendors[vendor].effort, config.skills.codex_full_access,
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
@@ -2438,7 +2508,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         '-m',
         conflictResolveCommitSubject(conflictedFiles.length, vendor),
         '-m',
-        buildCommitTrailers({ reviewer: vendor, model: conflictResolveModel, step: 'conflict-resolve', service: 'crosscheck' }),
+        buildCommitTrailers({ reviewer: vendor, model: conflictResolveModel ?? 'default', step: 'conflict-resolve', service: 'crosscheck' }),
       ])
       const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
       await pushWithNonFastForwardHandling({
@@ -2480,6 +2550,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           model: conflictResolveModel,
           effort: resolveEffort,
           skills: activatedSkills,
+          vendor,
         })
         await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         fileLog({ level: 'info', event: 'conflict_resolved_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })
