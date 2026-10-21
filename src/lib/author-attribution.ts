@@ -70,9 +70,11 @@ function splitRunDetail(detail: string | undefined): { model?: string; effort?: 
 
 // A declaration is a footer: the whole line, optionally preceded by the ⚡
 // marker. Anchoring both ends keeps a `Generated with ...` mention embedded in
-// prose from being read; the scan below also skips fenced code blocks.
-const LINKED_FOOTER_RE = /^[ \t]*(?:⚡\ufe0f?[ \t]*)?Generated with[ \t]+\[([^\]\n]+)\]\([^)\n]*\)(?:[ \t]*\(([^)\n]*)\))?[ \t]*$/
-const PLAIN_FOOTER_RE = /^[ \t]*(?:⚡\ufe0f?[ \t]*)?Generated with[ \t]+([^\n([]+?)[ \t]*(?:\(([^)\n]*)\))?[ \t]*$/
+// prose from being read; limiting indentation to three spaces keeps a Markdown
+// indented code example (four spaces or a tab) from passing as a footer. The
+// scan below also skips fenced code blocks.
+const LINKED_FOOTER_RE = /^ {0,3}(?:⚡\ufe0f?[ \t]*)?Generated with[ \t]+\[([^\]\n]+)\]\([^)\n]*\)(?:[ \t]*\(([^)\n]*)\))?[ \t]*$/
+const PLAIN_FOOTER_RE = /^ {0,3}(?:⚡\ufe0f?[ \t]*)?Generated with[ \t]+([^\n([]+?)[ \t]*(?:\(([^)\n]*)\))?[ \t]*$/
 
 export function parseAuthorAttribution(text: string): AuthorAttribution | null {
   if (!text) return null
