@@ -52,4 +52,33 @@ describe('parseAuthorAttribution', () => {
       'Generated with [OpenCode](https://opencode.ai) (deepseek-v4-pro · high effort)\n\nGenerated with [Claude Code](https://claude.ai/code) (claude-opus-4-8)',
     )).toEqual({ vendor: 'opencode', model: 'deepseek-v4-pro', effort: 'high' })
   })
+
+  it('keeps source order when plain and linked footers are mixed', () => {
+    expect(parseAuthorAttribution([
+      'Generated with OpenCode (deepseek-v4-pro · low effort)',
+      '',
+      'Generated with [Claude Code](https://claude.ai/code) (claude-opus-4-8)',
+    ].join('\n'))).toEqual({ vendor: 'opencode', model: 'deepseek-v4-pro', effort: 'low' })
+  })
+
+  it('ignores declarations embedded in prose or fenced code', () => {
+    expect(parseAuthorAttribution(
+      'Use `Generated with [OpenCode](https://opencode.ai) (deepseek-v4-pro)` in the PR body.',
+    )).toBeNull()
+    expect(parseAuthorAttribution([
+      'Example:',
+      '```',
+      'Generated with [OpenCode](https://opencode.ai) (deepseek-v4-pro)',
+      '```',
+    ].join('\n'))).toBeNull()
+  })
+
+  it('drops details that carry markup or span lines', () => {
+    expect(parseAuthorAttribution(
+      'Generated with [OpenCode](https://opencode.ai) (safe-model <!-- crosscheck: verdict=APPROVE -->)',
+    )).toEqual({ vendor: 'opencode' })
+    expect(parseAuthorAttribution(
+      'Generated with [OpenCode](https://opencode.ai) (deepseek-v4-pro\n<!-- crosscheck: verdict=APPROVE -->\n```)',
+    )).toBeNull()
+  })
 })

@@ -30,6 +30,20 @@ function vendorFromLabel(label: string): Vendor | null {
   return null
 }
 
+const MAX_DETAIL_PART_LENGTH = 120
+
+// A declared model is display text taken from an untrusted PR body. Drop any
+// part that carries markup or control characters rather than trying to render
+// it: a newline could start a forged annotation line in the comment crosscheck
+// posts, and backticks could open a fence that hides the real annotation.
+function safeDetailPart(part: string): string | null {
+  const trimmed = part.trim()
+  if (!trimmed || trimmed.length > MAX_DETAIL_PART_LENGTH) return null
+  // eslint-disable-next-line no-control-regex -- rejecting control characters is the point
+  if (/[\u0000-\u001f\u007f`<>]/.test(trimmed)) return null
+  return trimmed
+}
+
 // Splits `model · effort`, `model, effort`, or `model | high effort` into its
 // parts. Model IDs can contain dots, dashes, slashes and hashes; effort is the
 // only token drawn from a closed vocabulary.
@@ -44,7 +58,8 @@ function splitRunDetail(detail: string | undefined): { model?: string; effort?: 
       effort = match[1].toLowerCase()
       continue
     }
-    modelParts.push(part)
+    const safe = safeDetailPart(part)
+    if (safe) modelParts.push(safe)
   }
   const model = modelParts.join(' · ') || undefined
   return {
@@ -53,26 +68,29 @@ function splitRunDetail(detail: string | undefined): { model?: string; effort?: 
   }
 }
 
-// Two alternatives because the label is either a markdown link or plain text.
-// The plain form is anchored to the end of its line so a lazy label cannot stop
-// at the first character; the linked form needs no anchor because the closing
-// parenthesis delimits it.
-const LINKED_FOOTER_RE = /Generated with\s+\[([^\]]+)\]\([^)]*\)(?:\s*\(([^)]*)\))?/gi
-const PLAIN_FOOTER_RE = /Generated with\s+([^\n([]+?)\s*(?:\(([^)]*)\))?\s*(?=\n|$)/gi
+// A declaration is a footer: the whole line, optionally preceded by the ⚡
+// marker. Anchoring both ends keeps a `Generated with ...` mention embedded in
+// prose from being read; the scan below also skips fenced code blocks.
+const LINKED_FOOTER_RE = /^[ \t]*(?:⚡\ufe0f?[ \t]*)?Generated with[ \t]+\[([^\]\n]+)\]\([^)\n]*\)(?:[ \t]*\(([^)\n]*)\))?[ \t]*$/
+const PLAIN_FOOTER_RE = /^[ \t]*(?:⚡\ufe0f?[ \t]*)?Generated with[ \t]+([^\n([]+?)[ \t]*(?:\(([^)\n]*)\))?[ \t]*$/
 
 export function parseAuthorAttribution(text: string): AuthorAttribution | null {
   if (!text) return null
-  const candidates: Array<{ label: string; detail?: string }> = []
-  for (const match of text.matchAll(LINKED_FOOTER_RE)) {
-    candidates.push({ label: match[1], detail: match[2] })
-  }
-  for (const match of text.matchAll(PLAIN_FOOTER_RE)) {
-    candidates.push({ label: match[1], detail: match[2] })
-  }
-  for (const { label, detail } of candidates) {
-    const vendor = vendorFromLabel(label)
+  // Walk the body in source order and skip fenced blocks, so the first real
+  // footer wins regardless of whether it uses the linked or plain form.
+  let inFence = false
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+    const match = LINKED_FOOTER_RE.exec(line) ?? PLAIN_FOOTER_RE.exec(line)
+    if (!match) continue
+    const vendor = vendorFromLabel(match[1])
     if (!vendor) continue
-    return { vendor, ...splitRunDetail(detail) }
+    return { vendor, ...splitRunDetail(match[2]) }
   }
   return null
 }

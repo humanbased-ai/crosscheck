@@ -15,14 +15,32 @@ function vendorProfileUrl(vendor: string): string {
     : 'https://claude.ai/code'
 }
 
+const MAX_AUTHOR_DETAIL_LENGTH = 120
+
+// Author attribution comes from an untrusted PR body. Keep only the first line
+// and strip markup: a newline could start a forged annotation line in the
+// comment crosscheck appends its own annotation to, and a backtick could open a
+// fence that hides the real one.
+function sanitizeAuthorDetail(value: string): string {
+  // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+  const withoutControls = value.split(/[\r\n]/, 1)[0].replace(/[\u0000-\u001f\u007f]/g, '')
+  return withoutControls
+    .replace(/[`<>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_AUTHOR_DETAIL_LENGTH)
+}
+
 // Names the coding agent that wrote the PR, plus whatever model and effort it
 // declared. Kept separate from the footer (which names the agent that ran this
 // step) so a fallback fixer cannot be confused with the PR's author.
 export function renderAuthorLine(author?: AuthorAttribution): string {
   if (!author) return ''
+  const model = sanitizeAuthorDetail(author.model ?? '')
+  const effort = sanitizeAuthorDetail(author.effort ?? '')
   const details = [
-    modelDisplayName(author.model ?? 'default'),
-    author.effort ? `${author.effort} effort` : null,
+    modelDisplayName(model || 'default'),
+    effort ? `${effort} effort` : null,
   ].filter(Boolean).join(' · ')
   return `> **PR author:** [${vendorDisplayName(author.vendor)}](${vendorProfileUrl(author.vendor)})${details ? ` · ${details}` : ''}`
 }
