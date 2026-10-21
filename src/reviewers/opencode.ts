@@ -305,7 +305,10 @@ export async function runOpenCodeReview(
 // when stdout is not a TTY.
 export function parseOpenCodeAuthList(raw: string): number | null {
   const clean = stripVTControlCharacters(raw)
-  const match = clean.match(/(\d+)\s+credentials?\b/i)
+  // Anchor to the summary row. Provider labels and other table text can contain
+  // a `<n> credential(s)` sequence earlier in the listing; an unanchored first
+  // match would report that number as the total.
+  const match = clean.match(/└\s+(\d+)\s+credentials?\b/i)
   if (!match) return null
   const count = Number(match[1])
   return Number.isFinite(count) ? count : null
@@ -314,16 +317,16 @@ export function parseOpenCodeAuthList(raw: string): number | null {
 export async function checkOpenCodeAuth(): Promise<{ ok: boolean; detail: string }> {
   try {
     const { stdout } = await execa('opencode', ['auth', 'list'], { timeout: 10_000 })
-    const providers = parseOpenCodeAuthList(stdout ?? '')
+    const providerCount = parseOpenCodeAuthList(stdout ?? '')
     // Fail closed on unrecognised output: an unreadable listing must not claim
     // authentication, and it must not silently look like a logged-out install.
-    if (providers === null) {
+    if (providerCount === null) {
       return { ok: false, detail: 'could not read opencode auth list output — run: opencode auth list' }
     }
-    if (providers === 0) {
+    if (providerCount === 0) {
       return { ok: false, detail: 'no providers configured — run: opencode auth login' }
     }
-    return { ok: true, detail: `${providers} provider(s) configured` }
+    return { ok: true, detail: `${providerCount} provider(s) configured` }
   } catch (err: unknown) {
     const error = err as { stderr?: string; message?: string }
     return { ok: false, detail: error.stderr ?? error.message ?? 'not found' }

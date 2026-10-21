@@ -40,6 +40,21 @@ describe('parseOpenCodeAuthList', () => {
     expect(parseOpenCodeAuthList(ONE_CREDENTIAL)).toBe(1)
   })
 
+  it('anchors to the summary row when a label mentions credentials', () => {
+    const ambiguous = [
+      '┌  Credentials',
+      '│',
+      '●  Legacy 9 credentials',
+      '│',
+      '└  1 credentials',
+    ].join('\n')
+    expect(parseOpenCodeAuthList(ambiguous)).toBe(1)
+  })
+
+  it('accepts the singular form', () => {
+    expect(parseOpenCodeAuthList('└  1 credential')).toBe(1)
+  })
+
   it('ignores the environment-variable count', () => {
     expect(parseOpenCodeAuthList('└  3 environment variables')).toBeNull()
   })
