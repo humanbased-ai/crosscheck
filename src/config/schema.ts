@@ -188,6 +188,20 @@ export const RoutingConfigSchema = z.object({
   fallback_reviewer: z.enum(['auto', 'codex', 'claude', 'opencode']).nullable().default('auto'),
 })
 
+// Ordered agent preference per task. Empty arrays preserve the historical
+// routing: review picks the opposite vendor, while fix and conflict-resolve
+// start from the PR author's own agent.
+//
+// Review is still cross-vendor: the author's agent is skipped even when it is
+// first in the list, unless it is the only enabled vendor. Fix and
+// conflict-resolve keep the author's agent first when it is enabled; the order
+// decides who runs when the author is human or that agent is unavailable.
+export const AgentPriorityConfigSchema = z.object({
+  review: z.array(z.enum(['claude', 'codex', 'opencode'])).default([]),
+  fix: z.array(z.enum(['claude', 'codex', 'opencode'])).default([]),
+  conflict_resolve: z.array(z.enum(['claude', 'codex', 'opencode'])).default([]),
+}).default({ review: [], fix: [], conflict_resolve: [] })
+
 export const ServerConfigSchema = z.object({
   port: z.number().default(7891),
   webhook_path: z.string().default('/webhook'),
@@ -397,6 +411,7 @@ export const ConfigSchema = z.object({
   users: z.array(z.string()).default([]),
   repos: z.array(RepoConfigSchema).default([]),
   routing: RoutingConfigSchema.default({}),
+  agent_priority: AgentPriorityConfigSchema,
   server: ServerConfigSchema.default({}),
   tunnel: TunnelConfigSchema.default({}),
   logs: LogsConfigSchema.default({}),
@@ -411,6 +426,7 @@ export const ConfigSchema = z.object({
 })
 
 export type Config = z.infer<typeof ConfigSchema>
+export type AgentPriorityConfig = z.infer<typeof AgentPriorityConfigSchema>
 export type BrandConfig = z.infer<typeof BrandConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
 export type CodexVendorConfig = z.infer<typeof CodexVendorConfigSchema>
