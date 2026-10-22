@@ -16,6 +16,8 @@ const v1Help = [
   '',
   'Options:',
   '      --format  format: default (formatted) or json (raw JSON events)  [string]',
+  '      --attach  attach to a running opencode server  [string]',
+  '      --port    port for the local server (defaults to random port)  [number]',
 ].join('\n')
 
 function probeResult(stdout: string, stderr = '', exitCode = 0) {
@@ -63,6 +65,11 @@ describe('opencodeSupportsStandalone', () => {
   it('fails closed when the probe exits non-zero', async () => {
     vi.mocked(execa).mockResolvedValueOnce(probeResult(v1Help, '', 1))
     await expect(opencodeSupportsStandalone()).rejects.toThrow(/exit 1/)
+  })
+
+  it('fails closed for help that does not match the known v1 shape', async () => {
+    vi.mocked(execa).mockResolvedValueOnce(probeResult('opencode run [message..]\n\nOptions:\n  --format  json  [string]'))
+    await expect(opencodeSupportsStandalone()).rejects.toThrow(/refusing to run without session isolation/)
   })
 
   it('re-probes instead of caching a previous CLI answer', async () => {

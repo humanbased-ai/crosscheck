@@ -304,16 +304,22 @@ export async function runOpenCodeReview(
 // exit code 1. Probe `run --help` for each invocation and pass the flag only
 // when the installed binary actually lists it. The probe is deliberately not
 // cached: a long-lived crosscheck process can outlive an OpenCode upgrade, and
-// either cached answer would then be wrong. A probe that fails or returns
-// output we cannot recognise must fail the run rather than guess "unsupported":
-// running without `--standalone` would share the operator's server with
-// untrusted PR content.
+// either cached answer would then be wrong.
+//
+// On v2, omitting `--standalone` would attach to the operator's shared
+// background server, so an unreadable probe must fail the run rather than
+// guess "unsupported". The v1 CLI has no shared server: its `run` starts an
+// in-process server unless the caller passes `--attach` (opencode v1.19.3,
+// cli/cmd/run.ts:129-131), and Crosscheck never passes `--attach`. Accept the
+// flagless path only for a help listing with the v1 shape — an `Options:`
+// section plus the opt-in `--attach` and the local server's `--port`.
 export function parseOpenCodeStandaloneSupport(helpOutput: string): boolean {
   return /(?:^|\s)--standalone\b/m.test(stripVTControlCharacters(helpOutput))
 }
 
-function looksLikeOpenCodeRunHelp(helpOutput: string): boolean {
-  return /(?:^|\n)[ \t]*Options:[ \t]*(?:\n|$)/.test(stripVTControlCharacters(helpOutput))
+function looksLikeV1RunHelp(helpOutput: string): boolean {
+  const help = stripVTControlCharacters(helpOutput)
+  return /(?:^|\n)[ \t]*Options:[ \t]*(?:\n|$)/.test(help) && /--attach\b/.test(help) && /--port\b/.test(help)
 }
 
 export async function opencodeSupportsStandalone(): Promise<boolean> {
@@ -336,7 +342,7 @@ export async function opencodeSupportsStandalone(): Promise<boolean> {
   }
   const help = `${stdout}\n${stderr}`
   if (parseOpenCodeStandaloneSupport(help)) return true
-  if (exitCode !== 0 || !looksLikeOpenCodeRunHelp(help)) {
+  if (exitCode !== 0 || !looksLikeV1RunHelp(help)) {
     throw new Error(`opencode: could not read 'opencode run --help' (exit ${exitCode ?? 'unknown'}); refusing to run without session isolation`)
   }
   return false
