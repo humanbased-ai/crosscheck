@@ -250,10 +250,12 @@ async function runWithOpenCode(prompt: string): Promise<string> {
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-issue-'))
   try {
     writeFileSync(join(tmpDir, 'ISSUE_PROMPT.md'), prompt)
-    // No host sandbox in OpenCode v2 — deny shell/edits so a prompt-injected
+    // No host sandbox in OpenCode — deny shell/edits so a prompt-injected
     // issue run cannot execute commands or mutate files.
-    writeFileSync(join(tmpDir, 'opencode.json'), JSON.stringify(opencodePolicy(false), null, 2))
-    const standaloneArgs = (await opencodeSupportsStandalone()) ? ['--standalone'] : []
+    const standaloneSupported = await opencodeSupportsStandalone()
+    const policyFormat = standaloneSupported ? 'v2' : 'v1'
+    writeFileSync(join(tmpDir, 'opencode.json'), JSON.stringify(opencodePolicy(false, policyFormat), null, 2))
+    const standaloneArgs = standaloneSupported ? ['--standalone'] : []
     const result = await execa('opencode', [
       'run', '--format', 'json', '--auto', ...standaloneArgs,
       'Read ISSUE_PROMPT.md and produce a GitHub issue draft. ' +

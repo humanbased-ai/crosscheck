@@ -377,14 +377,16 @@ export async function runOpenCodeFixStep(
   // suffix on `--model provider/model#variant`. Without a pinned model the
   // variant cannot be sent, so `effort` is honoured only when `model` is set.
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
-  const standaloneArgs = (await opencodeSupportsStandalone()) ? ['--standalone'] : []
+  const standaloneSupported = await opencodeSupportsStandalone()
+  const policyFormat = standaloneSupported ? 'v2' : 'v1'
+  const standaloneArgs = standaloneSupported ? ['--standalone'] : []
 
   let tokensUsed: number | undefined
   try {
     const result = await withCredentialFreeOrigin(tmpDir, () => {
       // Hide any OpenCode config the untrusted checkout carries while the agent
       // runs; restore it after so the fix's git add -A cannot stage the deletion.
-      const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true)
+      const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true, policyFormat)
       return execa(
         'opencode',
         ['run', '--format', 'json', '--auto', ...standaloneArgs, ...modelArgs],

@@ -116,12 +116,35 @@ function extractOpenCodeErrorSummary(stderr: string): string | undefined {
 // prompt, and OpenCode v2 has no `--pure` / config override flag to suppress it.
 // Remove them before the run so only the operator's global config applies. The
 // clone is a throwaway and a review reads the diff, not these files.
-// A restrictive permission policy for the untrusted run. OpenCode v2 has no
+// A restrictive permission policy for the untrusted run. OpenCode has no
 // sandbox flag, so this is the tool-denial layer: a review inspects the diff by
 // running read-only git, so allow exactly those shell commands and deny every
 // other one. `--auto` auto-approves `ask` but cannot widen a `deny`.
 // `allowEdit` is left for the fix step, which must write files.
-export function opencodePolicy(allowEdit: boolean): unknown {
+//
+// The schema changed in v2: v1 uses a `permission` object keyed by tool name
+// with the last matching pattern winning, while v2 uses a `permissions` array
+// of `{ action, resource, effect }` rules. A v1 CLI rejects the v2 key outright
+// ("V2 permissions are not supported by OpenCode V1"), so the caller must pass
+// the format of the installed binary. v1's shell tool ID is `bash` (the older
+// docs call it `shell`); keying the rule as `shell` leaves it unmatched.
+export type OpenCodePolicyFormat = 'v1' | 'v2'
+
+export function opencodePolicy(allowEdit: boolean, format: OpenCodePolicyFormat): unknown {
+  if (format === 'v1') {
+    return {
+      permission: {
+        bash: {
+          '*': 'deny',
+          'git status *': 'allow',
+          'git diff *': 'allow',
+          'git log *': 'allow',
+          'git show *': 'allow',
+        },
+        ...(allowEdit ? {} : { edit: 'deny' }),
+      },
+    }
+  }
   return {
     permissions: [
       { action: 'shell', resource: '*', effect: 'deny' },
@@ -134,7 +157,11 @@ export function opencodePolicy(allowEdit: boolean): unknown {
   }
 }
 
-export function isolateCheckoutOpenCodeConfig(repoDir: string, allowEdit = false): () => void {
+export function isolateCheckoutOpenCodeConfig(
+  repoDir: string,
+  allowEdit: boolean,
+  format: OpenCodePolicyFormat,
+): () => void {
   const backupDir = mkdtempSync(join(tmpdir(), 'crosscheck-oc-config-'))
   const moved: Array<{ from: string; to: string }> = []
   for (const rel of ['opencode.json', 'opencode.jsonc', '.opencode']) {
@@ -147,7 +174,7 @@ export function isolateCheckoutOpenCodeConfig(repoDir: string, allowEdit = false
   // restore so a later fix's `git add -A` cannot stage it.
   let policyWritten = false
   try {
-    writeFileSync(join(repoDir, 'opencode.json'), JSON.stringify(opencodePolicy(allowEdit), null, 2))
+    writeFileSync(join(repoDir, 'opencode.json'), JSON.stringify(opencodePolicy(allowEdit, format), null, 2))
     policyWritten = true
   } catch { /* best effort */ }
   // Restore the checkout's own config so a later fix step does not stage these
@@ -226,7 +253,9 @@ export async function runOpenCodeReview(
   // default model AND its default variant run, and `effort` is reported but
   // not applied (it is not a claim the CLI was given).
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
-  const standaloneArgs = (await opencodeSupportsStandalone()) ? ['--standalone'] : []
+  const standaloneSupported = await opencodeSupportsStandalone()
+  const policyFormat: OpenCodePolicyFormat = standaloneSupported ? 'v2' : 'v1'
+  const standaloneArgs = standaloneSupported ? ['--standalone'] : []
   const args = ['run', '--format', 'json', '--auto', ...standaloneArgs, ...modelArgs]
 
   onLog?.(`  running: opencode ${args.join(' ')}`)
@@ -237,7 +266,7 @@ export async function runOpenCodeReview(
       const { result: { stdout }, retried } = await withCredentialFreeOrigin(repoDir, () => {
         // Hide any OpenCode config the untrusted checkout carries while the agent
         // runs; restore it after so a later fix step cannot stage the deletion.
-        const restoreConfig = isolateCheckoutOpenCodeConfig(repoDir)
+        const restoreConfig = isolateCheckoutOpenCodeConfig(repoDir, false, policyFormat)
         return withTimeoutRetry(
           resolvedTimeout,
           (t) => execa('opencode', args, {
