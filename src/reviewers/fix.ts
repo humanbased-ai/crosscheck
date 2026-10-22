@@ -7,7 +7,7 @@ import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeEffort } from './claude.js'
 import { codexReasoningEffort, parseCodexTokensUsed } from './codex.js'
-import { opencodeEffort, isolateCheckoutOpenCodeConfig, parseOpenCodeOutput } from './opencode.js'
+import { opencodeEffort, opencodeSupportsStandalone, isolateCheckoutOpenCodeConfig, parseOpenCodeOutput } from './opencode.js'
 import { claudeSkillBrokerArgs, codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { buildCodexEnv } from './codex-env.js'
 import { buildOpenCodeEnv } from './opencode-env.js'
@@ -377,6 +377,7 @@ export async function runOpenCodeFixStep(
   // suffix on `--model provider/model#variant`. Without a pinned model the
   // variant cannot be sent, so `effort` is honoured only when `model` is set.
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
+  const standaloneArgs = (await opencodeSupportsStandalone()) ? ['--standalone'] : []
 
   let tokensUsed: number | undefined
   try {
@@ -386,7 +387,7 @@ export async function runOpenCodeFixStep(
       const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true)
       return execa(
         'opencode',
-        ['run', '--format', 'json', '--auto', '--standalone', ...modelArgs],
+        ['run', '--format', 'json', '--auto', ...standaloneArgs, ...modelArgs],
         {
           cwd: tmpDir,
           timeout: resolvedTimeout,

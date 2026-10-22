@@ -8,7 +8,7 @@ import { execa } from 'execa'
 import { loadConfig } from '../config/loader.js'
 import { buildDiagnoseReport } from './diagnose.js'
 import { selectOptimizeAgent } from './optimize.js'
-import { parseOpenCodeOutput, opencodePolicy } from '../reviewers/opencode.js'
+import { opencodeSupportsStandalone, parseOpenCodeOutput, opencodePolicy } from '../reviewers/opencode.js'
 import { buildOpenCodeEnv } from '../reviewers/opencode-env.js'
 import { sanitizeEntry, loadErrorEntriesForPattern, sanitizeDraftContent } from '../lib/log-analysis.js'
 import type { RawLogEntry } from '../lib/log-analysis.js'
@@ -253,8 +253,9 @@ async function runWithOpenCode(prompt: string): Promise<string> {
     // No host sandbox in OpenCode v2 — deny shell/edits so a prompt-injected
     // issue run cannot execute commands or mutate files.
     writeFileSync(join(tmpDir, 'opencode.json'), JSON.stringify(opencodePolicy(false), null, 2))
+    const standaloneArgs = (await opencodeSupportsStandalone()) ? ['--standalone'] : []
     const result = await execa('opencode', [
-      'run', '--format', 'json', '--auto', '--standalone',
+      'run', '--format', 'json', '--auto', ...standaloneArgs,
       'Read ISSUE_PROMPT.md and produce a GitHub issue draft. ' +
       'Output exactly: TITLE: line, then ---, then the markdown body.',
     ], {
