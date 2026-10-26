@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { execa } from 'execa'
+import { readFileSync } from 'fs'
+import { join } from 'path'
+import { fileURLToPath } from 'url'
 import { checkOpenCodeAuth, parseOpenCodeAuthList } from '../reviewers/opencode.js'
 
 vi.mock('execa', () => ({ execa: vi.fn() }))
@@ -31,6 +34,21 @@ const ONE_CREDENTIAL = [
   '│',
   '└  3 environment variables',
 ].join('\n')
+
+const FIXTURES_DIR = join(fileURLToPath(import.meta.url), '..', 'fixtures-opencode')
+const help1211 = readFileSync(join(FIXTURES_DIR, 'run-help-1.2.11.txt'), 'utf8')
+const help1193 = readFileSync(join(FIXTURES_DIR, 'run-help-1.19.3.txt'), 'utf8')
+
+type ExecaResult = Awaited<ReturnType<typeof execa>>
+
+// Readiness runs `auth list`, then the CLI probe (`run --help`, `--version`).
+function mockCli(authStdout: string, runHelp: string, version = '1.19.3') {
+  vi.mocked(execa).mockImplementation(((_file: string, args?: readonly string[]) => {
+    if (args?.[0] === 'auth') return Promise.resolve({ stdout: authStdout })
+    if (args?.[0] === '--version') return Promise.resolve({ stdout: version, stderr: '', exitCode: 0 })
+    return Promise.resolve({ stdout: runHelp, stderr: '', exitCode: 0 })
+  }) as unknown as typeof execa)
+}
 
 beforeEach(() => vi.resetAllMocks())
 
@@ -66,13 +84,27 @@ describe('parseOpenCodeAuthList', () => {
 
 describe('checkOpenCodeAuth', () => {
   it('uses the plain auth list command and reports configured providers', async () => {
-    vi.mocked(execa).mockResolvedValueOnce({ stdout: ONE_CREDENTIAL } as Awaited<ReturnType<typeof execa>>)
+    mockCli(ONE_CREDENTIAL, help1193)
     await expect(checkOpenCodeAuth()).resolves.toEqual({ ok: true, detail: '1 provider(s) configured' })
     expect(execa).toHaveBeenCalledWith('opencode', ['auth', 'list'], { timeout: 10_000 })
   })
 
+  it('is not ready when the logged-in CLI lacks run --auto', async () => {
+    mockCli(ONE_CREDENTIAL, help1211, '1.2.11')
+    const result = await checkOpenCodeAuth()
+    expect(result.ok).toBe(false)
+    expect(result.detail).toMatch(/^opencode 1\.2\.11 .*does not support 'run --auto'/)
+  })
+
+  it('is not ready when the CLI probe itself fails', async () => {
+    mockCli(ONE_CREDENTIAL, 'garbled output')
+    const result = await checkOpenCodeAuth()
+    expect(result.ok).toBe(false)
+    expect(result.detail).toMatch(/could not read 'opencode run --help'/)
+  })
+
   it('reports a logged-out install without claiming a broken CLI', async () => {
-    vi.mocked(execa).mockResolvedValueOnce({ stdout: ZERO_CREDENTIALS } as Awaited<ReturnType<typeof execa>>)
+    vi.mocked(execa).mockResolvedValueOnce({ stdout: ZERO_CREDENTIALS } as ExecaResult)
     await expect(checkOpenCodeAuth()).resolves.toEqual({
       ok: false,
       detail: 'no providers configured — run: opencode auth login',
@@ -80,7 +112,7 @@ describe('checkOpenCodeAuth', () => {
   })
 
   it('fails closed on output it cannot read', async () => {
-    vi.mocked(execa).mockResolvedValueOnce({ stdout: 'unexpected output' } as Awaited<ReturnType<typeof execa>>)
+    vi.mocked(execa).mockResolvedValueOnce({ stdout: 'unexpected output' } as ExecaResult)
     await expect(checkOpenCodeAuth()).resolves.toEqual({
       ok: false,
       detail: 'could not read opencode auth list output — run: opencode auth list',

@@ -1,6 +1,6 @@
 import { execa } from 'execa'
-import { rmSync, mkdtempSync, renameSync, existsSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { rmSync, mkdtempSync, renameSync, existsSync, writeFileSync, accessSync, statSync, constants } from 'fs'
+import { join, delimiter } from 'path'
 import { tmpdir } from 'os'
 import { stripVTControlCharacters } from 'util'
 import type { QualityConfig, OpenCodeVendorConfig } from '../config/schema.js'
@@ -136,9 +136,14 @@ export function opencodePolicy(allowEdit: boolean, format: OpenCodePolicyFormat)
       permission: {
         bash: {
           '*': 'deny',
+          // A `verb *` pattern may not match the bare command, so allow both.
+          'git status': 'allow',
           'git status *': 'allow',
+          'git diff': 'allow',
           'git diff *': 'allow',
+          'git log': 'allow',
           'git log *': 'allow',
+          'git show': 'allow',
           'git show *': 'allow',
         },
         ...(allowEdit ? {} : { edit: 'deny' }),
@@ -244,7 +249,8 @@ export async function runOpenCodeReview(
   // without it. The env allowlist and the throwaway clone bound the blast
   // radius of the widened permissions. `--standalone` (a private server, so a
   // review never shares a session with the operator) is v2-only and is added
-  // only when the installed CLI accepts it.
+  // only when the installed CLI accepts it; a CLI without `--auto` is refused
+  // up front (see requireOpenCodeRun).
   //
   // OpenCode has no separate effort flag — reasoning effort is the `#variant`
   // suffix on `--model provider/model#variant`. Without a pinned model there is
@@ -253,10 +259,8 @@ export async function runOpenCodeReview(
   // default model AND its default variant run, and `effort` is reported but
   // not applied (it is not a claim the CLI was given).
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
-  const standaloneSupported = await opencodeSupportsStandalone()
-  const policyFormat: OpenCodePolicyFormat = standaloneSupported ? 'v2' : 'v1'
-  const standaloneArgs = standaloneSupported ? ['--standalone'] : []
-  const args = ['run', '--format', 'json', '--auto', ...standaloneArgs, ...modelArgs]
+  const { baseArgs, policyFormat } = await requireOpenCodeRun()
+  const args = [...baseArgs, ...modelArgs]
 
   onLog?.(`  running: opencode ${args.join(' ')}`)
 
@@ -300,7 +304,8 @@ export async function runOpenCodeReview(
       const rawStderr = execa.stderr ?? ''
       const fullMessage = rawStderr || execa.message || ''
 
-      if (isRetryableOpenCodeError(fullMessage) && attempt < MAX_OPENCODE_RETRIES) {
+      const usageRejected = isOpenCodeUsageOutput(rawStderr)
+      if (!usageRejected && isRetryableOpenCodeError(fullMessage) && attempt < MAX_OPENCODE_RETRIES) {
         const delay = OPENCODE_RETRY_DELAY_MS * attempt // 5s, 10s
         onLog?.(`  opencode: transient error (${fullMessage.slice(0, 80)}), retrying in ${delay / 1000}s (attempt ${attempt}/${MAX_OPENCODE_RETRIES})...`)
         await new Promise<void>(resolve => setTimeout(resolve, delay))
@@ -312,7 +317,9 @@ export async function runOpenCodeReview(
       const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
       const summary = execa.timedOut
         ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large (tier: ${quality.tier})`
-        : vendorFailureSummary(execa, extractOpenCodeErrorSummary)
+        : usageRejected
+          ? OPENCODE_USAGE_SUMMARY
+          : vendorFailureSummary(execa, extractOpenCodeErrorSummary)
       const thrown = Object.assign(new Error(`opencode: ${summary}`), {
         exitCode: execa.exitCode,
         timedOut: execa.timedOut,
@@ -328,10 +335,12 @@ export async function runOpenCodeReview(
   throw new Error('opencode: unexpected retry loop exit')
 }
 
-// `--standalone` exists only in the v2 CLI. The v1 `opencode` rejects the flag
-// before reading stdin, so every review and fix fails with yargs help text and
-// exit code 1. Probe `run --help` for each invocation and pass the flag only
-// when the installed binary actually lists it. The probe is deliberately not
+// The installed `opencode` is probed from `run --help` for each invocation
+// rather than assumed from its version, because the CLI surface differs between
+// installs: `--standalone` exists only in the v2 CLI (v1 rejects it before
+// reading stdin), and `--auto` is missing from older v1 releases such as 1.2.x.
+// A CLI that rejects an unknown flag prints yargs usage and exits 1, so every
+// review and fix would fail with help text. The probe is deliberately not
 // cached: a long-lived crosscheck process can outlive an OpenCode upgrade, and
 // either cached answer would then be wrong.
 //
@@ -342,39 +351,135 @@ export async function runOpenCodeReview(
 // cli/cmd/run.ts:129-131), and Crosscheck never passes `--attach`. Accept the
 // flagless path only for a help listing with the v1 shape — an `Options:`
 // section plus the opt-in `--attach` and the local server's `--port`.
-export function parseOpenCodeStandaloneSupport(helpOutput: string): boolean {
-  return /(?:^|\s)--standalone\b/m.test(stripVTControlCharacters(helpOutput))
+export interface OpenCodeRunHelp {
+  supportsAuto: boolean
+  supportsStandalone: boolean
+  /** An `Options:` section with the v1 `--attach` and `--port` flags. */
+  v1Shape: boolean
 }
 
-function looksLikeV1RunHelp(helpOutput: string): boolean {
+export function parseOpenCodeRunHelp(helpOutput: string): OpenCodeRunHelp {
   const help = stripVTControlCharacters(helpOutput)
-  return /(?:^|\n)[ \t]*Options:[ \t]*(?:\n|$)/.test(help) && /--attach\b/.test(help) && /--port\b/.test(help)
+  // `(?![\w-])` so a longer flag such as `--auto-approve` does not count.
+  const lists = (flag: string): boolean => new RegExp(`(?:^|\\s)--${flag}(?![\\w-])`, 'm').test(help)
+  return {
+    supportsAuto: lists('auto'),
+    supportsStandalone: lists('standalone'),
+    v1Shape: /(?:^|\n)[ \t]*Options:[ \t]*(?:\n|$)/.test(help) && /--attach\b/.test(help) && /--port\b/.test(help),
+  }
 }
 
-export async function opencodeSupportsStandalone(): Promise<boolean> {
-  let stdout = ''
-  let stderr = ''
-  let exitCode: number | undefined
+export interface OpenCodeCliInfo {
+  version?: string
+  path?: string
+  supportsAuto: boolean
+  supportsStandalone: boolean
+  policyFormat: OpenCodePolicyFormat
+}
+
+// First executable named `opencode` on the PATH the subprocess will see, so the
+// reported path is the one a review would actually run.
+function resolveOpenCodePath(pathEnv: string | undefined): string | undefined {
+  const names = process.platform === 'win32' ? ['opencode.exe', 'opencode.cmd', 'opencode'] : ['opencode']
+  for (const dir of (pathEnv ?? '').split(delimiter)) {
+    if (!dir) continue
+    for (const name of names) {
+      const candidate = join(dir, name)
+      try {
+        if (!statSync(candidate).isFile()) continue
+        accessSync(candidate, constants.X_OK)
+        return candidate
+      } catch { /* not here — keep walking */ }
+    }
+  }
+  return undefined
+}
+
+async function readOpenCodeVersion(env: Record<string, string>): Promise<string | undefined> {
   try {
-    const result = await execa('opencode', ['run', '--help'], {
+    const { stdout } = await execa('opencode', ['--version'], { timeout: 10_000, extendEnv: false, env })
+    return /\d+\.\d+\.\d+\S*/.exec(stdout ?? '')?.[0]
+  } catch {
+    return undefined // best effort: only used to make an error message specific
+  }
+}
+
+export async function probeOpenCodeCli(): Promise<OpenCodeCliInfo> {
+  const env = buildOpenCodeEnv()
+  const [helpAttempt, version] = await Promise.all([
+    execa('opencode', ['run', '--help'], {
       timeout: 10_000,
       reject: false,
       extendEnv: false,
-      env: buildOpenCodeEnv(),
-    })
-    stdout = result.stdout ?? ''
-    stderr = result.stderr ?? ''
-    exitCode = result.exitCode
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err)
-    throw new Error(`opencode: --standalone support probe failed (${detail}); refusing to run without session isolation`)
+      env,
+    }).then(
+      result => ({ result }),
+      (error: unknown) => ({ error }),
+    ),
+    readOpenCodeVersion(env),
+  ])
+  if ('error' in helpAttempt) {
+    const detail = helpAttempt.error instanceof Error ? helpAttempt.error.message : String(helpAttempt.error)
+    throw new Error(`opencode: CLI capability probe failed (${detail}); refusing to run without session isolation`)
   }
-  const help = `${stdout}\n${stderr}`
-  if (parseOpenCodeStandaloneSupport(help)) return true
-  if (exitCode !== 0 || !looksLikeV1RunHelp(help)) {
+  const { stdout, stderr, exitCode } = helpAttempt.result
+  const parsed = parseOpenCodeRunHelp(`${stdout ?? ''}\n${stderr ?? ''}`)
+  if (!parsed.supportsStandalone && (exitCode !== 0 || !parsed.v1Shape)) {
     throw new Error(`opencode: could not read 'opencode run --help' (exit ${exitCode ?? 'unknown'}); refusing to run without session isolation`)
   }
-  return false
+  return {
+    version,
+    path: resolveOpenCodePath(env.PATH),
+    supportsAuto: parsed.supportsAuto,
+    supportsStandalone: parsed.supportsStandalone,
+    policyFormat: parsed.supportsStandalone ? 'v2' : 'v1',
+  }
+}
+
+// Why this CLI cannot be driven, or undefined when it can. `--auto` is required
+// for every headless run (see runOpenCodeReview), so a CLI without it is
+// unusable rather than degraded.
+export function openCodeIncompatibility(info: OpenCodeCliInfo): string | undefined {
+  if (info.supportsAuto) return undefined
+  const who = `opencode${info.version ? ` ${info.version}` : ''}${info.path ? ` at ${info.path}` : ''}`
+  return `${who} does not support 'run --auto' — upgrade it, or a newer install is shadowed on PATH (check: which -a opencode)`
+}
+
+// The args every headless `opencode run` shares, from an already-probed CLI.
+// Throws the incompatibility message instead of letting the CLI print usage.
+export function opencodeRunBaseArgs(info: OpenCodeCliInfo): string[] {
+  const incompatibility = openCodeIncompatibility(info)
+  if (incompatibility) throw new Error(`opencode: ${incompatibility}`)
+  return ['run', '--format', 'json', '--auto', ...(info.supportsStandalone ? ['--standalone'] : [])]
+}
+
+/** Probes the installed CLI and returns the shared run args plus the policy format it accepts. */
+export async function requireOpenCodeRun(): Promise<{ baseArgs: string[]; policyFormat: OpenCodePolicyFormat }> {
+  const info = await probeOpenCodeCli()
+  return { baseArgs: opencodeRunBaseArgs(info), policyFormat: info.policyFormat }
+}
+
+// What a CLI prints (to stderr) when yargs rejects the arguments: the full
+// usage for the command. A real run failure never looks like this.
+export function isOpenCodeUsageOutput(stderr: string): boolean {
+  const text = stripVTControlCharacters(stderr)
+  return /^[ \t]*opencode run \[message\.\.\]/m.test(text)
+    || (/^[ \t]*Positionals:/m.test(text) && /^[ \t]*Options:/m.test(text))
+}
+
+export const OPENCODE_USAGE_SUMMARY =
+  'opencode CLI rejected the arguments (printed usage) — incompatible opencode version; check: which -a opencode'
+
+// Auth failures the fix step should relabel. Matched against stderr only, never
+// against usage text: the usage listing mentions "basic auth password", which
+// the old `/auth/` test mistook for a login problem on every CLI mismatch.
+const OPENCODE_AUTH_FAILURE =
+  /not logged in|no (?:providers|credentials)|unauthori[sz]ed|\b401\b|invalid api key|auth(?:entication)? (?:failed|error|required)|run: opencode auth login/i
+
+export function isOpenCodeAuthFailure(stderr: string | undefined, message: string): boolean {
+  const text = stderr && stderr.trim() ? stderr : message
+  if (isOpenCodeUsageOutput(text)) return false
+  return OPENCODE_AUTH_FAILURE.test(stripVTControlCharacters(text))
 }
 
 // `opencode auth list` has no machine-readable mode: `--format json`,
@@ -405,6 +510,15 @@ export async function checkOpenCodeAuth(): Promise<{ ok: boolean; detail: string
     }
     if (providerCount === 0) {
       return { ok: false, detail: 'no providers configured — run: opencode auth login' }
+    }
+    // A readiness check, not only an auth check: a logged-in CLI that cannot run
+    // headless (no `--auto`) must not be assigned reviews, and the reason should
+    // show up in `status`/`init`.
+    try {
+      const incompatibility = openCodeIncompatibility(await probeOpenCodeCli())
+      if (incompatibility) return { ok: false, detail: incompatibility }
+    } catch (probeErr: unknown) {
+      return { ok: false, detail: probeErr instanceof Error ? probeErr.message : String(probeErr) }
     }
     return { ok: true, detail: `${providerCount} provider(s) configured` }
   } catch (err: unknown) {

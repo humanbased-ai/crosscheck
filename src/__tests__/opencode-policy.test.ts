@@ -6,9 +6,13 @@ import { isolateCheckoutOpenCodeConfig, opencodePolicy } from '../reviewers/open
 
 const ALLOWED_BASH = {
   '*': 'deny',
+  'git status': 'allow',
   'git status *': 'allow',
+  'git diff': 'allow',
   'git diff *': 'allow',
+  'git log': 'allow',
   'git log *': 'allow',
+  'git show': 'allow',
   'git show *': 'allow',
 }
 

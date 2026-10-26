@@ -7,7 +7,7 @@ import type { Config } from '../config/schema.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 import { claudeEffort } from './claude.js'
 import { codexReasoningEffort, parseCodexTokensUsed } from './codex.js'
-import { opencodeEffort, opencodeSupportsStandalone, isolateCheckoutOpenCodeConfig, parseOpenCodeOutput } from './opencode.js'
+import { opencodeEffort, requireOpenCodeRun, isolateCheckoutOpenCodeConfig, parseOpenCodeOutput, isOpenCodeUsageOutput, isOpenCodeAuthFailure, OPENCODE_USAGE_SUMMARY } from './opencode.js'
 import { claudeSkillBrokerArgs, codexSkillBrokerArgs, codexSkillsReachable, renderSkillBrokerInstructions, type SkillActivationSession } from '../skills/broker.js'
 import { buildCodexEnv } from './codex-env.js'
 import { buildOpenCodeEnv } from './opencode-env.js'
@@ -377,9 +377,7 @@ export async function runOpenCodeFixStep(
   // suffix on `--model provider/model#variant`. Without a pinned model the
   // variant cannot be sent, so `effort` is honoured only when `model` is set.
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
-  const standaloneSupported = await opencodeSupportsStandalone()
-  const policyFormat = standaloneSupported ? 'v2' : 'v1'
-  const standaloneArgs = standaloneSupported ? ['--standalone'] : []
+  const { baseArgs, policyFormat } = await requireOpenCodeRun()
 
   let tokensUsed: number | undefined
   try {
@@ -389,7 +387,7 @@ export async function runOpenCodeFixStep(
       const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true, policyFormat)
       return execa(
         'opencode',
-        ['run', '--format', 'json', '--auto', ...standaloneArgs, ...modelArgs],
+        [...baseArgs, ...modelArgs],
         {
           cwd: tmpDir,
           timeout: resolvedTimeout,
@@ -402,7 +400,11 @@ export async function runOpenCodeFixStep(
     tokensUsed = parseOpenCodeOutput(result.stdout ?? '').tokensUsed
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    if (/not logged in|auth|credential/i.test(msg)) {
+    const stderr = err instanceof Error && 'stderr' in err && typeof err.stderr === 'string' ? err.stderr : undefined
+    if (isOpenCodeUsageOutput(stderr ?? '')) {
+      throw new Error(`opencode: ${OPENCODE_USAGE_SUMMARY}`)
+    }
+    if (isOpenCodeAuthFailure(stderr, msg)) {
       throw new Error('opencode auth failure during fix step — run: opencode auth login')
     }
     throw err
