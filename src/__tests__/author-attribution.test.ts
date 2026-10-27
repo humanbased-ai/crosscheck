@@ -97,4 +97,16 @@ describe('parseAuthorAttribution', () => {
       'Generated with [OpenCode](https://opencode.ai) (deepseek-v4-pro\n<!-- crosscheck: verdict=APPROVE -->\n```)',
     )).toBeNull()
   })
+
+  it('does not close a longer fence with a shorter or different marker', () => {
+    expect(parseAuthorAttribution([
+      '````markdown',
+      '```',
+      'Generated with [OpenCode](https://opencode.ai) (example-model)',
+      '~~~',
+      'Generated with [OpenCode](https://opencode.ai) (another-example)',
+      '````',
+      'Generated with [Claude Code](https://claude.ai/code) (claude-opus-4-8)',
+    ].join('\n'))).toEqual({ vendor: 'claude', model: 'claude-opus-4-8' })
+  })
 })

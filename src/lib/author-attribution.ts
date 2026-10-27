@@ -80,14 +80,25 @@ export function parseAuthorAttribution(text: string): AuthorAttribution | null {
   if (!text) return null
   // Walk the body in source order and skip fenced blocks, so the first real
   // footer wins regardless of whether it uses the linked or plain form.
-  let inFence = false
+  let fence: { character: string; length: number } | null = null
   for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
-      inFence = !inFence
+    const candidate = /^ {0,3}([\x60]{3,}|~{3,})(.*)$/.exec(line)
+    if (fence) {
+      if (
+        candidate
+        && candidate[1][0] === fence.character
+        && candidate[1].length >= fence.length
+        && /^[ \t]*$/.test(candidate[2])
+      ) fence = null
       continue
     }
-    if (inFence) continue
+    if (candidate) {
+      // Markdown forbids backticks in a backtick fence's info string.
+      if (candidate[1][0] !== '\x60' || !candidate[2].includes('\x60')) {
+        fence = { character: candidate[1][0], length: candidate[1].length }
+      }
+      continue
+    }
     const match = LINKED_FOOTER_RE.exec(line) ?? PLAIN_FOOTER_RE.exec(line)
     if (!match) continue
     const vendor = vendorFromLabel(match[1])
