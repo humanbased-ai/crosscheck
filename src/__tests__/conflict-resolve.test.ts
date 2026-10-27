@@ -151,8 +151,9 @@ describe('multi-vendor conflict resolution', () => {
   it('runs opencode with edit permission and model effort suffix', async () => {
     execaMock.mockImplementation((async (bin: string, args: string[]) => {
       if (bin === 'opencode' && args.includes('--help')) {
-        return { stdout: 'Options:\n  --attach <url>\n  --port <number>', exitCode: 0 }
+        return { stdout: 'Options:\n  --attach <url>\n  --port <number>\n  --auto', exitCode: 0 }
       }
+      if (bin === 'opencode' && args[0] === '--version') return { stdout: '1.19.3', exitCode: 0 }
       writeFileSync(join(repoDir, 'src/conflicted.ts'), 'resolved\n')
       return { stdout: '{"type":"step_finish","part":{"tokens":{"input":10,"output":5}}}\n' }
     }) as never)

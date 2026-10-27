@@ -5,7 +5,7 @@ import { execa } from 'execa'
 import { applyEdit } from './fix.js'
 import { claudeEffort } from './claude.js'
 import { codexReasoningEffort, parseCodexTokensUsed } from './codex.js'
-import { isolateCheckoutOpenCodeConfig, opencodeEffort, opencodeSupportsStandalone, parseOpenCodeOutput } from './opencode.js'
+import { isolateCheckoutOpenCodeConfig, opencodeEffort, parseOpenCodeOutput, requireOpenCodeRun } from './opencode.js'
 import { codexModelRejection, codexTurnFailureMessage, withCodexJsonlOutput, withCodexModelFallback } from '../lib/codex-model-fallback.js'
 import { buildCodexEnv } from './codex-env.js'
 import { buildOpenCodeEnv } from './opencode-env.js'
@@ -367,16 +367,14 @@ async function runAgenticConflictResolve(
       tokensUsed = parseCodexTokensUsed(result.stdout ?? '')
     } else {
       const modelArgs = model ? ['--model', `${model}#${effort}`] : []
-      const standaloneSupported = await opencodeSupportsStandalone()
-      const policyFormat = standaloneSupported ? 'v2' : 'v1'
-      const standaloneArgs = standaloneSupported ? ['--standalone'] : []
+      const { baseArgs, policyFormat } = await requireOpenCodeRun()
       const result = await withCredentialFreeOrigin(tmpDir, () => {
         // Resolve conflicts with edit permission, but hide any project config
         // the untrusted checkout carries while the agent runs.
         const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true, policyFormat)
         return execa(
           'opencode',
-          ['run', '--format', 'json', '--auto', ...standaloneArgs, ...modelArgs],
+          [...baseArgs, ...modelArgs],
           {
             cwd: tmpDir,
             timeout: resolvedTimeout,
