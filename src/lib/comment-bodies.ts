@@ -4,7 +4,7 @@
 // without exercising the runner.
 import { CROSSCHECK_REPO_URL } from './product.js'
 import { modelDisplayName } from './review-models.js'
-import { vendorDisplayName } from './vendor.js'
+import { vendorDisplayName, type Vendor } from './vendor.js'
 import { renderSkillAttributionLine } from '../skills/attribution.js'
 import type { SkillMetadata } from '../skills/broker.js'
 import type { AuthorAttribution } from './author-attribution.js'
@@ -288,10 +288,13 @@ export interface ConflictResolvedCommentInput {
   author?: AuthorAttribution
   /** Skills the conflict-resolve step activated. Rendered beneath the attribution. */
   skills?: SkillMetadata[]
+  /** Agent that resolved the conflicts. Defaults to claude for older callers. */
+  vendor?: Vendor
 }
 
 export function buildConflictResolvedCommentBody(input: ConflictResolvedCommentInput): string {
   const { owner, repo, sha, conflictCount, files, model, effort, author, skills } = input
+  const { vendor = 'claude' } = input
   const shortSha = sha.slice(0, 7)
   const commitUrl = `https://github.com/${owner}/${repo}/commit/${sha}`
   const plural = conflictCount !== 1 ? 's' : ''
@@ -311,9 +314,7 @@ export function buildConflictResolvedCommentBody(input: ConflictResolvedCommentI
     `Pushed [\`${shortSha}\`](${commitUrl}).`,
     '',
     ...(authorLine ? [authorLine, ''] : []),
-    // Conflict resolution is Claude-only today; the footer still routes through
-    // the shared builder so the wording matches review and fix.
-    buildAttributionFooter({ action: 'Resolved', vendor: 'claude', model, effort, skills }),
+    buildAttributionFooter({ action: 'Resolved', vendor, model, effort, skills }),
     '',
     '<!-- crosscheck: conflict_resolved -->',
   ].join('\n')

@@ -661,7 +661,7 @@ crosscheck fix https://github.com/owner/repo/pull/245,255 --fixer claude
 crosscheck resolve https://github.com/owner/repo/pull/245-256 --vendor claude
 ```
 
-When the named step is not present in the active `workflow.yml`, `recheck` and `conflict-resolve` are synthesized with built-in defaults so the command still runs. `resolve` only supports `claude` (Codex conflict resolution is not yet supported); pass `--vendor claude` if the PR's assigned reviewer is Codex.
+When the named step is not present in the active `workflow.yml`, `recheck` and `conflict-resolve` are synthesized with built-in defaults so the command still runs. `resolve` uses the PR's assigned agent; pass `--vendor claude|codex|opencode` to force a different one.
 
 ---
 
@@ -1341,6 +1341,20 @@ routing:
   # first authenticated vendor (codex, then claude, then opencode); an explicit
   # 'codex' | 'claude' | 'opencode' always uses that vendor; null = skip the PR.
   fallback_reviewer: auto
+
+# ── Agent priority ────────────────────────────────────────────────────────────
+# Per-task order for choosing among enabled vendors. `crosscheck onboard` writes
+# this from your answers. Omit it to keep the legacy routing below.
+#
+# review            — cross-vendor still applies: the author's own agent is
+#                     skipped while another enabled vendor can review.
+# fix / conflict_resolve — the author's own agent still runs first when enabled;
+#                     this order picks the agent for human-authored PRs and
+#                     fallbacks.
+agent_priority:
+  review: [codex, claude]           # enabled vendors not listed are appended
+  fix: [codex, claude]
+  conflict_resolve: [claude, codex]
 
 # ── Tunnel (watch mode only) ──────────────────────────────────────────────────
 # localhost.run (default) — SSH tunnel, zero install, URL changes on reconnect.

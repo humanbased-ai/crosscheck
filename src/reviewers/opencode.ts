@@ -134,6 +134,9 @@ export function opencodePolicy(allowEdit: boolean, format: OpenCodePolicyFormat)
   if (format === 'v1') {
     return {
       permission: {
+        // Conflict resolution edits untrusted paths. Keep OpenCode from
+        // following a path the checkout redirects outside its own workspace.
+        external_directory: 'deny',
         bash: {
           '*': 'deny',
           'git status *': 'allow',
@@ -150,6 +153,7 @@ export function opencodePolicy(allowEdit: boolean, format: OpenCodePolicyFormat)
   }
   return {
     permissions: [
+      { action: 'external_directory', resource: '*', effect: 'deny' },
       { action: 'shell', resource: '*', effect: 'deny' },
       { action: 'shell', resource: 'git status *', effect: 'allow' },
       { action: 'shell', resource: 'git diff *', effect: 'allow' },

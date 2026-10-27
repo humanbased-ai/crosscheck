@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { extractConflictWindows, parseResolverEdits, PROMPT_TEMPLATE } from '../reviewers/conflict-resolve.js'
@@ -96,6 +96,109 @@ describe('Claude conflict skill broker permissions', () => {
     } finally {
       session.close()
     }
+  })
+})
+
+describe('multi-vendor conflict resolution', () => {
+  let execaMock: ReturnType<typeof vi.fn>
+  let execSyncMock: ReturnType<typeof vi.fn>
+  let repoDir: string
+
+  beforeEach(async () => {
+    repoDir = mkdtempSync(join(tmpdir(), 'crosscheck-conflict-agent-test-'))
+    mkdirSync(join(repoDir, 'src'))
+    writeFileSync(join(repoDir, 'src/conflicted.ts'), '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> staging\n')
+    const execa = await import('execa')
+    execaMock = vi.mocked(execa.execa) as ReturnType<typeof vi.fn>
+    const childProcess = await import('child_process')
+    execSyncMock = vi.mocked(childProcess.execSync) as ReturnType<typeof vi.fn>
+    execSyncMock.mockImplementation((command: string) => {
+      if (typeof command === 'string' && command.includes('--diff-filter=U')) return 'src/conflicted.ts\n'
+      if (typeof command === 'string' && command.includes('git diff --name-only')) return 'src/conflicted.ts\n'
+      return ''
+    })
+  })
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true })
+    rmSync(`${repoDir}-outside.ts`, { force: true })
+    vi.clearAllMocks()
+  })
+
+  it('runs codex as an editing agent and reports the files it changed', async () => {
+    execaMock.mockResolvedValue({
+      stdout: '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}\n',
+    } as never)
+    writeFileSync(join(repoDir, 'src/conflicted.ts'), 'resolved\n')
+    const { runConflictResolveForVendor } = await import('../reviewers/conflict-resolve.js')
+    const result = await runConflictResolveForVendor(
+      'codex', repoDir, 'My PR', 'Keep both changes', 'default', undefined, undefined, 'medium',
+    )
+
+    expect(result.appliedCount).toBe(1)
+    expect(result.resolvedPaths).toEqual(['src/conflicted.ts'])
+    expect(result.tokensUsed).toBe(15)
+    expect(result.effort).toBe('medium')
+
+    const [bin, args, options] = execaMock.mock.calls[0] as [string, string[], { input?: string }]
+    expect(bin).toBe('codex')
+    expect(args).toContain('exec')
+    expect(options.input).toContain('Edit the files directly')
+    expect(options.input).toContain('Keep both changes')
+    expect(options.input).toContain('src/conflicted.ts')
+  })
+
+  it('runs opencode with edit permission and model effort suffix', async () => {
+    execaMock.mockImplementation((async (bin: string, args: string[]) => {
+      if (bin === 'opencode' && args.includes('--help')) {
+        return { stdout: 'Options:\n  --attach <url>\n  --port <number>', exitCode: 0 }
+      }
+      writeFileSync(join(repoDir, 'src/conflicted.ts'), 'resolved\n')
+      return { stdout: '{"type":"step_finish","part":{"tokens":{"input":10,"output":5}}}\n' }
+    }) as never)
+    const { runConflictResolveForVendor } = await import('../reviewers/conflict-resolve.js')
+    const result = await runConflictResolveForVendor(
+      'opencode', repoDir, 'My PR', '', 'provider/model', undefined, undefined, 'high',
+    )
+
+    expect(result.appliedCount).toBe(1)
+    expect(result.tokensUsed).toBe(15)
+    expect(result.effort).toBe('high')
+
+    const runCall = execaMock.mock.calls.find(call => call[0] === 'opencode' && (call[1] as string[]).includes('--auto'))
+    expect(runCall).toBeDefined()
+    const args = runCall?.[1] as string[]
+    expect(args).toContain('--model')
+    expect(args).toContain('provider/model#high')
+    const prompt = (runCall?.[2] as { input?: string })?.input ?? ''
+    expect(prompt).toContain('Edit the files directly')
+  })
+
+  it('refuses an agent that edits outside the conflicted set', async () => {
+    execaMock.mockResolvedValue({
+      stdout: '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+    } as never)
+    execSyncMock.mockImplementation((command: string) => {
+      if (typeof command === 'string' && command.includes('--diff-filter=U')) return 'src/conflicted.ts\n'
+      if (typeof command === 'string' && command.includes('git diff --name-only')) return 'src/conflicted.ts\nsrc/other.ts\n'
+      return ''
+    })
+    const { runConflictResolveForVendor } = await import('../reviewers/conflict-resolve.js')
+
+    await expect(runConflictResolveForVendor('codex', repoDir, 'My PR', '', 'default'))
+      .rejects.toThrow(/outside the conflict set/)
+  })
+
+  it('refuses a conflicted path that is a symlink before starting the agent', async () => {
+    const outsideFile = `${repoDir}-outside.ts`
+    writeFileSync(outsideFile, 'outside\n')
+    rmSync(join(repoDir, 'src/conflicted.ts'))
+    symlinkSync(outsideFile, join(repoDir, 'src/conflicted.ts'))
+    const { runConflictResolveForVendor } = await import('../reviewers/conflict-resolve.js')
+
+    await expect(runConflictResolveForVendor('codex', repoDir, 'My PR', '', 'default'))
+      .rejects.toThrow(/contains a symlink/)
+    expect(execaMock).not.toHaveBeenCalled()
   })
 })
 

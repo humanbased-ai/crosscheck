@@ -17,10 +17,10 @@ const ALLOWED_BASH = {
 describe('opencodePolicy', () => {
   it('uses the v1 permission object for a v1 CLI', () => {
     expect(opencodePolicy(false, 'v1')).toEqual({
-      permission: { bash: ALLOWED_BASH, edit: 'deny' },
+      permission: { external_directory: 'deny', bash: ALLOWED_BASH, edit: 'deny' },
     })
     expect(opencodePolicy(true, 'v1')).toEqual({
-      permission: { bash: ALLOWED_BASH },
+      permission: { external_directory: 'deny', bash: ALLOWED_BASH },
     })
   })
 
@@ -29,6 +29,7 @@ describe('opencodePolicy', () => {
       permissions: Array<{ action: string; resource: string; effect: string }>
     }
     expect(policy.permissions).toEqual([
+      { action: 'external_directory', resource: '*', effect: 'deny' },
       { action: 'shell', resource: '*', effect: 'deny' },
       { action: 'shell', resource: 'git status *', effect: 'allow' },
       { action: 'shell', resource: 'git diff *', effect: 'allow' },
@@ -53,7 +54,7 @@ describe('isolateCheckoutOpenCodeConfig', () => {
       writeFileSync(join(dir, 'opencode.json'), JSON.stringify({ original: true }))
       const restore = isolateCheckoutOpenCodeConfig(dir, false, 'v1')
       expect(JSON.parse(readFileSync(join(dir, 'opencode.json'), 'utf8'))).toEqual({
-        permission: { bash: ALLOWED_BASH, edit: 'deny' },
+        permission: { external_directory: 'deny', bash: ALLOWED_BASH, edit: 'deny' },
       })
       restore()
       expect(JSON.parse(readFileSync(join(dir, 'opencode.json'), 'utf8'))).toEqual({ original: true })
