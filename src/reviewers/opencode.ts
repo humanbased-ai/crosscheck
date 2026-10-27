@@ -140,6 +140,9 @@ export function opencodePolicy(allowEdit: boolean, format: OpenCodePolicyFormat)
           'git diff *': 'allow',
           'git log *': 'allow',
           'git show *': 'allow',
+          // Keep the read-only allowlist from turning git diff into a file write.
+          'git diff --output*': 'deny',
+          'git diff -o*': 'deny',
         },
         ...(allowEdit ? {} : { edit: 'deny' }),
       },
@@ -152,6 +155,9 @@ export function opencodePolicy(allowEdit: boolean, format: OpenCodePolicyFormat)
       { action: 'shell', resource: 'git diff *', effect: 'allow' },
       { action: 'shell', resource: 'git log *', effect: 'allow' },
       { action: 'shell', resource: 'git show *', effect: 'allow' },
+      // The final matching rule wins: do not let git diff output to a file.
+      { action: 'shell', resource: 'git diff --output*', effect: 'deny' },
+      { action: 'shell', resource: 'git diff -o*', effect: 'deny' },
       ...(allowEdit ? [] : [{ action: 'edit', resource: '*', effect: 'deny' }]),
     ],
   }

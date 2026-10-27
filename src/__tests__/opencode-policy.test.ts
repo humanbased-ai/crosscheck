@@ -10,6 +10,8 @@ const ALLOWED_BASH = {
   'git diff *': 'allow',
   'git log *': 'allow',
   'git show *': 'allow',
+  'git diff --output*': 'deny',
+  'git diff -o*': 'deny',
 }
 
 describe('opencodePolicy', () => {
@@ -32,6 +34,8 @@ describe('opencodePolicy', () => {
       { action: 'shell', resource: 'git diff *', effect: 'allow' },
       { action: 'shell', resource: 'git log *', effect: 'allow' },
       { action: 'shell', resource: 'git show *', effect: 'allow' },
+      { action: 'shell', resource: 'git diff --output*', effect: 'deny' },
+      { action: 'shell', resource: 'git diff -o*', effect: 'deny' },
       { action: 'edit', resource: '*', effect: 'deny' },
     ])
   })
