@@ -210,13 +210,14 @@ export async function runOpenCodeReview(
 
   // OpenCode takes the prompt on stdin (like claude/codex): `opencode run` with
   // no message argument reads stdin, and keeping the prompt out of argv stops
-  // repository guidance from reaching the process list. `--standalone` runs a
-  // private server, so a review of untrusted code never shares a session with
-  // the operator's interactive work. `--auto` is required even for a read-only
-  // review: a headless run auto-rejects permission requests otherwise, and
-  // reviewing a diff can trip `external_directory` (the clone lives outside the
-  // agent's workspace root) which is fatal without it. The env allowlist and
-  // the throwaway clone bound the blast radius of the widened permissions.
+  // repository guidance from reaching the process list. `--auto` is required
+  // even for a read-only review: a headless run auto-rejects permission
+  // requests otherwise, and reviewing a diff can trip `external_directory`
+  // (the clone lives outside the agent's workspace root) which is fatal
+  // without it. The env allowlist and the throwaway clone bound the blast
+  // radius of the widened permissions. `--standalone` (a private server, so a
+  // review never shares a session with the operator) is v2-only and is added
+  // only when the installed CLI accepts it.
   //
   // OpenCode has no separate effort flag — reasoning effort is the `#variant`
   // suffix on `--model provider/model#variant`. Without a pinned model there is
@@ -225,9 +226,10 @@ export async function runOpenCodeReview(
   // default model AND its default variant run, and `effort` is reported but
   // not applied (it is not a claim the CLI was given).
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
-  const args = ['run', '--format', 'json', '--auto', '--standalone', ...modelArgs]
+  const standaloneArgs = (await opencodeSupportsStandalone()) ? ['--standalone'] : []
+  const args = ['run', '--format', 'json', '--auto', ...standaloneArgs, ...modelArgs]
 
-  onLog?.(`  running: opencode run --format json --auto --standalone${model ? ` --model ${model}#${effort}` : ''}`)
+  onLog?.(`  running: opencode ${args.join(' ')}`)
 
   let lastErr: unknown = undefined
   for (let attempt = 1; attempt <= MAX_OPENCODE_RETRIES; attempt++) {
@@ -295,6 +297,55 @@ export async function runOpenCodeReview(
 
   if (lastErr) throw lastErr
   throw new Error('opencode: unexpected retry loop exit')
+}
+
+// `--standalone` exists only in the v2 CLI. The v1 `opencode` rejects the flag
+// before reading stdin, so every review and fix fails with yargs help text and
+// exit code 1. Probe `run --help` for each invocation and pass the flag only
+// when the installed binary actually lists it. The probe is deliberately not
+// cached: a long-lived crosscheck process can outlive an OpenCode upgrade, and
+// either cached answer would then be wrong.
+//
+// On v2, omitting `--standalone` would attach to the operator's shared
+// background server, so an unreadable probe must fail the run rather than
+// guess "unsupported". The v1 CLI has no shared server: its `run` starts an
+// in-process server unless the caller passes `--attach` (opencode v1.19.3,
+// cli/cmd/run.ts:129-131), and Crosscheck never passes `--attach`. Accept the
+// flagless path only for a help listing with the v1 shape — an `Options:`
+// section plus the opt-in `--attach` and the local server's `--port`.
+export function parseOpenCodeStandaloneSupport(helpOutput: string): boolean {
+  return /(?:^|\s)--standalone\b/m.test(stripVTControlCharacters(helpOutput))
+}
+
+function looksLikeV1RunHelp(helpOutput: string): boolean {
+  const help = stripVTControlCharacters(helpOutput)
+  return /(?:^|\n)[ \t]*Options:[ \t]*(?:\n|$)/.test(help) && /--attach\b/.test(help) && /--port\b/.test(help)
+}
+
+export async function opencodeSupportsStandalone(): Promise<boolean> {
+  let stdout = ''
+  let stderr = ''
+  let exitCode: number | undefined
+  try {
+    const result = await execa('opencode', ['run', '--help'], {
+      timeout: 10_000,
+      reject: false,
+      extendEnv: false,
+      env: buildOpenCodeEnv(),
+    })
+    stdout = result.stdout ?? ''
+    stderr = result.stderr ?? ''
+    exitCode = result.exitCode
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    throw new Error(`opencode: --standalone support probe failed (${detail}); refusing to run without session isolation`)
+  }
+  const help = `${stdout}\n${stderr}`
+  if (parseOpenCodeStandaloneSupport(help)) return true
+  if (exitCode !== 0 || !looksLikeV1RunHelp(help)) {
+    throw new Error(`opencode: could not read 'opencode run --help' (exit ${exitCode ?? 'unknown'}); refusing to run without session isolation`)
+  }
+  return false
 }
 
 // `opencode auth list` has no machine-readable mode: `--format json`,
