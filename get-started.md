@@ -661,7 +661,7 @@ crosscheck fix https://github.com/owner/repo/pull/245,255 --fixer claude
 crosscheck resolve https://github.com/owner/repo/pull/245-256 --vendor claude
 ```
 
-When the named step is not present in the active `workflow.yml`, `recheck` and `conflict-resolve` are synthesized with built-in defaults so the command still runs. `resolve` only supports `claude` (Codex conflict resolution is not yet supported); pass `--vendor claude` if the PR's assigned reviewer is Codex.
+When the named step is not present in the active `workflow.yml`, `recheck` and `conflict-resolve` are synthesized with built-in defaults so the command still runs. `resolve` uses the PR's assigned agent; pass `--vendor claude|codex|opencode` to force a different one.
 
 ---
 
@@ -1342,6 +1342,20 @@ routing:
   # 'codex' | 'claude' | 'opencode' always uses that vendor; null = skip the PR.
   fallback_reviewer: auto
 
+# ── Agent priority ────────────────────────────────────────────────────────────
+# Per-task order for choosing among enabled vendors. `crosscheck onboard` writes
+# this from your answers. Omit it to keep the legacy routing below.
+#
+# review            — cross-vendor still applies: the author's own agent is
+#                     skipped while another enabled vendor can review.
+# fix / conflict_resolve — the author's own agent still runs first when enabled;
+#                     this order picks the agent for human-authored PRs and
+#                     fallbacks.
+agent_priority:
+  review: [codex, claude]           # enabled vendors not listed are appended
+  fix: [codex, claude]
+  conflict_resolve: [claude, codex]
+
 # ── Tunnel (watch mode only) ──────────────────────────────────────────────────
 # localhost.run (default) — SSH tunnel, zero install, URL changes on reconnect.
 # smee — stable relay via smee.io; events queued while offline.
@@ -1598,6 +1612,12 @@ If none match, origin is `human` and the PR is skipped in cross-vendor mode.
 | `Co-Authored-By: codex` | Commit trailers from Codex |
 | branch prefix `claude/` | Branch naming convention for Claude-authored PRs |
 | branch prefix `codex/` | Branch naming convention for Codex-authored PRs |
+
+Agents may append the model and reasoning effort to the footer, for example
+`Generated with [OpenCode](https://opencode.ai) (deepseek-v4-pro · high effort)`.
+Crosscheck reads that declaration (the parenthetical is optional) and adds a
+`PR author` line naming the agent, model and effort to the review and fix
+comments it posts. The origin patterns above still match the footer prefix.
 
 ### Reviewer assignment
 

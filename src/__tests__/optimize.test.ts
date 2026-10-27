@@ -17,6 +17,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean, opencodeEnabl
     users: [],
     repos: [],
     routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], opencode_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], opencode_branch_prefixes: [], allowed_authors: [], author_routes: {}, fallback_reviewer: 'auto' },
+    agent_priority: { review: [], fix: [], conflict_resolve: [] },
     server: { port: 7892, webhook_path: '/webhook' },
     quality: { tier: 'balanced', mode: 'fixed', review_memory: true, focus: [], custom_prompt: undefined },
     skills: { enabled: [], codex_full_access: false },

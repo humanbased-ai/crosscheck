@@ -13,6 +13,7 @@ import {
   buildWorkflowCompleteEvent,
   resolveFixVendor,
   resolveConflictResolveVendor,
+  resolveReviewVendor,
   summariseStepOutcomes,
   mergeStepOutcomes,
   resolveFixLanding,
@@ -504,17 +505,14 @@ describe('resolveConflictResolveVendor', () => {
         .toEqual({ vendor: 'claude', usedHumanFallback: true })
     })
 
-    it('auto: picks claude even with codex enabled — codex cannot resolve conflicts', () => {
-      // Diverges from resolveFixVendor's codex-first auto path on purpose: routing
-      // to codex here only trades a 'no_vendor' skip for a
-      // 'codex_conflict_resolve_unsupported' one.
+    it('auto: follows the legacy codex-first order when no priority is configured', () => {
       expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true)))
-        .toEqual({ vendor: 'claude', usedHumanFallback: true })
+        .toEqual({ vendor: 'codex', usedHumanFallback: true })
     })
 
-    it('auto with claude disabled: no vendor supports the step', () => {
+    it('auto with claude disabled still resolves to codex', () => {
       expect(resolveConflictResolveVendor('origin', 'human', cfg(false, true)))
-        .toEqual({ vendor: null, usedHumanFallback: false })
+        .toEqual({ vendor: 'codex', usedHumanFallback: true })
     })
 
     it('explicit codex: honoured, so the caller reports the precise unsupported skip', () => {
@@ -548,7 +546,7 @@ describe('resolveConflictResolveVendor', () => {
 
     it('reviewer:auto with human origin uses the resolveReviewer auto path unchanged', () => {
       // 'auto' encodes explicit intent, so it keeps resolveReviewer's codex-first
-      // path and the caller skips with codex_conflict_resolve_unsupported.
+      // path when no priority order is configured.
       expect(resolveConflictResolveVendor('auto', 'human', cfg(true, true)))
         .toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
@@ -560,28 +558,25 @@ describe('resolveConflictResolveVendor', () => {
         .toEqual({ vendor: 'claude', usedHumanFallback: false })
     })
 
-    // Regression (#284): `Crosscheck-Reviewer: codex` detection makes a
-    // crosscheck-authored Codex fix PR resolve to origin 'codex'. Conflict
-    // resolution is Claude-only, so returning codex would skip the step and leave
-    // the PR's conflicts unresolved (before #284 these PRs were 'human' and the
-    // auto fallback picked Claude). Because the assignment came from origin
-    // detection, substitute the capable vendor rather than skip.
-    it('codex origin substitutes claude — codex cannot resolve conflicts', () => {
+    // Regression (#284) used to substitute Claude here because conflict
+    // resolution was Claude-only. Now every vendor can resolve conflicts, so the
+    // author's own agent keeps the step.
+    it('codex origin resolves to codex — codex now supports conflict resolution', () => {
       expect(resolveConflictResolveVendor('origin', 'codex', cfg(true, true)))
-        .toEqual({ vendor: 'claude', usedHumanFallback: false, substitutedOriginVendor: 'codex' })
+        .toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
 
-    it('codex origin with claude disabled: no capable vendor, stays codex so the caller reports the precise skip', () => {
+    it('codex origin with claude disabled still resolves to codex', () => {
       expect(resolveConflictResolveVendor('origin', 'codex', cfg(false, true)))
         .toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
 
-    it('opencode origin substitutes claude — opencode cannot resolve conflicts', () => {
+    it('opencode origin resolves to opencode — opencode now supports conflict resolution', () => {
       expect(resolveConflictResolveVendor('origin', 'opencode', cfg(true, true, 'auto', true)))
-        .toEqual({ vendor: 'claude', usedHumanFallback: false, substitutedOriginVendor: 'opencode' })
+        .toEqual({ vendor: 'opencode', usedHumanFallback: false })
     })
 
-    it('opencode origin with claude disabled: no capable vendor, stays opencode so the caller reports the precise skip', () => {
+    it('opencode origin with claude disabled still resolves to opencode', () => {
       expect(resolveConflictResolveVendor('origin', 'opencode', cfg(false, true, 'auto', true)))
         .toEqual({ vendor: 'opencode', usedHumanFallback: false })
     })
@@ -592,6 +587,79 @@ describe('resolveConflictResolveVendor', () => {
       expect(resolveConflictResolveVendor('origin', 'human', cfg(true, true, 'claude'), 'codex'))
         .toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
+  })
+})
+
+describe('agent_priority', () => {
+  const cfg = (
+    priority: { review: string[]; fix: string[]; conflict_resolve: string[] },
+    claudeEnabled = true,
+    codexEnabled = true,
+    opencodeEnabled = false,
+  ) => ({
+    vendors: {
+      claude: { enabled: claudeEnabled },
+      codex: { enabled: codexEnabled },
+      opencode: { enabled: opencodeEnabled },
+    },
+    routing: { fallback_reviewer: 'auto' },
+    agent_priority: priority,
+  }) as unknown as Config
+
+  it('review follows the configured order among non-origin vendors', () => {
+    const config = cfg(
+      { review: ['opencode', 'codex', 'claude'], fix: [], conflict_resolve: [] },
+      true, true, true,
+    )
+    expect(resolveReviewVendor('auto', 'claude', config)).toBe('opencode')
+    expect(resolveReviewVendor('auto', 'codex', config)).toBe('opencode')
+    expect(resolveReviewVendor('auto', 'opencode', config)).toBe('codex')
+  })
+
+  it('review skips the author vendor even when it is first', () => {
+    const config = cfg({ review: ['claude', 'codex'], fix: [], conflict_resolve: [] })
+    expect(resolveReviewVendor('auto', 'claude', config)).toBe('codex')
+    expect(resolveReviewVendor('auto', 'codex', config)).toBe('claude')
+  })
+
+  it('review falls back to the only enabled vendor', () => {
+    const config = cfg({ review: ['codex'], fix: [], conflict_resolve: [] }, true, false)
+    expect(resolveReviewVendor('auto', 'claude', config)).toBe('claude')
+  })
+
+  it('appends enabled vendors missing from the configured review list', () => {
+    const config = cfg({ review: ['claude'], fix: [], conflict_resolve: [] })
+    expect(resolveReviewVendor('auto', 'claude', config)).toBe('codex')
+  })
+
+  it('fix keeps the author vendor first, then uses the configured order', () => {
+    const config = cfg({ review: [], fix: ['claude', 'codex'], conflict_resolve: [] })
+    expect(resolveFixVendor('origin', 'codex', config)).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    expect(resolveFixVendor('origin', 'human', config)).toEqual({ vendor: 'claude', usedHumanFallback: true })
+  })
+
+  it('fix with reviewer auto still starts from the author vendor', () => {
+    const config = cfg({ review: [], fix: ['claude', 'codex'], conflict_resolve: [] })
+    expect(resolveFixVendor('auto', 'codex', config)).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    expect(resolveFixVendor('auto', 'human', config)).toEqual({ vendor: 'claude', usedHumanFallback: false })
+  })
+
+  it('conflict-resolve follows the configured order for human origins', () => {
+    const config = cfg(
+      { review: [], fix: [], conflict_resolve: ['opencode', 'claude', 'codex'] },
+      true, true, true,
+    )
+    expect(resolveConflictResolveVendor('origin', 'human', config))
+      .toEqual({ vendor: 'opencode', usedHumanFallback: true })
+  })
+
+  it('conflict-resolve keeps the author vendor first', () => {
+    const config = cfg(
+      { review: [], fix: [], conflict_resolve: ['claude', 'opencode'] },
+      true, true, true,
+    )
+    expect(resolveConflictResolveVendor('origin', 'opencode', config))
+      .toEqual({ vendor: 'opencode', usedHumanFallback: false })
   })
 })
 

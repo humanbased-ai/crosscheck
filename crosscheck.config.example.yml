@@ -225,6 +225,29 @@ routing:
     - "Generated with \\[OpenCode\\]"       # PR body attribution footer
     - "Co-Authored-By: opencode"            # commit trailer added by OpenCode
 
+# ─── Agent priority ────────────────────────────────────────────────────────────
+# Optional per-task order. Only enabled vendors are eligible; any enabled vendor
+# missing from a list is appended after the listed ones, so adding a vendor later
+# does not leave it unusable.
+#
+# review            — cross-vendor rule still wins: the author's own agent is
+#                     skipped while another enabled vendor is available.
+# fix / conflict_resolve — the author's own agent still runs first when it is
+#                     enabled; this order picks who runs for human-authored PRs
+#                     or when that agent is unavailable.
+# Empty/absent lists keep the legacy routing (review: codex-first cross-vendor;
+# fix/conflict: author's agent, then codex-first fallback).
+agent_priority:
+  review:
+    - codex
+    - claude
+  fix:
+    - codex
+    - claude
+  conflict_resolve:
+    - claude
+    - codex
+
 # ─── Tunnel (watch mode only) ────────────────────────────────────────────────
 # Controls how crosscheck watch receives GitHub webhook events on your laptop.
 #
