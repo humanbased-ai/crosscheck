@@ -1599,6 +1599,12 @@ If none match, origin is `human` and the PR is skipped in cross-vendor mode.
 | branch prefix `claude/` | Branch naming convention for Claude-authored PRs |
 | branch prefix `codex/` | Branch naming convention for Codex-authored PRs |
 
+Agents may append the model and reasoning effort to the footer, for example
+`Generated with [OpenCode](https://opencode.ai) (deepseek-v4-pro · high effort)`.
+Crosscheck reads that declaration (the parenthetical is optional) and adds a
+`PR author` line naming the agent, model and effort to the review and fix
+comments it posts. The origin patterns above still match the footer prefix.
+
 ### Reviewer assignment
 
 | Mode | PR origin | Reviewer |
