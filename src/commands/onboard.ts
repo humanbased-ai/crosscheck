@@ -17,7 +17,7 @@ import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/re
 import { DEFAULT_REVIEW_INSTRUCTIONS, DEFAULT_FIX_INSTRUCTIONS, DEFAULT_RECHECK_INSTRUCTIONS, DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS } from '../lib/workflow.js'
 import { formatRepoWorkflowSteps, readRepoWorkflowStepTypes } from '../lib/repo-workflow.js'
 import { initLogger, log as fileLog } from '../lib/logger.js'
-import { LogsConfigSchema } from '../config/schema.js'
+import { LogsConfigSchema, type AgentPriorityConfig } from '../config/schema.js'
 import type { Vendor } from '../lib/vendor.js'
 import { CODEX_TIER_MODELS_API, CODEX_TIER_MODELS_SUBSCRIPTION } from '../lib/review-models.js'
 import {
@@ -70,6 +70,87 @@ function vendorSelection(mode: VendorModeConfig['mode'], selected: Vendor[]): Ve
     codexEnabled: selected.includes('codex'),
     opencodeEnabled: selected.includes('opencode'),
   }
+}
+
+const PRIORITY_TASKS: Array<{
+  key: keyof AgentPriorityConfig
+  label: string
+  hint: string
+}> = [
+  {
+    key: 'review',
+    label: 'Review',
+    hint: 'Reviews always skip the author\'s own agent when another is available; this order picks the reviewer.',
+  },
+  {
+    key: 'fix',
+    label: 'Fix',
+    hint: 'The author\'s agent still runs first when available; this order picks the fixer otherwise.',
+  },
+  {
+    key: 'conflict_resolve',
+    label: 'Conflict resolve',
+    hint: 'The author\'s agent still runs first when available; this order picks the resolver otherwise.',
+  },
+]
+
+function normalizedPriority(existing: AgentPriorityConfig | undefined, vendors: Vendor[]): AgentPriorityConfig {
+  const pick = (order: Vendor[] | undefined): Vendor[] => {
+    const allowed = (order ?? []).filter(vendor => vendors.includes(vendor))
+    return [...allowed, ...vendors.filter(vendor => !allowed.includes(vendor))]
+  }
+  return {
+    review: pick(existing?.review),
+    fix: pick(existing?.fix),
+    conflict_resolve: pick(existing?.conflict_resolve),
+  }
+}
+
+function formatPriority(order: Vendor[]): string {
+  return order.length > 0 ? order.map(vendor => chalk.cyan(vendor)).join(chalk.dim(' → ')) : chalk.dim('none')
+}
+
+async function promptPriorityOrder(
+  label: string,
+  vendors: Vendor[],
+  preferred: Vendor[],
+): Promise<Vendor[]> {
+  if (vendors.length <= 1) return [...vendors]
+
+  const pool = [...preferred.filter(vendor => vendors.includes(vendor)), ...vendors.filter(vendor => !preferred.includes(vendor))]
+  const ordered: Vendor[] = []
+  const remaining = (): Vendor[] => pool.filter(vendor => !ordered.includes(vendor))
+
+  while (remaining().length > 1) {
+    const options = remaining()
+    const position = ordered.length === 0 ? 'first' : ordered.length === 1 ? 'second' : 'next'
+    const idx = await promptSinglePicker(
+      options.map(vendor => ({ label: vendor, description: `${label.toLowerCase()} with ${vendor}` })),
+      { title: `${label} — ${position} choice`, defaultIndex: 0 },
+    )
+    ordered.push(options[idx])
+  }
+  ordered.push(...remaining())
+  return ordered
+}
+
+async function promptAgentPriority(
+  vendorConfig: VendorModeConfig,
+  existing: AgentPriorityConfig | undefined,
+  opts: OnboardOpts,
+): Promise<AgentPriorityConfig> {
+  const vendors = enabledOnboardVendors(vendorConfig)
+  const current = normalizedPriority(existing, vendors)
+  if (opts.yes || vendors.length <= 1) return current
+
+  const result = { ...current }
+  for (const task of PRIORITY_TASKS) {
+    console.log(chalk.dim(`  ${task.hint}`))
+    result[task.key] = await promptPriorityOrder(task.label, vendors, current[task.key])
+    console.log(`  ${task.label.padEnd(16)} ${formatPriority(result[task.key])}`)
+    console.log()
+  }
+  return result
 }
 
 // Effort settings and display hints per quality tier.
@@ -551,6 +632,8 @@ export interface OnboardDecisions {
   qualityTier: QualityTier
   qualityMode: 'smart' | 'fixed'
   enabledSkills: string[]
+  /** Per-task agent order. Optional so older callers preserve the existing block. */
+  agentPriority?: AgentPriorityConfig
   pipelinePreset: WorkflowPreset
   maxRounds?: number  // only relevant for review-fix-recheck; defaults to 1
   conflictResolve: boolean  // opt-in; prepends a conflict-resolve step before review
@@ -619,7 +702,7 @@ export function applyOnboardConfig(
   decisions: OnboardDecisions,
   workflowDir = join(homedir(), '.crosscheck'),
 ): void {
-  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, qualityMode, enabledSkills, pipelinePreset, maxRounds, conflictResolve, tunnelBackend, smeeChannel, cloneProtocol, linear } = decisions
+  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, qualityMode, enabledSkills, agentPriority, pipelinePreset, maxRounds, conflictResolve, tunnelBackend, smeeChannel, cloneProtocol, linear } = decisions
 
   // Reject invalid selections before creating or changing config/workflow files.
   vendorSelection(vendorConfig.mode, enabledOnboardVendors(vendorConfig))
@@ -684,6 +767,19 @@ export function applyOnboardConfig(
     }
   }
   if (routing.fallback_reviewer === undefined) routing.fallback_reviewer = 'auto'
+
+  // ── Agent priority ──────────────────────────────────────────────────────────
+  // Written only when onboard asked (or --yes derived it from the enabled set).
+  // Leaving it absent preserves the pre-priority behaviour for hand-written
+  // configs, where fix/conflict-resolve start from the author's agent and review
+  // keeps the historical codex-first cross-vendor preference.
+  if (agentPriority) {
+    raw.agent_priority = {
+      review: [...agentPriority.review],
+      fix: [...agentPriority.fix],
+      conflict_resolve: [...agentPriority.conflict_resolve],
+    }
+  }
 
   // ── Vendors ─────────────────────────────────────────────────────────────────
   if (!raw.vendors || typeof raw.vendors !== 'object') raw.vendors = {}
@@ -1174,14 +1270,21 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log(`  Enabled: ${enabledSkills.length > 0 ? enabledSkills.map(name => chalk.cyan(name)).join(', ') : chalk.dim('none')}`)
   console.log()
 
-  // ── Step 7: Workflow pipeline ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 8 — what happens after a review'))
+  // ── Step 8: Agent priority per task ────────────────────────────────────────
+  console.log(chalk.bold('Step 8 — agent priority'))
+  console.log(chalk.dim('  Picks which enabled agent runs each task when more than one can.'))
+  console.log()
+  const agentPriority = await promptAgentPriority(vendorConfig, existingConfig?.agent_priority, opts)
+  console.log()
+
+  // ── Step 9: Workflow pipeline ──────────────────────────────────────────────
+  console.log(chalk.bold('Step 9 — what happens after a review'))
   console.log(chalk.dim('  Review alone posts findings. Adding fix and re-check closes the loop before merge.'))
 
   const pipelinePreset = await promptWorkflowPipeline(opts)
   console.log()
 
-  // Sub-prompt of step 8 — only meaningful when a recheck step exists.
+  // Sub-prompt of step 9 — only meaningful when a recheck step exists.
   let maxRounds: number | undefined
   if (pipelinePreset === 'review-fix-recheck') {
     const globalWorkflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
@@ -1197,14 +1300,14 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     console.log()
   }
 
-  // Sub-prompt of step 8 — orthogonal to depth, so it is asked for any preset
+  // Sub-prompt of step 9 — orthogonal to depth, so it is asked for any preset
   // that permits code modification.
   const currentConflictResolve = detectConflictResolveEnabled()
   const conflictResolve = await promptConflictResolve(currentConflictResolve, opts)
   console.log()
 
-  // ── Step 9: Connection + clone protocol ───────────────────────────────────
-  console.log(chalk.bold('Step 9 — connection'))
+  // ── Step 10: Connection + clone protocol ──────────────────────────────────
+  console.log(chalk.bold('Step 10 — connection'))
   console.log(chalk.dim('  How GitHub reaches this machine with PR events.'))
 
   const currentTunnel = existingConfig?.tunnel?.backend
@@ -1231,12 +1334,12 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
   console.log()
 
-  // Sub-prompt of step 9 — same plumbing concern as the tunnel.
+  // Sub-prompt of step 10 — same plumbing concern as the tunnel.
   const cloneProtocol = await promptCloneProtocol(existingConfig?.clone_protocol, opts)
   console.log()
 
-  // ── Step 10: Linear write-back (beta, opt-in) ─────────────────────────────
-  console.log(chalk.bold(`Step 10 — Linear write-back ${chalk.yellow('(beta)')}`))
+  // ── Step 11: Linear write-back (beta, opt-in) ─────────────────────────────
+  console.log(chalk.bold(`Step 11 — Linear write-back ${chalk.yellow('(beta)')}`))
 
   const linear = await promptLinear(
     {
@@ -1247,14 +1350,14 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     opts,
   )
 
-  // ── Step 10: Confirm and write ─────────────────────────────────────────────
+  // ── Step 12: Confirm and write ─────────────────────────────────────────────
   const selectedRepoWorkflowOverrides = selectedRepos.flatMap(repoKey => {
     const [owner, name] = repoKey.split('/')
     const steps = readRepoWorkflowStepTypes(owner, name)
     return steps ? [`${repoKey}: ${formatRepoWorkflowSteps(steps)}`] : []
   })
 
-  console.log(chalk.bold('Step 11 — review and write config'))
+  console.log(chalk.bold('Step 12 — review and write config'))
   console.log()
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
   console.log(`  connection   ${chalk.cyan(tunnelBackend)}${tunnelBackend === 'smee' && smeeChannel ? chalk.dim(` (${smeeChannel})`) : ''}`)
@@ -1262,6 +1365,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log(`  linear       ${chalk.cyan(linear.mode === 'off' ? 'off' : linear.mode)}${linear.mode !== 'off' && linear.teamKeys.length > 0 ? chalk.dim(` (${linear.teamKeys.join(', ')})`) : ''} ${chalk.yellow('(beta)')}`)
   console.log(`  mode         ${chalk.cyan(vendorConfig.mode)}`)
   console.log(`  vendors      ${enabledOnboardVendors(vendorConfig).map(vendor => chalk.cyan(vendor)).join(', ')}`)
+  console.log(`  priority     review ${formatPriority(agentPriority.review)}  ·  fix ${formatPriority(agentPriority.fix)}  ·  conflicts ${formatPriority(agentPriority.conflict_resolve)}`)
   if (vendorConfig.mode === 'cross-vendor' && deployment === 'personal') {
     const routingLabel = 'attribution detection; enabled fallback for unknown authors'
     console.log(`  routing      ${chalk.cyan(routingLabel)}`)
@@ -1319,6 +1423,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     qualityTier,
     qualityMode,
     enabledSkills,
+    agentPriority,
     pipelinePreset,
     maxRounds,
     conflictResolve,

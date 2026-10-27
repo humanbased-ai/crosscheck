@@ -134,6 +134,9 @@ export function opencodePolicy(allowEdit: boolean, format: OpenCodePolicyFormat)
   if (format === 'v1') {
     return {
       permission: {
+        // Conflict resolution edits untrusted paths. Keep OpenCode from
+        // following a path the checkout redirects outside its own workspace.
+        external_directory: 'deny',
         bash: {
           '*': 'deny',
           // A `verb *` pattern may not match the bare command, so allow both.
@@ -145,6 +148,9 @@ export function opencodePolicy(allowEdit: boolean, format: OpenCodePolicyFormat)
           'git log *': 'allow',
           'git show': 'allow',
           'git show *': 'allow',
+          // Keep the read-only allowlist from turning git diff into a file write.
+          'git diff --output*': 'deny',
+          'git diff -o*': 'deny',
         },
         ...(allowEdit ? {} : { edit: 'deny' }),
       },
@@ -152,11 +158,15 @@ export function opencodePolicy(allowEdit: boolean, format: OpenCodePolicyFormat)
   }
   return {
     permissions: [
+      { action: 'external_directory', resource: '*', effect: 'deny' },
       { action: 'shell', resource: '*', effect: 'deny' },
       { action: 'shell', resource: 'git status *', effect: 'allow' },
       { action: 'shell', resource: 'git diff *', effect: 'allow' },
       { action: 'shell', resource: 'git log *', effect: 'allow' },
       { action: 'shell', resource: 'git show *', effect: 'allow' },
+      // The final matching rule wins: do not let git diff output to a file.
+      { action: 'shell', resource: 'git diff --output*', effect: 'deny' },
+      { action: 'shell', resource: 'git diff -o*', effect: 'deny' },
       ...(allowEdit ? [] : [{ action: 'edit', resource: '*', effect: 'deny' }]),
     ],
   }
