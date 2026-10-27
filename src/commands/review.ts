@@ -32,6 +32,7 @@ import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession } from '../skills/broker.js'
 import { formatSkillAttribution } from '../skills/attribution.js'
 import { resolveStrategyForPR, logStrategyResolution, resolveRoundExecution, strategyCitation } from '../lib/runner.js'
+import { parseAuthorAttribution } from '../lib/author-attribution.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -364,6 +365,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     await postReviewComment(
       octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort,
       strategyCitation(reviewer === 'codex' ? config.vendors.codex : reviewer === 'opencode' ? config.vendors.opencode : config.vendors.claude, strategy, appliedStrategy, model),
+      parseAuthorAttribution(pr.body ?? '') ?? undefined,
     )
     if (memoryPlan && structured?.snapshot) {
       // The review is already posted; a memory write failure only costs the next review its delta.

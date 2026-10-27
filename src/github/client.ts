@@ -2,8 +2,9 @@ import { Octokit } from 'octokit'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { buildAnnotation, parseAnnotation, parseAnnotationFields, type CrosscheckStepType } from '../lib/annotation.js'
 import { modelDisplayName } from '../lib/review-models.js'
-import { buildAttributionFooter } from '../lib/comment-bodies.js'
+import { buildAttributionFooter, renderAuthorLine } from '../lib/comment-bodies.js'
 import type { SkillMetadata } from '../skills/broker.js'
+import type { AuthorAttribution } from '../lib/author-attribution.js'
 
 export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
@@ -1070,6 +1071,8 @@ export interface ReviewCommentBodyInput {
   /** Review strategy in force. Stamped into the annotation and quoted in the
    *  attribution so a past review stays explicable after the policy changes. */
   strategy?: { version: string; classId: string; tier: string | null; reason: string }
+  /** Author of the PR, parsed from the PR's own attribution footer. */
+  author?: AuthorAttribution
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -1085,6 +1088,7 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
   const serviceSegment = serviceName !== 'crosscheck' ? ` · ${serviceName}` : ''
   const modelSegment = modelDisplay ? ` · ${modelDisplay}` : ''
   const header = `### ${stepVerb(stepType)} by ${vendorLabel}${modelSegment}${serviceSegment}\n\n`
+  const authorLine = renderAuthorLine(input.author)
 
   // Model, effort and the skill receipt ride the attribution rather than the
   // body: they say how the review was produced, and the body belongs to the
@@ -1134,7 +1138,7 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     ? `> Recheck of [original review](#issuecomment-${input.replyToCommentId})\n\n`
     : ''
 
-  return customHeader + replyPrefix + header + input.body + footer + customFooter + annotationTag
+  return customHeader + replyPrefix + header + (authorLine ? `${authorLine}\n\n` : '') + input.body + footer + customFooter + annotationTag
 }
 
 export async function postReviewComment(
@@ -1158,6 +1162,7 @@ export async function postReviewComment(
   skills: SkillMetadata[] = [],
   effort?: string,
   strategy?: { version: string; classId: string; tier: string | null; reason: string },
+  author?: AuthorAttribution,
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -1181,6 +1186,7 @@ export async function postReviewComment(
       skills,
       effort,
       ...(strategy !== undefined && { strategy }),
+      ...(author !== undefined && { author }),
     }),
   })
   return comment.id

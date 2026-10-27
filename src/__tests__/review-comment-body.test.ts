@@ -45,6 +45,32 @@ describe('buildReviewCommentBody', () => {
     expect(body).toContain('_(xhigh effort)_')
   })
 
+  it('names the declared PR author under the reviewer header', () => {
+    const body = buildReviewCommentBody({
+      body: 'VERDICT: APPROVE',
+      reviewer: 'claude',
+      verdict: 'APPROVE',
+      model: 'claude-haiku-5-5',
+      effort: 'medium',
+      stepType: 'review',
+      author: { vendor: 'opencode', model: 'opencode/deepseek-v4.1-flash-free', effort: 'high' },
+    })
+
+    expect(body).toContain('### Code Review by 🤖 Claude Code · Haiku 5.5\n\n> **PR author:** [OpenCode](https://opencode.ai) · opencode/deepseek-v4.1-flash-free · high effort\n\nVERDICT: APPROVE')
+    expect(body).toContain('_(Haiku 5.5 · medium effort)_')
+  })
+
+  it('omits the PR author line when none is declared', () => {
+    const body = buildReviewCommentBody({
+      body: 'VERDICT: APPROVE',
+      reviewer: 'claude',
+      verdict: 'APPROVE',
+      stepType: 'review',
+    })
+
+    expect(body).not.toContain('**PR author:**')
+  })
+
   it('appends run details to a branded attribution rather than replacing it', () => {
     const body = buildReviewCommentBody({
       body: 'VERDICT: APPROVE',

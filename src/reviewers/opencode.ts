@@ -116,25 +116,62 @@ function extractOpenCodeErrorSummary(stderr: string): string | undefined {
 // prompt, and OpenCode v2 has no `--pure` / config override flag to suppress it.
 // Remove them before the run so only the operator's global config applies. The
 // clone is a throwaway and a review reads the diff, not these files.
-// A restrictive permission policy for the untrusted run. OpenCode v2 has no
+// A restrictive permission policy for the untrusted run. OpenCode has no
 // sandbox flag, so this is the tool-denial layer: a review inspects the diff by
 // running read-only git, so allow exactly those shell commands and deny every
 // other one. `--auto` auto-approves `ask` but cannot widen a `deny`.
 // `allowEdit` is left for the fix step, which must write files.
-export function opencodePolicy(allowEdit: boolean): unknown {
+//
+// The schema changed in v2: v1 uses a `permission` object keyed by tool name
+// with the last matching pattern winning, while v2 uses a `permissions` array
+// of `{ action, resource, effect }` rules. A v1 CLI rejects the v2 key outright
+// ("V2 permissions are not supported by OpenCode V1"), so the caller must pass
+// the format of the installed binary. v1's shell tool ID is `bash` (the older
+// docs call it `shell`); keying the rule as `shell` leaves it unmatched.
+export type OpenCodePolicyFormat = 'v1' | 'v2'
+
+export function opencodePolicy(allowEdit: boolean, format: OpenCodePolicyFormat): unknown {
+  if (format === 'v1') {
+    return {
+      permission: {
+        // Conflict resolution edits untrusted paths. Keep OpenCode from
+        // following a path the checkout redirects outside its own workspace.
+        external_directory: 'deny',
+        bash: {
+          '*': 'deny',
+          'git status *': 'allow',
+          'git diff *': 'allow',
+          'git log *': 'allow',
+          'git show *': 'allow',
+          // Keep the read-only allowlist from turning git diff into a file write.
+          'git diff --output*': 'deny',
+          'git diff -o*': 'deny',
+        },
+        ...(allowEdit ? {} : { edit: 'deny' }),
+      },
+    }
+  }
   return {
     permissions: [
+      { action: 'external_directory', resource: '*', effect: 'deny' },
       { action: 'shell', resource: '*', effect: 'deny' },
       { action: 'shell', resource: 'git status *', effect: 'allow' },
       { action: 'shell', resource: 'git diff *', effect: 'allow' },
       { action: 'shell', resource: 'git log *', effect: 'allow' },
       { action: 'shell', resource: 'git show *', effect: 'allow' },
+      // The final matching rule wins: do not let git diff output to a file.
+      { action: 'shell', resource: 'git diff --output*', effect: 'deny' },
+      { action: 'shell', resource: 'git diff -o*', effect: 'deny' },
       ...(allowEdit ? [] : [{ action: 'edit', resource: '*', effect: 'deny' }]),
     ],
   }
 }
 
-export function isolateCheckoutOpenCodeConfig(repoDir: string, allowEdit = false): () => void {
+export function isolateCheckoutOpenCodeConfig(
+  repoDir: string,
+  allowEdit: boolean,
+  format: OpenCodePolicyFormat,
+): () => void {
   const backupDir = mkdtempSync(join(tmpdir(), 'crosscheck-oc-config-'))
   const moved: Array<{ from: string; to: string }> = []
   for (const rel of ['opencode.json', 'opencode.jsonc', '.opencode']) {
@@ -147,7 +184,7 @@ export function isolateCheckoutOpenCodeConfig(repoDir: string, allowEdit = false
   // restore so a later fix's `git add -A` cannot stage it.
   let policyWritten = false
   try {
-    writeFileSync(join(repoDir, 'opencode.json'), JSON.stringify(opencodePolicy(allowEdit), null, 2))
+    writeFileSync(join(repoDir, 'opencode.json'), JSON.stringify(opencodePolicy(allowEdit, format), null, 2))
     policyWritten = true
   } catch { /* best effort */ }
   // Restore the checkout's own config so a later fix step does not stage these
@@ -226,7 +263,9 @@ export async function runOpenCodeReview(
   // default model AND its default variant run, and `effort` is reported but
   // not applied (it is not a claim the CLI was given).
   const modelArgs = model ? ['--model', `${model}#${effort}`] : []
-  const standaloneArgs = (await opencodeSupportsStandalone()) ? ['--standalone'] : []
+  const standaloneSupported = await opencodeSupportsStandalone()
+  const policyFormat: OpenCodePolicyFormat = standaloneSupported ? 'v2' : 'v1'
+  const standaloneArgs = standaloneSupported ? ['--standalone'] : []
   const args = ['run', '--format', 'json', '--auto', ...standaloneArgs, ...modelArgs]
 
   onLog?.(`  running: opencode ${args.join(' ')}`)
@@ -237,7 +276,7 @@ export async function runOpenCodeReview(
       const { result: { stdout }, retried } = await withCredentialFreeOrigin(repoDir, () => {
         // Hide any OpenCode config the untrusted checkout carries while the agent
         // runs; restore it after so a later fix step cannot stage the deletion.
-        const restoreConfig = isolateCheckoutOpenCodeConfig(repoDir)
+        const restoreConfig = isolateCheckoutOpenCodeConfig(repoDir, false, policyFormat)
         return withTimeoutRetry(
           resolvedTimeout,
           (t) => execa('opencode', args, {
@@ -301,29 +340,51 @@ export async function runOpenCodeReview(
 
 // `--standalone` exists only in the v2 CLI. The v1 `opencode` rejects the flag
 // before reading stdin, so every review and fix fails with yargs help text and
-// exit code 1. Probe `run --help` once per process and pass the flag only when
-// the installed binary actually lists it.
+// exit code 1. Probe `run --help` for each invocation and pass the flag only
+// when the installed binary actually lists it. The probe is deliberately not
+// cached: a long-lived crosscheck process can outlive an OpenCode upgrade, and
+// either cached answer would then be wrong.
+//
+// On v2, omitting `--standalone` would attach to the operator's shared
+// background server, so an unreadable probe must fail the run rather than
+// guess "unsupported". The v1 CLI has no shared server: its `run` starts an
+// in-process server unless the caller passes `--attach` (opencode v1.19.3,
+// cli/cmd/run.ts:129-131), and Crosscheck never passes `--attach`. Accept the
+// flagless path only for a help listing with the v1 shape — an `Options:`
+// section plus the opt-in `--attach` and the local server's `--port`.
 export function parseOpenCodeStandaloneSupport(helpOutput: string): boolean {
   return /(?:^|\s)--standalone\b/m.test(stripVTControlCharacters(helpOutput))
 }
 
-let standaloneSupport: Promise<boolean> | undefined
+function looksLikeV1RunHelp(helpOutput: string): boolean {
+  const help = stripVTControlCharacters(helpOutput)
+  return /(?:^|\n)[ \t]*Options:[ \t]*(?:\n|$)/.test(help) && /--attach\b/.test(help) && /--port\b/.test(help)
+}
 
-export function opencodeSupportsStandalone(): Promise<boolean> {
-  standaloneSupport ??= (async () => {
-    try {
-      const { stdout, stderr } = await execa('opencode', ['run', '--help'], {
-        timeout: 10_000,
-        reject: false,
-        extendEnv: false,
-        env: buildOpenCodeEnv(),
-      })
-      return parseOpenCodeStandaloneSupport(`${stdout}\n${stderr}`)
-    } catch {
-      return false
-    }
-  })()
-  return standaloneSupport
+export async function opencodeSupportsStandalone(): Promise<boolean> {
+  let stdout = ''
+  let stderr = ''
+  let exitCode: number | undefined
+  try {
+    const result = await execa('opencode', ['run', '--help'], {
+      timeout: 10_000,
+      reject: false,
+      extendEnv: false,
+      env: buildOpenCodeEnv(),
+    })
+    stdout = result.stdout ?? ''
+    stderr = result.stderr ?? ''
+    exitCode = result.exitCode
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    throw new Error(`opencode: --standalone support probe failed (${detail}); refusing to run without session isolation`)
+  }
+  const help = `${stdout}\n${stderr}`
+  if (parseOpenCodeStandaloneSupport(help)) return true
+  if (exitCode !== 0 || !looksLikeV1RunHelp(help)) {
+    throw new Error(`opencode: could not read 'opencode run --help' (exit ${exitCode ?? 'unknown'}); refusing to run without session isolation`)
+  }
+  return false
 }
 
 // `opencode auth list` has no machine-readable mode: `--format json`,

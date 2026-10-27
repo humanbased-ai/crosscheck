@@ -1,6 +1,6 @@
 import { execSync } from 'child_process'
-import { readFileSync } from 'fs'
-import { join } from 'path'
+import { lstatSync, readFileSync, realpathSync } from 'fs'
+import { isAbsolute, join, relative, resolve, sep } from 'path'
 import { execa } from 'execa'
 import { applyEdit } from './fix.js'
 import { claudeEffort } from './claude.js'
@@ -62,6 +62,35 @@ export function findConflictedFiles(tmpDir: string): string[] {
     return out.trim().split('\n').filter(Boolean)
   } catch {
     return []
+  }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+// Conflicted paths come from an untrusted checkout. Never read or write through
+// symlinks: a PR can make a conflicted path point outside the temporary clone.
+function assertConflictedPathsStayInCheckout(tmpDir: string, filePaths: string[]): void {
+  const root = realpathSync(tmpDir)
+  for (const filePath of filePaths) {
+    const candidate = resolve(root, filePath)
+    const relativePath = relative(root, candidate)
+    if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+      throw new Error(`conflict path escapes the temporary checkout: ${filePath}`)
+    }
+    let current = root
+    for (const part of relativePath.split(sep)) {
+      current = join(current, part)
+      try {
+        if (lstatSync(current).isSymbolicLink()) {
+          throw new Error(`conflict path contains a symlink: ${filePath}`)
+        }
+      } catch (error) {
+        if (isMissingPath(error)) break
+        throw error
+      }
+    }
   }
 }
 
@@ -185,6 +214,7 @@ export async function runConflictResolveForVendor(
 ): Promise<ConflictResolveResult> {
   const conflictedFiles = findConflictedFiles(tmpDir)
   if (conflictedFiles.length === 0) return { appliedCount: 0, resolvedPaths: [] }
+  assertConflictedPathsStayInCheckout(tmpDir, conflictedFiles)
 
   if (vendor === 'claude') {
     return runClaudeConflictResolve(tmpDir, prTitle, instructions, conflictedFiles, model, timeoutMs, skillSession, configuredEffort)
@@ -337,11 +367,13 @@ async function runAgenticConflictResolve(
       tokensUsed = parseCodexTokensUsed(result.stdout ?? '')
     } else {
       const modelArgs = model ? ['--model', `${model}#${effort}`] : []
-      const standaloneArgs = (await opencodeSupportsStandalone()) ? ['--standalone'] : []
+      const standaloneSupported = await opencodeSupportsStandalone()
+      const policyFormat = standaloneSupported ? 'v2' : 'v1'
+      const standaloneArgs = standaloneSupported ? ['--standalone'] : []
       const result = await withCredentialFreeOrigin(tmpDir, () => {
         // Resolve conflicts with edit permission, but hide any project config
         // the untrusted checkout carries while the agent runs.
-        const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true)
+        const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true, policyFormat)
         return execa(
           'opencode',
           ['run', '--format', 'json', '--auto', ...standaloneArgs, ...modelArgs],
@@ -373,6 +405,7 @@ async function runAgenticConflictResolve(
     throw err
   }
 
+  assertConflictedPathsStayInCheckout(tmpDir, conflictedFiles)
   const gitPaths = (args: string[]): string[] => {
     const out = execSync(`git ${args.join(' ')}`, { cwd: tmpDir, encoding: 'utf8' }).trim()
     return out ? out.split('\n').filter(Boolean) : []

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { extractConflictWindows, parseResolverEdits, PROMPT_TEMPLATE } from '../reviewers/conflict-resolve.js'
@@ -121,6 +121,7 @@ describe('multi-vendor conflict resolution', () => {
 
   afterEach(() => {
     rmSync(repoDir, { recursive: true, force: true })
+    rmSync(`${repoDir}-outside.ts`, { force: true })
     vi.clearAllMocks()
   })
 
@@ -149,7 +150,9 @@ describe('multi-vendor conflict resolution', () => {
 
   it('runs opencode with edit permission and model effort suffix', async () => {
     execaMock.mockImplementation((async (bin: string, args: string[]) => {
-      if (bin === 'opencode' && args.includes('--help')) return { stdout: 'no standalone flag here' }
+      if (bin === 'opencode' && args.includes('--help')) {
+        return { stdout: 'Options:\n  --attach <url>\n  --port <number>', exitCode: 0 }
+      }
       writeFileSync(join(repoDir, 'src/conflicted.ts'), 'resolved\n')
       return { stdout: '{"type":"step_finish","part":{"tokens":{"input":10,"output":5}}}\n' }
     }) as never)
@@ -184,6 +187,18 @@ describe('multi-vendor conflict resolution', () => {
 
     await expect(runConflictResolveForVendor('codex', repoDir, 'My PR', '', 'default'))
       .rejects.toThrow(/outside the conflict set/)
+  })
+
+  it('refuses a conflicted path that is a symlink before starting the agent', async () => {
+    const outsideFile = `${repoDir}-outside.ts`
+    writeFileSync(outsideFile, 'outside\n')
+    rmSync(join(repoDir, 'src/conflicted.ts'))
+    symlinkSync(outsideFile, join(repoDir, 'src/conflicted.ts'))
+    const { runConflictResolveForVendor } = await import('../reviewers/conflict-resolve.js')
+
+    await expect(runConflictResolveForVendor('codex', repoDir, 'My PR', '', 'default'))
+      .rejects.toThrow(/contains a symlink/)
+    expect(execaMock).not.toHaveBeenCalled()
   })
 })
 
