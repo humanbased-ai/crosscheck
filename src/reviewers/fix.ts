@@ -1,3 +1,4 @@
+import { runOpenCode, openCodeModelArgs } from './opencode-process.js'
 import { codexModelRejection, codexTurnFailureMessage, withCodexJsonlOutput, withCodexModelFallback } from '../lib/codex-model-fallback.js'
 import { execSync } from 'child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
@@ -373,11 +374,11 @@ export async function runOpenCodeFixStep(
     .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', humanFeedback ?? ''].filter(Boolean).join('\n\n'))
 
   const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
-  // Same as the review path: OpenCode carries reasoning effort as the `#variant`
-  // suffix on `--model provider/model#variant`. Without a pinned model the
+  // Same as the review path: OpenCode V1 uses --variant; V2 uses a #variant
+  // suffix on --model. Without a pinned model the
   // variant cannot be sent, so `effort` is honoured only when `model` is set.
-  const modelArgs = model ? ['--model', `${model}#${effort}`] : []
   const { baseArgs, policyFormat } = await requireOpenCodeRun()
+  const modelArgs = openCodeModelArgs(model, effort, policyFormat === 'v2')
 
   let tokensUsed: number | undefined
   try {
@@ -385,8 +386,7 @@ export async function runOpenCodeFixStep(
       // Hide any OpenCode config the untrusted checkout carries while the agent
       // runs; restore it after so the fix's git add -A cannot stage the deletion.
       const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true, policyFormat)
-      return execa(
-        'opencode',
+      return runOpenCode(
         [...baseArgs, ...modelArgs],
         {
           cwd: tmpDir,
@@ -417,6 +417,6 @@ export async function runOpenCodeFixStep(
     ...(changedOutput ? changedOutput.split('\n').filter(Boolean) : []),
     ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
   ]
-  // Report effort only when a pinned model actually carried the #variant.
+  // Report effort only when a pinned model actually carried the variant.
   return { appliedCount: changedFiles.length, changedFiles, tokensUsed, effort: model ? effort : undefined }
 }

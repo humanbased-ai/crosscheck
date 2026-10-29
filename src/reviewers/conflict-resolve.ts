@@ -1,3 +1,4 @@
+import { runOpenCode, openCodeModelArgs } from './opencode-process.js'
 import { execSync } from 'child_process'
 import { lstatSync, readFileSync, realpathSync } from 'fs'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
@@ -366,14 +367,13 @@ async function runAgenticConflictResolve(
       ))))
       tokensUsed = parseCodexTokensUsed(result.stdout ?? '')
     } else {
-      const modelArgs = model ? ['--model', `${model}#${effort}`] : []
       const { baseArgs, policyFormat } = await requireOpenCodeRun()
+      const modelArgs = openCodeModelArgs(model, effort, policyFormat === 'v2')
       const result = await withCredentialFreeOrigin(tmpDir, () => {
         // Resolve conflicts with edit permission, but hide any project config
         // the untrusted checkout carries while the agent runs.
         const restoreConfig = isolateCheckoutOpenCodeConfig(tmpDir, true, policyFormat)
-        return execa(
-          'opencode',
+        return runOpenCode(
           [...baseArgs, ...modelArgs],
           {
             cwd: tmpDir,
@@ -446,7 +446,7 @@ async function runAgenticConflictResolve(
     appliedCount: resolvedPaths.length,
     resolvedPaths,
     tokensUsed,
-    // OpenCode only carries effort as the #variant suffix on a pinned model.
+    // OpenCode effort is passed only with a pinned model.
     effort: vendor === 'opencode' && !model ? undefined : effort,
   }
 }
