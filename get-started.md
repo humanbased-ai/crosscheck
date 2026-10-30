@@ -1679,7 +1679,7 @@ The fix (file lock for same-machine + GitHub commit status for cross-machine) is
 - **Webhook signature** — every request verified with HMAC-SHA256 before parsing
 - **Temp isolation** — each PR cloned into a fresh temp dir, deleted after review
 - **Read-only tools** — Claude restricted to `git diff` and `git log` only
-- **Temp credential isolation** — with `clone_protocol: ssh` (default) no tokens touch disk; with `clone_protocol: https` a short-lived token is embedded in the temp clone's remote URL and removed when the temp dir is deleted after review
+- **Temp credential isolation** — no tokens touch disk with either protocol. `clone_protocol: ssh` (default) uses your SSH keys. `clone_protocol: https` gives git the token through a credential helper that reads it from that one process's environment, so it is not in the remote URL, `.git/config`, or `ps`; this needs git 2.31 or newer.
 - **Skill package validation** — installs reject unsafe names, attribution injection, symbolic links, packages over 1,000 files or 10 MiB, and collisions; Git sources record their checked-out commit
 - **Skill integrity** — Crosscheck verifies every installed package against its SHA-256 receipt before exposing it to agents; modified or malformed packages fail closed and appear as unavailable in `crosscheck status`
 - **Skill execution boundary** — the activation broker exposes instructions and referenced files but never executes bundled scripts itself. Skills are third-party instructions: inspect their source and license before enabling them; the selected coding agent still operates under its normal sandbox and permissions
@@ -1873,8 +1873,8 @@ work with `review`, `run`/`recheck`, and `watch`; no CLI flags change.
 
 The repository cache lives in `~/.crosscheck/repository-cache`. It fetches the
 PR head under a per-repository lock and makes an independent checkout with no
-hardlinks or object alternates. Cache credentials are never stored: only the
-temporary checkout has the authenticated remote URL, as before. A cold fetch
+hardlinks or object alternates. Credentials are stored in neither the cache nor
+the checkout: git reads the token from a credential helper's environment. A cold fetch
 still costs network time; concurrent preparation for the same repository waits
 for the lock. A lock whose owning process has exited (or that is older than 30
 minutes) is broken automatically. The cache fetch uses the same network retries
