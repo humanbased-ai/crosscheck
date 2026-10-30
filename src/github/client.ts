@@ -207,6 +207,34 @@ export async function listUserOrgs(token: string): Promise<string[]> {
   return results
 }
 
+/**
+ * The classic scopes on a token, from the header GitHub sets on its responses. Null
+ * when the header is absent: fine-grained and App tokens have no classic scopes.
+ */
+export async function getTokenScopes(token: string): Promise<string[] | null> {
+  const res = await fetch('https://api.github.com/user', {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+  if (!res.ok) throw new Error(`Failed to read token scopes [${res.status}]: ${res.statusText}`)
+  const header = res.headers.get('x-oauth-scopes')
+  return header === null ? null : header.split(',').map(scope => scope.trim()).filter(Boolean)
+}
+
+export type OrgMembership = 'owner' | 'member' | 'none'
+
+// A pending invitation is not membership yet. Only as truthful as the token: without
+// read:org, a classic token may get a 404 for an org the account belongs to.
+export async function getOrgMembership(org: string, token: string): Promise<OrgMembership> {
+  const res = await fetch(`https://api.github.com/user/memberships/orgs/${org}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+  if (res.status === 404) return 'none'
+  if (!res.ok) throw new Error(`Failed to read membership of ${org} [${res.status}]: ${res.statusText}`)
+  const { state, role } = await res.json() as { state: string; role: string }
+  if (state !== 'active') return 'none'
+  return role === 'admin' ? 'owner' : 'member'
+}
+
 export async function checkRepoAccessible(owner: string, repo: string, token: string): Promise<boolean> {
   const res = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },

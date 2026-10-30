@@ -64,6 +64,7 @@ import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, claimRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
 import { configFingerprint, watchConfigDrift } from '../lib/config-drift.js'
+import { webhookFailureHint, webhookFailureReason, type WebhookFailureReason } from '../lib/webhook-failure.js'
 
 const WEBHOOK_EVENTS = ['pull_request', 'issue_comment']
 
@@ -1282,16 +1283,9 @@ export async function runWatch(opts: WatchOpts = {}) {
     | { type: 'org'; org: string; hookId: number }
     | { type: 'repo'; owner: string; repo: string; hookId: number }
 
-  function webhookFailureReason(msg: string, isOrg: boolean): string {
-    const isCreds = /bad credentials|\[401\]/i.test(msg)
-    const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
-      || (isOrg && /\[404\]/i.test(msg))
-    return isCreds ? 'creds' : isScope ? 'scope' : `other:${msg}`
-  }
-
   function addWebhookFailure(
-    failures: Map<string, { labels: string[]; msg: string }>,
-    reason: string,
+    failures: Map<WebhookFailureReason, { labels: string[]; msg: string }>,
+    reason: WebhookFailureReason,
     label: string,
     msg: string,
   ): void {
@@ -1538,7 +1532,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     // The smee channel URL never changes, so this survives restarts without creating duplicates.
     let smeeOk = 0, smeeFail = 0
     let smeeTotal = scopes.length
-    const smeeFailuresByReason = new Map<string, { labels: string[]; msg: string }>()
+    const smeeFailuresByReason = new Map<WebhookFailureReason, { labels: string[]; msg: string }>()
     const succeededOrgs = new Set<string>()
 
     for (const scope of scopes) {
@@ -1561,7 +1555,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         const msg = err instanceof Error ? err.message : String(err)
         const fallbackOrg = 'org' in scope ? scope.org : null
         smeeFail++
-        addWebhookFailure(smeeFailuresByReason, webhookFailureReason(msg, fallbackOrg !== null), label, msg)
+        addWebhookFailure(smeeFailuresByReason, await webhookFailureReason(msg, fallbackOrg, token), label, msg)
         fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: msg })
 
         const fallback = fallbackOrg ? fallbackRepos.get(fallbackOrg) ?? [] : []
@@ -1577,7 +1571,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           } catch (fallbackErr: unknown) {
             const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
             smeeFail++
-            addWebhookFailure(smeeFailuresByReason, webhookFailureReason(fallbackMsg, false), repoLabel, fallbackMsg)
+            addWebhookFailure(smeeFailuresByReason, await webhookFailureReason(fallbackMsg, null, token), repoLabel, fallbackMsg)
             fileLog({ level: 'warn', event: 'webhook_error', scope: repoLabel, message: fallbackMsg, fallback_for_org: fallbackOrg })
           }
         }))
@@ -1607,13 +1601,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       const overflow = count - shown.length
       const sample = shown.join(', ') + (overflow > 0 ? ` +${overflow} more` : '')
       const noun = count === 1 ? 'webhook' : 'webhooks'
-      if (reason === 'creds') {
-        cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: token invalid — run: ${chalk.cyan('gh auth refresh')}`)
-      } else if (reason === 'scope') {
-        cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: missing scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
-      } else {
-        cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: ${msg}`)
-      }
+      cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: ${webhookFailureHint(reason, msg, authenticatedLogin)}`)
       cLog(`  ${chalk.dim(sample)}`)
     }
     cLog(`${smeeFail === 0 ? chalk.green('✓') : chalk.yellow('⚠')} webhooks registered: ${smeeOk}/${smeeTotal}${smeeFail > 0 ? ` (${smeeFail} failed)` : ''}`)
@@ -1686,7 +1674,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     currentRegistered = []
     let hookOk = 0, hookFail = 0
     let hookTotal = scopes.length
-    const failuresByReason = new Map<string, { labels: string[]; msg: string }>()
+    const failuresByReason = new Map<WebhookFailureReason, { labels: string[]; msg: string }>()
 
     await Promise.all(scopes.map(async (scope) => {
       const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
@@ -1743,7 +1731,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       } else {
         const fallbackOrg = 'org' in scope ? scope.org : null
         hookFail++
-        addWebhookFailure(failuresByReason, webhookFailureReason(lastErr, fallbackOrg !== null), label, lastErr)
+        addWebhookFailure(failuresByReason, await webhookFailureReason(lastErr, fallbackOrg, token), label, lastErr)
         fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: lastErr })
 
         const fallback = fallbackOrg ? fallbackRepos.get(fallbackOrg) ?? [] : []
@@ -1777,7 +1765,7 @@ export async function runWatch(opts: WatchOpts = {}) {
             fileLog({ level: 'info', event: 'webhook_registered', scope: repoLabel, url: webhookUrl, fallback_for_org: fallbackOrg })
           } else {
             hookFail++
-            addWebhookFailure(failuresByReason, webhookFailureReason(fallbackLastErr, false), repoLabel, fallbackLastErr)
+            addWebhookFailure(failuresByReason, await webhookFailureReason(fallbackLastErr, null, token), repoLabel, fallbackLastErr)
             fileLog({ level: 'warn', event: 'webhook_error', scope: repoLabel, message: fallbackLastErr, fallback_for_org: fallbackOrg })
           }
         }))
@@ -1791,13 +1779,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       const overflow = count - shown.length
       const sample = shown.join(', ') + (overflow > 0 ? ` +${overflow} more` : '')
       const noun = count === 1 ? 'webhook' : 'webhooks'
-      if (reason === 'creds') {
-        bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: token invalid — run: ${chalk.cyan('gh auth refresh')}`)
-      } else if (reason === 'scope') {
-        bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: missing scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
-      } else {
-        bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: ${msg}`)
-      }
+      bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: ${webhookFailureHint(reason, msg, authenticatedLogin)}`)
       bLog(`    ${chalk.dim(sample)}`)
       bLog(`  manual Payload URL: ${chalk.cyan(webhookUrl)}`)
     }
