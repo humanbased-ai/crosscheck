@@ -11,6 +11,7 @@ import { runAlter } from './commands/alter.js'
 import { runWatch } from './commands/watch.js'
 import { runReviewSpec } from './commands/review.js'
 import { runStatus } from './commands/status.js'
+import { runAuthStatus, runAuthApp } from './commands/auth.js'
 import { runDiagnose } from './commands/diagnose.js'
 import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
@@ -297,6 +298,24 @@ program
   .description('Show auth state, config summary, and CLI versions')
   .option('-c, --config <path>', 'config file path')
   .action((opts: { config?: string }) => void runStatus(opts.config))
+
+const authCommand = program
+  .command('auth')
+  .description('Show or configure the identity crosscheck posts reviews as')
+  .option('-c, --config <path>', 'config file path')
+  .action((opts: { config?: string }) => void runAuthStatus(opts.config))
+
+authCommand
+  .command('app')
+  .description('Configure a GitHub App as the review identity')
+  .option('-c, --config <path>', 'config file path')
+  .option('--app-id <id>', 'GitHub App id')
+  .option('--key <path>', 'path to the app private key PEM')
+  .option('--installation-id <id>', 'pin one installation (default: resolved from --repo)')
+  .option('--repo <owner/name>', 'verify against a repo and resolve its installation')
+  .option('--check', 'verify the identity without writing config')
+  .option('--clear', 'remove the GitHub App review identity')
+  .action((opts: { config?: string; appId?: string; key?: string; installationId?: string; repo?: string; check?: boolean; clear?: boolean }) => void runAuthApp(opts))
 
 program
   .command('skill')

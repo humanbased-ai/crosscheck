@@ -406,3 +406,22 @@ logs:
 #   comment_header: ""                    # text prepended to every review comment
 #   comment_footer: ""                    # text appended to every review comment
 #   reviewer_attribution: ""             # replaces "Reviewed by {vendor}" attribution line
+
+
+# ─── Review identity (optional) ──────────────────────────────────────────────
+# Who review comments are posted as. By default that is your GitHub account, so
+# a review on your own PR reads as a self-review. Set a GitHub App id to post as
+# <app-slug>[bot] instead. Clone, push, and merge always use YOUR token — the app
+# is only the voice, never the actor.
+#
+# Create the app once, then let crosscheck verify and write it:
+#   ck auth app --app-id 1234567 --key ~/.crosscheck/app.pem --repo owner/name
+# See docs/github-app-identity.md for permissions and the branch-protection caveat.
+# github:
+#   app:
+#     app_id: 1234567
+#     # Pin one installation, or leave null and resolve it from the PR's repo.
+#     installation_id: 98765432
+#     private_key_path: ~/.crosscheck/app.pem
+#     # Alternative to the file — useful in CI. Env value wins when set.
+#     private_key_env: CROSSCHECK_APP_PRIVATE_KEY

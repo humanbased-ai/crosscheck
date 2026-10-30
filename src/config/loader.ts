@@ -6,7 +6,7 @@ import { homedir } from 'os'
 import { randomBytes } from 'crypto'
 import yaml from 'js-yaml'
 import { ConfigSchema, type Config, type LinearAuthConfig } from './schema.js'
-import { listUserOrgs } from '../github/client.js'
+import { listUserOrgs, getAppInfo, getInstallationForRepo, getInstallationToken, type GithubAppKey } from '../github/client.js'
 import type { LinearCredentials } from '../linear/identity.js'
 
 const CONFIG_FILENAME = 'crosscheck.config.yml'
@@ -64,6 +64,136 @@ export function getGithubToken(): string {
     '  Option 1: run: gh auth login\n' +
     '  Option 2: set GITHUB_TOKEN in your shell profile or .env file'
   )
+}
+
+// ── GitHub App reviewer identity ─────────────────────────────────────────────
+// The actor (clone/push/merge) and the reviewer (post the comment) can be two
+// different identities. Only review output uses the app; everything else keeps
+// the user token, so a bot can never push to a branch by accident.
+
+export interface ResolvedGithubAppKey {
+  appId: number
+  installationId: number | null
+  privateKey: string
+}
+
+export interface ReviewerToken {
+  token: string
+  source: 'app' | 'user'
+  appId: number | null
+  installationId: number | null
+  /** `slug[bot]` when resolving to an app; null for the user token. */
+  login: string | null
+}
+
+function expandHome(path: string): string {
+  if (path === '~') return homedir()
+  if (path.startsWith('~/')) return join(homedir(), path.slice(2))
+  return path
+}
+
+function normalisePem(raw: string): string {
+  // CI commonly injects a PEM as one line with literal \n escapes.
+  const pem = raw.includes('\n') ? raw : raw.replace(/\\n/g, '\n')
+  return pem.trim()
+}
+
+/**
+ * Reads the app key from the environment or disk. Returns null when no app is
+ * configured, and throws with the fix when one is configured but unreadable —
+ * a missing key must not degrade into posting as the operator.
+ */
+export function resolveGithubAppKey(config: Config): ResolvedGithubAppKey | null {
+  const app = config.github.app
+  if (app.app_id === null) return null
+
+  const fromEnv = app.private_key_env ? process.env[app.private_key_env] : undefined
+  if (fromEnv && fromEnv.trim()) {
+    return { appId: app.app_id, installationId: app.installation_id, privateKey: normalisePem(fromEnv) }
+  }
+
+  const keyPath = expandHome(app.private_key_path)
+  if (!existsSync(keyPath)) {
+    throw new Error(
+      `GitHub App private key not found at ${keyPath}.\n` +
+      `  Put the PEM there, set ${app.private_key_env}, or run: ck auth app --app-id ${app.app_id} --key <path>`
+    )
+  }
+  return { appId: app.app_id, installationId: app.installation_id, privateKey: normalisePem(readFileSync(keyPath, 'utf8')) }
+}
+
+/**
+ * Resolves the token review output should be posted with. Falls back to the
+ * user token only when no app is configured; a configured-but-broken app throws
+ * so the operator sees the problem instead of a silently misattributed review.
+ */
+export async function resolveReviewerToken(
+  config: Config,
+  repo?: { owner: string; repo: string },
+): Promise<ReviewerToken> {
+  const app = resolveGithubAppKey(config)
+  if (!app) {
+    return { token: getGithubToken(), source: 'user', appId: null, installationId: null, login: null }
+  }
+
+  const key: GithubAppKey = { appId: app.appId, privateKey: app.privateKey }
+  try {
+    let installationId = app.installationId
+    if (installationId === null) {
+      if (!repo) {
+        throw new Error('installation_id is not set in github.app, so it must be resolved from a repo')
+      }
+      const installation = await getInstallationForRepo(key, repo.owner, repo.repo)
+      if (!installation) {
+        throw new Error(`app ${app.appId} is not installed on ${repo.owner}/${repo.repo}`)
+      }
+      installationId = installation.id
+    }
+    const [token, info] = await Promise.all([
+      getInstallationToken(key, installationId),
+      getAppInfo(key),
+    ])
+    return { token, source: 'app', appId: app.appId, installationId, login: `${info.slug}[bot]` }
+  } catch (err) {
+    throw new Error(
+      `GitHub App reviewer identity is configured but unusable: ${err instanceof Error ? err.message : String(err)}\n` +
+      '  Diagnose with: ck auth app --check'
+    )
+  }
+}
+
+export function writeGithubAppConfig(
+  configPath: string,
+  app: { appId: number; installationId: number | null; privateKeyPath: string | null },
+): void {
+  let raw: Record<string, unknown> = {}
+  if (existsSync(configPath)) {
+    try { raw = (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown> }
+    catch { raw = {} }
+  }
+  const github = (typeof raw.github === 'object' && raw.github !== null ? raw.github : {}) as Record<string, unknown>
+  const current = (typeof github.app === 'object' && github.app !== null ? github.app : {}) as Record<string, unknown>
+  github.app = {
+    ...current,
+    app_id: app.appId,
+    ...(app.installationId !== null ? { installation_id: app.installationId } : {}),
+    ...(app.privateKeyPath !== null ? { private_key_path: app.privateKeyPath } : {}),
+  }
+  raw.github = github
+  mkdirSync(dirname(configPath), { recursive: true })
+  writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
+}
+
+export function clearGithubAppConfig(configPath: string): boolean {
+  if (!existsSync(configPath)) return false
+  const raw = (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>
+  if (typeof raw.github !== 'object' || raw.github === null) return false
+  const github = raw.github as Record<string, unknown>
+  if (!('app' in github)) return false
+  delete github.app
+  if (Object.keys(github).length === 0) delete raw.github
+  writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
+  return true
 }
 
 // Linear credentials. Env var NAMES come from config; the values are read here and

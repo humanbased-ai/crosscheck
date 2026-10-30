@@ -333,6 +333,30 @@ export const BrandConfigSchema = z.object({
   reviewer_attribution: z.string().default(''),
 })
 
+// ── GitHub App review identity ───────────────────────────────────────────────
+// Crosscheck has two roles that used to share one credential: the ACTOR (the
+// human whose token clones, pushes, and merges) and the REVIEWER (who posts the
+// review comments). Setting `app_id` splits them: review output is posted by the
+// app's installation, so the comment author is the bot rather than the operator.
+// Everything else keeps using the user token.
+export const GithubAppConfigSchema = z.object({
+  // The switch. null = post reviews with the operator's token, as before.
+  app_id: z.number().int().positive().nullable().default(null),
+  // Optional: resolved from the target repo at mint time when null
+  // (GET /repos/{owner}/{repo}/installation). Set it to pin one installation
+  // when the app is installed on several accounts.
+  installation_id: z.number().int().positive().nullable().default(null),
+  // PEM path, `~` expanded. Read in config/loader.ts — never the key itself.
+  private_key_path: z.string().default('~/.crosscheck/app.pem'),
+  // Env var holding the PEM. Takes precedence over private_key_path, so CI can
+  // inject the key without writing it to disk. `\n` escapes are normalised.
+  private_key_env: z.string().default('CROSSCHECK_APP_PRIVATE_KEY'),
+})
+
+export const GithubConfigSchema = z.object({
+  app: GithubAppConfigSchema.prefault({}),
+})
+
 // Tiered Linear identity — see src/linear/identity.ts for the tier semantics.
 // Disabled by default, so existing configs are unaffected.
 export const LinearAuthConfigSchema = z.object({
@@ -422,12 +446,15 @@ export const ConfigSchema = z.object({
   post_review: PostReviewConfigSchema.prefault({}),
   display: DisplayConfigSchema.prefault({}),
   brand: BrandConfigSchema.prefault({}),
+  github: GithubConfigSchema.prefault({}),
   linear: LinearConfigSchema.prefault({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
 export type AgentPriorityConfig = z.infer<typeof AgentPriorityConfigSchema>
 export type BrandConfig = z.infer<typeof BrandConfigSchema>
+export type GithubAppConfig = z.infer<typeof GithubAppConfigSchema>
+export type GithubConfig = z.infer<typeof GithubConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
 export type CodexVendorConfig = z.infer<typeof CodexVendorConfigSchema>
 export type OpenCodeVendorConfig = z.infer<typeof OpenCodeVendorConfigSchema>
