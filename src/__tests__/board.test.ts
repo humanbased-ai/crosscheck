@@ -881,6 +881,29 @@ describe('PRBoard \u2014 session stats panel', () => {
   const setStart = (ms: number) =>
     ((board as unknown as { stats: { sessionStart: number } }).stats.sessionStart = ms)
 
+  it('holds a config drift warning in the live block until it is cleared', () => {
+    const warning = '/home/alice/.crosscheck/config.yml changed since this session started — restart watch to apply it'
+
+    board.setConfigDrift(warning)
+    // The connectivity log only keeps its newest lines; this must outlast them.
+    for (let i = 0; i < 20; i++) board.logConnectivity(`conn event ${i}`)
+    expect(stripAnsi(invokeRender())).toContain(`⚠ ${warning}`)
+
+    board.setConfigDrift(null)
+    expect(stripAnsi(invokeRender())).not.toContain('changed since this session started')
+  })
+
+  it('keeps the config drift warning on a viewport too short for the full layout', () => {
+    Object.defineProperty(process.stdout, 'rows', { value: 16, configurable: true })
+    board.setConfigDrift('config.yml changed since this session started — restart watch to apply it')
+    for (let i = 0; i < 10; i++) {
+      board.addPR(`k${i}`, 4600 + i, 'acme/web', `branch-${i}`)
+      board.failPR(`k${i}`, 'clone failed')
+    }
+
+    expect(stripAnsi(invokeRender())).toContain('changed since this session started')
+  })
+
   it('separates distinct PRs from processing runs across rounds and repos', () => {
     board.addPR('first@sha1', 42, 'acme/api', 'feature', 1)
     board.completePR('first@sha1', { elapsedMs: 1000, url: 'u1' })

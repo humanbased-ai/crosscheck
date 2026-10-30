@@ -63,6 +63,7 @@ import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, claimRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
+import { configFingerprint, watchConfigDrift } from '../lib/config-drift.js'
 
 const WEBHOOK_EVENTS = ['pull_request', 'issue_comment']
 
@@ -237,6 +238,7 @@ export interface WatchOpts {
 export async function runWatch(opts: WatchOpts = {}) {
   const configPath = opts.config
   let config = loadConfig(configPath)
+  let loadedConfigFingerprint = configFingerprint(resolveConfigPath(configPath))
   // --port forces the webhook server port for this session only. Overriding
   // config.server.port here propagates to server.listen and both tunnels.
   if (opts.port !== undefined) {
@@ -355,6 +357,7 @@ export async function runWatch(opts: WatchOpts = {}) {
   let idleAnalysisRunning = false
   let idleIntervalRef: ReturnType<typeof setInterval> | null = null
   let backtraceIntervalRef: ReturnType<typeof setInterval> | null = null
+  let stopConfigDriftWatch = () => {}
 
   async function reviewPR(params: ReviewPRParams): Promise<void> {
     lastActivityAt = Date.now()  // reset idle timer on any PR event
@@ -1204,6 +1207,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     // force=true only for --reconfigure; first-run preserves any manually-configured orgs/authors
     patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, !!opts.reconfigure)
     config = loadConfig(configPath)
+    loadedConfigFingerprint = configFingerprint(resolveConfigPath(configPath))
     // Re-apply the session port override — loadConfig re-read the file, dropping it.
     if (opts.port !== undefined) {
       config = { ...config, server: { ...config.server, port: opts.port } }
@@ -1322,6 +1326,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     if (idleIntervalRef !== null) clearInterval(idleIntervalRef)
     if (backtraceIntervalRef !== null) clearInterval(backtraceIntervalRef)
     if (drainIntervalRef !== null) clearInterval(drainIntervalRef)
+    stopConfigDriftWatch()
     board.stop()
     stopSmartSwitch()
     console.log('\nCleaning up...')
@@ -1369,7 +1374,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     console.log(`  workflows   ${labels.map(label => chalk.cyan(label)).join(', ')}${repoWorkflowOverrides.length > 4 ? chalk.dim(` +${repoWorkflowOverrides.length - 4} more`) : ''}`)
   }
   const cfgPath = resolveConfigPath(configPath)
-  console.log(`  config      ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
+  console.log(`  config      ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit and restart to change above')}`)
   if (effectiveDeployment === 'team' && config.routing.allowed_authors.length === 0) {
     console.log(`  authors     ${chalk.dim('all PRs (team mode)')}`)
   } else if (config.routing.allowed_authors.length > 0) {
@@ -1419,6 +1424,23 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   // Board starts after the banner — all output below is live-updated
   board.start()
+
+  stopConfigDriftWatch = watchConfigDrift({
+    loaded: loadedConfigFingerprint,
+    resolvePath: () => resolveConfigPath(configPath),
+    onChange: drifted => {
+      const path = resolveConfigPath(configPath)
+      fileLog({ level: drifted ? 'warn' : 'info', event: drifted ? 'config_changed_since_start' : 'config_matches_session', path })
+      if (!drifted) {
+        board.setConfigDrift(null)
+        return
+      }
+      const warning = `${path ?? 'The config file'} changed since this session started — restart watch to apply it`
+      board.setConfigDrift(warning)
+      // The live block is TTY-only; a non-TTY run would otherwise never see this.
+      board.log(`${chalk.yellow('⚠')} ${warning}`)
+    },
+  })
 
   // ── Idle issue timer ─────────────────────────────────────────────────────
   // When watch has been idle (no PR activity) for the configured duration,

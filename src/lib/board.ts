@@ -419,6 +419,7 @@ export class PRBoard {
     type: 'none', url: null, alive: false,
   }
 
+  private configDrift: string | null = null
   private config: Config | null = null
   private steps: WorkflowStep[] = []
   private theme: Theme = buildTheme({
@@ -437,6 +438,11 @@ export class PRBoard {
 
   setTunnel(type: string, url: string | null, alive: boolean): void {
     this.tunnel = { type, url, alive }
+  }
+
+  /** Holds a warning in the live section until cleared; the connectivity log would scroll it away. */
+  setConfigDrift(warning: string | null): void {
+    this.configDrift = warning
   }
 
   start(): void {
@@ -989,6 +995,8 @@ export class PRBoard {
         : t.dim('connecting...')
       lines.push(`  ${t.dim(tunnelLabel)} ${tunnelDisplay}`)
     }
+
+    if (this.configDrift !== null) lines.push(`  ${t.warning(`⚠ ${this.configDrift}`)}`)
 
     // Connectivity log: already prefixed with timestamps + indent in logConnectivity()
     const activeConn = this.connLog.filter(l => l.trim()).slice(-connLogLines)
