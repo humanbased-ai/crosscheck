@@ -35,6 +35,14 @@ describe('webhookFailureReason for an org 404', () => {
     expect(requested).toEqual([USER_URL])
   })
 
+  it('reports a missing scope for a token that holds admin:org but not admin:org_hook', async () => {
+    // The two are separate scopes: GitHub accepts only admin:org_hook on an org's hooks.
+    githubAnswers({ scopes: 'admin:org, repo' })
+
+    expect(await webhookFailureReason(ORG_404, 'codatta', 'gho_token')).toBe('scope')
+    expect(requested).toEqual([USER_URL])
+  })
+
   it('reports non-membership when the token has the scope and the account is not in the org', async () => {
     githubAnswers({ scopes: FULL_SCOPES, membership: json(404, { message: 'Not Found' }) })
 

@@ -20,6 +20,8 @@ const ORG_READ_SCOPES = ['read:org', 'write:org', 'admin:org']
 async function diagnoseOrgWebhook404(org: string, token: string, msg: string): Promise<WebhookFailureReason> {
   try {
     const scopes = await getTokenScopes(token)
+    // admin:org does not stand in for this: admin:org_hook is the only scope GitHub
+    // accepts on an org's hooks, so a token holding just admin:org really is missing it.
     if (scopes !== null && !scopes.includes('admin:org_hook')) return 'scope'
     // Fine-grained and App tokens report no classic scopes, and a token that cannot
     // read memberships gets a 404 for orgs it does belong to. Neither can tell a
