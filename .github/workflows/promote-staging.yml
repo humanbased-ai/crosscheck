@@ -34,7 +34,12 @@ jobs:
             echo "ahead=0" >> $GITHUB_OUTPUT
             echo "staging is already up to date with main — nothing to promote"
           else
-            NON_SYNC=$(git log origin/main..origin/staging --format="%s" | grep -v "^chore: sync v" | wc -l | tr -d ' ')
+            # A sync PR lands as a merge commit, so its subject has to be excluded
+            # too. Promoting it would cut a patch release, whose own sync PR would
+            # be promoted the following week, and so on.
+            NON_SYNC=$(git log origin/main..origin/staging --format="%s" \
+              | grep -vE "^chore: sync v|^Merge pull request #[0-9]+ from [^ /]+/ci/sync-" \
+              | wc -l | tr -d ' ')
             if [ "$NON_SYNC" = "0" ]; then
               echo "ahead=0" >> $GITHUB_OUTPUT
               echo "only version-sync commits ahead — skipping promotion to avoid release loop"
@@ -71,11 +76,15 @@ jobs:
           git checkout -B "$BRANCH" origin/staging
           git push origin "$BRANCH"
 
-          PR_URL=$(gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "chore: weekly staging → main promotion ($(date -u +%Y-%m-%d))" \
-            --body "Automated weekly promotion — ${{ steps.check.outputs.ahead }} commits from \`staging\`.")
+          if ! PR_URL=$(gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "chore: weekly staging → main promotion ($(date -u +%Y-%m-%d))" \
+              --body "Automated weekly promotion — ${{ steps.check.outputs.ahead }} commits from \`staging\`."); then
+            git push origin --delete "$BRANCH" || echo "::warning::Could not delete $BRANCH — remove it by hand."
+            echo "::error::Could not open the promotion PR, so nothing was promoted. If Actions was refused permission to create pull requests, the RELEASE_TOKEN secret is missing — see Environment variables in CLAUDE.md."
+            exit 1
+          fi
           echo "url=$PR_URL" >> $GITHUB_OUTPUT
 
       - name: Merge promotion PR

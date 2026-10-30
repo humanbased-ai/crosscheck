@@ -238,6 +238,8 @@ Never remove a config field or change its type — that is a breaking change.
 
 Never read env vars outside `config/loader.ts`.
 
+`RELEASE_TOKEN` is a CI secret, not a CLI variable. `promote-staging.yml` and `release.yml` use it to open and merge PRs, because Actions may not create PRs in this repo and a merge made with `GITHUB_TOKEN` raises no `push` event for `release.yml`. It is a fine-grained PAT scoped to this repo with Contents, Pull requests and Workflows write; Workflows because a promotion can carry workflow changes. Both workflows check out with it, so an expired token stops promotions and `@latest` releases alike. Rotate it with `gh secret set RELEASE_TOKEN -R humanbased-ai/crosscheck`.
+
 ---
 
 ## Versioning
