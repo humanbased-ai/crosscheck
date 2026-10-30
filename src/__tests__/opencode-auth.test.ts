@@ -35,6 +35,13 @@ const ONE_CREDENTIAL = [
   '└  3 environment variables',
 ].join('\n')
 
+// opencode 2.x dropped the framed table and its summary row: one plain line per
+// stored credential, ending in the credential's status.
+const V2_STORED_CREDENTIALS = [
+  'OpenCode Console  Default                     stored',
+  'Anthropic         Work                        stored',
+].join('\n')
+
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), '..', 'fixtures-opencode')
 const help1211 = readFileSync(join(FIXTURES_DIR, 'run-help-1.2.11.txt'), 'utf8')
 const help1193 = readFileSync(join(FIXTURES_DIR, 'run-help-1.19.3.txt'), 'utf8')
@@ -77,6 +84,15 @@ describe('parseOpenCodeAuthList', () => {
     expect(parseOpenCodeAuthList('└  3 environment variables')).toBeNull()
   })
 
+  it('counts the stored credential rows when opencode 2.x prints no summary row', () => {
+    expect(parseOpenCodeAuthList(V2_STORED_CREDENTIALS)).toBe(2)
+    expect(parseOpenCodeAuthList(`\x1b[90m${V2_STORED_CREDENTIALS}\x1b[0m\n`)).toBe(2)
+  })
+
+  it('prefers the summary row over counting rows', () => {
+    expect(parseOpenCodeAuthList(`${V2_STORED_CREDENTIALS}\n└  5 credentials`)).toBe(5)
+  })
+
   it('returns null when the summary line is missing', () => {
     expect(parseOpenCodeAuthList('opencode auth list\n\nOptions:\n  -h  show help')).toBeNull()
   })
@@ -87,6 +103,11 @@ describe('checkOpenCodeAuth', () => {
     mockCli(ONE_CREDENTIAL, help1193)
     await expect(checkOpenCodeAuth()).resolves.toEqual({ ok: true, detail: '1 provider(s) configured' })
     expect(execa).toHaveBeenCalledWith('opencode', ['auth', 'list'], { timeout: 10_000 })
+  })
+
+  it('reports configured providers from the opencode 2.x listing', async () => {
+    mockCli(V2_STORED_CREDENTIALS, help1193, '2.0.32')
+    await expect(checkOpenCodeAuth()).resolves.toEqual({ ok: true, detail: '2 provider(s) configured' })
   })
 
   it('is not ready when the logged-in CLI lacks run --auto', async () => {

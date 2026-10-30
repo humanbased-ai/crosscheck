@@ -504,9 +504,14 @@ export function parseOpenCodeAuthList(raw: string): number | null {
   // a `<n> credential(s)` sequence earlier in the listing; an unanchored first
   // match would report that number as the total.
   const match = clean.match(/└\s+(\d+)\s+credentials?\b/i)
-  if (!match) return null
-  const count = Number(match[1])
-  return Number.isFinite(count) ? count : null
+  if (match) {
+    const count = Number(match[1])
+    return Number.isFinite(count) ? count : null
+  }
+  // opencode 2.x prints no frame or summary row: one line per stored credential,
+  // ending in its status. A listing with no such line stays unreadable (null).
+  const storedRows = clean.split('\n').filter((line) => /\S\s{2,}stored\s*$/.test(line))
+  return storedRows.length > 0 ? storedRows.length : null
 }
 
 export async function checkOpenCodeAuth(): Promise<{ ok: boolean; detail: string }> {
