@@ -1876,7 +1876,10 @@ PR head under a per-repository lock and makes an independent checkout with no
 hardlinks or object alternates. Credentials are stored in neither the cache nor
 the checkout: git reads the token from a credential helper's environment. A cold fetch
 still costs network time; concurrent preparation for the same repository waits
-for the lock. A lock whose owning process has exited (or that is older than 30
+for the lock. After two minutes a waiting review may use a fresh clone instead, but
+at most two fresh clones run at once across the machine, with or without the cache;
+the rest keep waiting and show `waiting for ...` on the board (logged as
+`clone_waiting`). A lock whose owning process has exited (or that is older than 30
 minutes) is broken automatically. The cache fetch uses the same network retries
 as a fresh clone; if the cache fails anyway it is discarded and the review falls
 back to a fresh clone. Caches unused for 30 days are pruned. Disable the option

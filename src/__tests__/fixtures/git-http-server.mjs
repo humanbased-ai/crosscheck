@@ -1,3 +1,4 @@
+/* global process, URL, Buffer, console */
 // A real smart-HTTP git remote: `git http-backend` behind a server that answers 401
 // until it sees the expected credential, the way GitHub does for a private repository.
 // Prints its port when ready.

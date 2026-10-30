@@ -667,12 +667,18 @@ export async function runWatch(opts: WatchOpts = {}) {
           }
         }
 
+        // Before the clone, which can queue for longer than the remote lock's stale window.
+        stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
         const { baseRefStatus } = await clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef, baseSha: params.baseSha,
           tmpDir, token, protocol: config.clone_protocol, repositoryCache: config.repository_cache,
           onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef }),
           onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef, via: status }),
           onCacheFailed: message => fileLog({ level: 'warn', event: 'repository_cache_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: message }),
+          onCloneWaiting: status => {
+            board.updatePR(key, { label: status ?? 'cloning...' })
+            if (status) fileLog({ level: 'warn', event: 'clone_waiting', repo: `${owner}/${repoName}`, pr: prNumber, status })
+          },
         })
         // Fail closed rather than review a PR whose diff cannot be computed: the
         // vendor would answer "could not review" and that answer would become a
@@ -714,6 +720,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           } catch (err: unknown) {
             logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'no_diff_comment' }, err)
           }
+          stopHeartbeat()
           await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
           // The PR is on the board from before the clone, so close its slot rather
           // than leaving a row that never resolves.
@@ -724,7 +731,6 @@ export async function runWatch(opts: WatchOpts = {}) {
 
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })
-        stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
         const { verdict, fixAppliedCount, strategySkipped } = await runWorkflow({
           owner, repoName, prNumber, pr,

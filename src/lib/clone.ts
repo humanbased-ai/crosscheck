@@ -7,7 +7,7 @@ import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 import { getGitIdentityFromEnv } from '../config/loader.js'
 import { getMergeBase } from '../github/client.js'
-import { cloneFromCache } from './repository-cache.js'
+import { claimFreshClone, cloneFromCache, RepositoryCacheBusyError, tryClaimFreshClone, type ReleaseFreshClone } from './repository-cache.js'
 
 const GIT_RESILIENCE_ARGS = [
   '-c', 'http.postBuffer=524288000',
@@ -97,6 +97,10 @@ function isTransientGitError(message: string): boolean {
   const m = message.toLowerCase()
   return /curl 16|http2 framing|curl 18|partial file|early eof|rpc failed|unexpected disconnect|fetch-pack: invalid|bytes of body.*expected/.test(m)
 }
+
+// How long a review already queued for a busy cache holds out for it before checking
+// whether a fresh clone slot has opened. The first wait is the cache's own, and longer.
+const CACHE_REQUEUE_WAIT_MS = 5_000
 
 const MAX_GIT_RETRIES = 3
 const GIT_RETRY_DELAY_MS = 2000
@@ -231,6 +235,8 @@ export async function clonePRForReview(params: {
   onProgress?: (line: string) => void
   /** The repository cache failed and a fresh clone is being used instead. */
   onCacheFailed?: (message: string) => void
+  /** What this review is queued behind, then null once it moves on. */
+  onCloneWaiting?: (status: string | null) => void
 }): Promise<CloneResult> {
   // Isolation is scoped here, not globally in cli.ts, so commands like `skill install`
   // that don't execute agents keep using the operator's normal Git config (credential
@@ -248,21 +254,46 @@ export async function clonePRForReview(params: {
     ...(onProgress !== undefined && { onProgress }),
   })
 
+  let waitingFor: string | null = null
+  const reportWaiting = (status: string): void => {
+    if (status !== waitingFor) params.onCloneWaiting?.(status)
+    waitingFor = status
+  }
+  const reportWaitOver = (): void => {
+    if (waitingFor !== null) params.onCloneWaiting?.(null)
+    waitingFor = null
+  }
+
+  let releaseFreshClone: ReleaseFreshClone | null = null
   if (params.repositoryCache) {
     let cached = false
-    try {
-      await cloneFromCache({
-        source: cloneUrl, repository: `${owner}/${repo}`, prNumber, destination: tmpDir,
-        // Same hardening as the fresh clone: resilience flags, transient retries,
-        // progress, and redacted errors for the one step that hits the network.
-        git: (subcommand, args, { cwd, network }) => network
-          ? runGit([...GIT_RESILIENCE_ARGS, subcommand, ...(onProgress ? ['--progress'] : []), ...args], cwd, true, onProgress, gitEnv)
-          : runGit([subcommand, ...args], cwd),
-      })
-      cached = true
-    } catch (err) {
-      params.onCacheFailed?.(redactCloneSecrets(err instanceof Error ? err.message : String(err)))
+    // A busy cache is not a broken one, so this keeps queueing for it unless a fresh
+    // clone can start right now. Sequential because cloneFromCache is what waits: it
+    // only reports busy after holding out for the lock.
+    while (!cached && releaseFreshClone === null) {
+      try {
+        await cloneFromCache({
+          source: cloneUrl, repository: `${owner}/${repo}`, prNumber, destination: tmpDir,
+          ...(waitingFor !== null && { lockWaitMs: CACHE_REQUEUE_WAIT_MS }),
+          // Same hardening as the fresh clone: resilience flags, transient retries,
+          // progress, and redacted errors for the one step that hits the network.
+          git: (subcommand, args, { cwd, network }) => network
+            ? runGit([...GIT_RESILIENCE_ARGS, subcommand, ...(onProgress ? ['--progress'] : []), ...args], cwd, true, onProgress, gitEnv)
+            : runGit([subcommand, ...args], cwd),
+        })
+        cached = true
+      } catch (err) {
+        const message = redactCloneSecrets(err instanceof Error ? err.message : String(err))
+        if (!(err instanceof RepositoryCacheBusyError)) {
+          params.onCacheFailed?.(message)
+          break
+        }
+        releaseFreshClone = await tryClaimFreshClone()
+        if (releaseFreshClone === null) reportWaiting('waiting for the repository cache')
+        else params.onCacheFailed?.(message)
+      }
     }
+    reportWaitOver()
     if (cached) {
       try {
         return await checkout(false)
@@ -279,13 +310,20 @@ export async function clonePRForReview(params: {
     }
   }
 
-  // Clone is retryable — transient network issues (curl 16/18, framing errors) are common.
-  // GIT_RESILIENCE_ARGS inline (-c flags) apply HTTP buffer/timeout settings without
-  // requiring a local repo to already exist.
-  // --progress forces git to emit stderr progress even when piped; without a
-  // progress consumer, stay --quiet so error output remains clean.
-  await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress, gitEnv)
-  return checkout(true)
+  releaseFreshClone ??= await claimFreshClone(() => reportWaiting('waiting for a fresh clone slot'))
+  reportWaitOver()
+  try {
+    // Clone is retryable — transient network issues (curl 16/18, framing errors) are common.
+    // GIT_RESILIENCE_ARGS inline (-c flags) apply HTTP buffer/timeout settings without
+    // requiring a local repo to already exist.
+    // --progress forces git to emit stderr progress even when piped; without a
+    // progress consumer, stay --quiet so error output remains clean.
+    await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress, gitEnv)
+    // Held through the checkout: its fetches, and deepening the base, cost more than the clone.
+    return await checkout(true)
+  } finally {
+    await releaseFreshClone()
+  }
 }
 
 async function checkoutPRAgainstBase(params: {
