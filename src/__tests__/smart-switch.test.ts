@@ -37,6 +37,12 @@ describe('isSubscriptionLimitError', () => {
     expect(isSubscriptionLimitError(new Error('plan limit'))).toBe(true)
   })
 
+  it('matches the credit failures the OpenCode stream wrapper stops on', () => {
+    expect(isSubscriptionLimitError(new Error('opencode: Your account is out of credits'))).toBe(true)
+    expect(isSubscriptionLimitError(new Error('opencode: Insufficient credits to complete this request'))).toBe(true)
+    expect(isVendorFailoverError(new Error('opencode: Your account is out of credits'))).toBe(true)
+  })
+
   it('does not match unrelated errors', () => {
     expect(isSubscriptionLimitError(new Error('codex: permission denied'))).toBe(false)
     expect(isSubscriptionLimitError(new Error('git clone failed'))).toBe(false)

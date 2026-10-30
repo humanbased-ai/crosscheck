@@ -1,3 +1,4 @@
+import { runOpenCode } from '../reviewers/opencode-process.js'
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, mkdirSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
@@ -243,7 +244,7 @@ async function runWithOpenCode(prompt: string): Promise<string> {
     // optimize run cannot execute commands or mutate files.
     const { baseArgs, policyFormat } = await requireOpenCodeRun()
     writeFileSync(join(tmpDir, 'opencode.json'), JSON.stringify(opencodePolicy(false, policyFormat), null, 2))
-    const result = await execa('opencode', [
+    const result = await runOpenCode([
       ...baseArgs,
       'Read OPTIMIZE_PROMPT.md and produce the new instructions.md content. Output only the file content — no explanation, no markdown fences.',
     ], {
