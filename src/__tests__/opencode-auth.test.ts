@@ -147,6 +147,11 @@ describe('parseOpenCodeAuthListJson', () => {
     expect(parseOpenCodeAuthListJson(envOnly)).toBe(0)
   })
 
+  it('treats a connections array with a non-connection element as unreadable, not logged out', () => {
+    expect(parseOpenCodeAuthListJson('[{"id":"opencode","connections":["a",1,null]}]')).toBeNull()
+    expect(parseOpenCodeAuthListJson('[{"id":"opencode","connections":[{"id":"cred_1"}]}]')).toBeNull()
+  })
+
   it('returns null for text, help output, or a malformed listing', () => {
     expect(parseOpenCodeAuthListJson('No authenticated integrations')).toBeNull()
     expect(parseOpenCodeAuthListJson('opencode auth list\n\nOptions:\n  -h  show help')).toBeNull()
@@ -168,6 +173,39 @@ describe('checkOpenCodeAuth', () => {
     await expect(checkOpenCodeAuth()).resolves.toEqual({ ok: false, detail: 'no providers configured — run: opencode auth login' })
   })
 
+  it('falls back to the text listing when the CLI rejects --format as a usage error', async () => {
+    const usage = ['DESCRIPTION', '  list integrations and credentials', '', 'USAGE', '  opencode auth list [flags]', '', 'Positionals:', '', 'Options:', '  --standalone'].join('\n')
+    vi.mocked(execa).mockImplementation(((_file: string, args?: readonly string[]) => {
+      if (args?.[0] === '--version') return Promise.resolve({ stdout: '2.0.32', stderr: '', exitCode: 0 })
+      if (args?.[0] === 'auth' && args.includes('--format')) return Promise.reject(Object.assign(new Error('exit 1'), { stderr: usage, exitCode: 1 }))
+      if (args?.[0] === 'auth') return Promise.resolve({ stdout: V2_STORED_CREDENTIALS })
+      return Promise.resolve({ stdout: help2032, stderr: '', exitCode: 0 })
+    }) as unknown as typeof execa)
+    await expect(checkOpenCodeAuth()).resolves.toEqual({ ok: true, detail: '2 provider(s) configured' })
+  })
+
+  it.each([
+    'ERROR\n  Unrecognized flag: --format in command opencode auth list',
+    'ERROR\n  Invalid value for flag --format: "json". Expected: "default" | "table"',
+  ])('falls back to the text listing when opencode 2.x rejects --format: %s', async (stderr) => {
+    vi.mocked(execa).mockImplementation(((_file: string, args?: readonly string[]) => {
+      if (args?.[0] === '--version') return Promise.resolve({ stdout: '2.0.32', stderr: '', exitCode: 0 })
+      if (args?.[0] === 'auth' && args.includes('--format')) return Promise.reject(Object.assign(new Error('exit 1'), { stderr, exitCode: 1 }))
+      if (args?.[0] === 'auth') return Promise.resolve({ stdout: V2_STORED_CREDENTIALS })
+      return Promise.resolve({ stdout: help2032, stderr: '', exitCode: 0 })
+    }) as unknown as typeof execa)
+    await expect(checkOpenCodeAuth()).resolves.toEqual({ ok: true, detail: '2 provider(s) configured' })
+  })
+
+  it('does not fall back when the JSON command fails for a reason other than a usage rejection', async () => {
+    vi.mocked(execa).mockImplementation(((_file: string, args?: readonly string[]) => {
+      if (args?.[0] === '--version') return Promise.resolve({ stdout: '2.0.32', stderr: '', exitCode: 0 })
+      if (args?.[0] === 'auth') return Promise.reject(Object.assign(new Error('exit 1'), { stderr: 'service unreachable', exitCode: 1 }))
+      return Promise.resolve({ stdout: help2032, stderr: '', exitCode: 0 })
+    }) as unknown as typeof execa)
+    await expect(checkOpenCodeAuth()).resolves.toEqual({ ok: false, detail: 'service unreachable' })
+  })
+
   it('fails closed when opencode 2.x JSON output is unreadable', async () => {
     mockCli('No authenticated integrations\n', help2032, '2.0.32')
     const result = await checkOpenCodeAuth()
@@ -179,14 +217,15 @@ describe('checkOpenCodeAuth', () => {
     mockCli(ONE_CREDENTIAL, help1193)
     await expect(checkOpenCodeAuth()).resolves.toEqual({ ok: true, detail: '1 provider(s) configured' })
     expect(execa).toHaveBeenCalledWith('opencode', ['auth', 'list'], { timeout: 10_000 })
+    expect(execa).not.toHaveBeenCalledWith('opencode', ['auth', 'list', '--format', 'json'], expect.anything())
   })
 
-  it('reports configured providers from the opencode 2.x listing', async () => {
+  it('reads the 2.x text rows when the probe does not classify the CLI as v2', async () => {
     mockCli(V2_STORED_CREDENTIALS, help1193, '2.0.32')
     await expect(checkOpenCodeAuth()).resolves.toEqual({ ok: true, detail: '2 provider(s) configured' })
   })
 
-  it('asks for a login when the opencode 2.x listing is empty', async () => {
+  it('asks for a login on the 2.x empty text listing when the probe does not classify the CLI as v2', async () => {
     mockCli('No authenticated integrations\n', help1193, '2.0.32')
     await expect(checkOpenCodeAuth()).resolves.toEqual({ ok: false, detail: 'no providers configured — run: opencode auth login' })
   })

@@ -492,12 +492,19 @@ export function isOpenCodeAuthFailure(stderr: string | undefined, message: strin
   return OPENCODE_AUTH_FAILURE.test(stripVTControlCharacters(text))
 }
 
+// opencode 2.x rejects a flag it does not know with a short `ERROR` block on
+// stderr (the help goes to stdout), which isOpenCodeUsageOutput does not match.
+function isOpenCodeFormatRejection(stderr: string): boolean {
+  return /^[ \t]*(?:Unrecognized flag: --format\b|(?:Invalid|Missing) value for flag --format\b)/m.test(stripVTControlCharacters(stderr))
+}
+
 // opencode 1.x (1.2 and 1.19) has no machine-readable `auth list`: `--format json`,
 // `--format=json`, and `--json` all exit 1 and print help. The previous probe
 // passed `--format json`, so even a logged-in install failed readiness with the
-// help text as its "error". Parse the plain listing instead (2.x does accept
-// `--format json`; text parsing is kept so one path covers both majors). Strip ANSI escapes first — opencode styles the table even
-// when stdout is not a TTY.
+// help text as its "error". This plain-listing parser therefore serves 1.x, and
+// also any CLI the probe cannot classify as v2 or that rejects `--format` (2.x
+// reads the JSON listing instead, see parseOpenCodeAuthListJson). Strip ANSI
+// escapes first — opencode styles the table even when stdout is not a TTY.
 export function parseOpenCodeAuthList(raw: string): number | null {
   const clean = stripVTControlCharacters(raw)
   // Anchor to the summary row. Provider labels and other table text can contain
@@ -525,10 +532,14 @@ export function parseOpenCodeAuthListJson(raw: string): number | null {
   try { listing = JSON.parse(stripVTControlCharacters(raw)) } catch { return null }
   if (!Array.isArray(listing)) return null
   let credentials = 0
-  for (const provider of listing as unknown[]) {
+  for (const provider of listing) {
     const connections = (provider as { connections?: unknown } | null)?.connections
     if (!Array.isArray(connections)) return null
-    credentials += connections.filter((connection: unknown) => (connection as { type?: unknown } | null)?.type === 'credential').length
+    for (const connection of connections) {
+      const type = (connection as { type?: unknown } | null)?.type
+      if (typeof type !== 'string') return null
+      if (type === 'credential') credentials += 1
+    }
   }
   return credentials
 }
@@ -539,8 +550,21 @@ export async function checkOpenCodeAuth(): Promise<{ ok: boolean; detail: string
     // its text rows are the most brittle signal. A probe failure surfaces as the
     // thrown message, as the readiness check below always did.
     const info = await probeOpenCodeCli()
-    const json = info.policyFormat === 'v2'
-    const { stdout } = await execa('opencode', json ? ['auth', 'list', '--format', 'json'] : ['auth', 'list'], { timeout: 10_000 })
+    let json = info.policyFormat === 'v2'
+    let stdout: string | undefined
+    if (json) {
+      try {
+        ({ stdout } = await execa('opencode', ['auth', 'list', '--format', 'json'], { timeout: 10_000 }))
+      } catch (err: unknown) {
+        // A usage rejection means this build dropped `--format`: a capability
+        // mismatch, so read the plain listing. Any other failure, and any JSON
+        // that does not parse, still fails closed.
+        const stderr = (err as { stderr?: unknown } | null)?.stderr
+        if (typeof stderr !== 'string' || !(isOpenCodeUsageOutput(stderr) || isOpenCodeFormatRejection(stderr))) throw err
+        json = false
+      }
+    }
+    if (!json) ({ stdout } = await execa('opencode', ['auth', 'list'], { timeout: 10_000 }))
     const providerCount = json ? parseOpenCodeAuthListJson(stdout ?? '') : parseOpenCodeAuthList(stdout ?? '')
     // Fail closed on unrecognised output: an unreadable listing must not claim
     // authentication, and it must not silently look like a logged-out install.
