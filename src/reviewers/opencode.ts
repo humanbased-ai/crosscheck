@@ -516,14 +516,37 @@ export function parseOpenCodeAuthList(raw: string): number | null {
   return storedRows.length > 0 ? storedRows.length : null
 }
 
+// opencode 2.x `auth list --format json`: an array of providers, each with its
+// `connections`. Only `credential` connections count, matching the 1.x text
+// listing (environment-variable keys are a separate section there). Anything
+// that is not that shape is unreadable (null), never zero.
+export function parseOpenCodeAuthListJson(raw: string): number | null {
+  let listing: unknown
+  try { listing = JSON.parse(stripVTControlCharacters(raw)) } catch { return null }
+  if (!Array.isArray(listing)) return null
+  let credentials = 0
+  for (const provider of listing as unknown[]) {
+    const connections = (provider as { connections?: unknown } | null)?.connections
+    if (!Array.isArray(connections)) return null
+    credentials += connections.filter((connection: unknown) => (connection as { type?: unknown } | null)?.type === 'credential').length
+  }
+  return credentials
+}
+
 export async function checkOpenCodeAuth(): Promise<{ ok: boolean; detail: string }> {
   try {
-    const { stdout } = await execa('opencode', ['auth', 'list'], { timeout: 10_000 })
-    const providerCount = parseOpenCodeAuthList(stdout ?? '')
+    // The probe decides the listing format: 1.x has no JSON mode, 2.x does and
+    // its text rows are the most brittle signal. A probe failure surfaces as the
+    // thrown message, as the readiness check below always did.
+    const info = await probeOpenCodeCli()
+    const json = info.policyFormat === 'v2'
+    const { stdout } = await execa('opencode', json ? ['auth', 'list', '--format', 'json'] : ['auth', 'list'], { timeout: 10_000 })
+    const providerCount = json ? parseOpenCodeAuthListJson(stdout ?? '') : parseOpenCodeAuthList(stdout ?? '')
     // Fail closed on unrecognised output: an unreadable listing must not claim
     // authentication, and it must not silently look like a logged-out install.
     if (providerCount === null) {
-      return { ok: false, detail: 'could not read opencode auth list output — run: opencode auth list' }
+      const command = json ? 'opencode auth list --format json' : 'opencode auth list'
+      return { ok: false, detail: `could not read ${command} output — run: ${command}` }
     }
     if (providerCount === 0) {
       return { ok: false, detail: 'no providers configured — run: opencode auth login' }
@@ -531,12 +554,8 @@ export async function checkOpenCodeAuth(): Promise<{ ok: boolean; detail: string
     // A readiness check, not only an auth check: a logged-in CLI that cannot run
     // headless (no `--auto`) must not be assigned reviews, and the reason should
     // show up in `status`/`init`.
-    try {
-      const incompatibility = openCodeIncompatibility(await probeOpenCodeCli())
-      if (incompatibility) return { ok: false, detail: incompatibility }
-    } catch (probeErr: unknown) {
-      return { ok: false, detail: probeErr instanceof Error ? probeErr.message : String(probeErr) }
-    }
+    const incompatibility = openCodeIncompatibility(info)
+    if (incompatibility) return { ok: false, detail: incompatibility }
     return { ok: true, detail: `${providerCount} provider(s) configured` }
   } catch (err: unknown) {
     const error = err as { stderr?: string; message?: string }
