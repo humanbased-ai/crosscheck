@@ -85,10 +85,11 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           PR_URL: ${{ steps.pr.outputs.url }}
         run: |
-          # main requires no approvals and has no required status checks, so this
-          # merges immediately. --auto is the fallback if a future protection rule
-          # makes the PR wait: the merge then happens once that rule is satisfied,
-          # and this run reports the PR as still open.
+          # main requires no approvals, and its required CI checks are normally
+          # green already: this branch is cut at the staging tip, so CI from the
+          # staging push is on this commit. --auto is the fallback while they are
+          # not: the merge then happens once they pass, and this run reports the
+          # PR as still open.
           gh pr merge "$PR_URL" --merge --delete-branch \
             || gh pr merge "$PR_URL" --merge --auto --delete-branch
           STATE=$(gh pr view "$PR_URL" --json state -q .state)

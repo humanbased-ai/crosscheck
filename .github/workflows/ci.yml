@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: ['**']
+  # Internal PRs also run on push. A fork's pushes don't reach this repo, so this
+  # trigger is the only CI a fork PR gets.
   pull_request:
-    branches: [main]
+    branches: [main, staging]
 
 jobs:
   check:
