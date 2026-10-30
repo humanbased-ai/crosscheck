@@ -858,6 +858,10 @@ describe('pushWithNonFastForwardHandling', () => {
     workDir = mkdtempSync(join(tmpdir(), 'crosscheck-nonff-work-'))
     git(workDir, 'init', '-q', '-b', 'work')
     git(workDir, 'remote', 'add', 'origin', originDir)
+    // The recovery's rebase writes commits and ignores global config, so the
+    // identity has to live in this repo for it to pass on a machine with none.
+    git(workDir, 'config', 'user.email', 't@e.co')
+    git(workDir, 'config', 'user.name', 'T')
     // Drop the default fetch refspec so `git fetch origin main` updates only
     // FETCH_HEAD and never creates refs/remotes/origin/main — the exact shallow-
     // clone state in production where `git rebase origin/main` failed.
