@@ -492,11 +492,11 @@ export function isOpenCodeAuthFailure(stderr: string | undefined, message: strin
   return OPENCODE_AUTH_FAILURE.test(stripVTControlCharacters(text))
 }
 
-// `opencode auth list` has no machine-readable mode: `--format json`,
-// `--format=json`, and `--json` all exit 1 and print help on every CLI tested
-// (1.2 and 1.19). The previous probe passed `--format json`, so even a logged-in
-// install failed readiness with the help text as its "error". Parse the plain
-// summary instead. Strip ANSI escapes first — opencode styles the table even
+// opencode 1.x (1.2 and 1.19) has no machine-readable `auth list`: `--format json`,
+// `--format=json`, and `--json` all exit 1 and print help. The previous probe
+// passed `--format json`, so even a logged-in install failed readiness with the
+// help text as its "error". Parse the plain listing instead (2.x does accept
+// `--format json`; text parsing is kept so one path covers both majors). Strip ANSI escapes first — opencode styles the table even
 // when stdout is not a TTY.
 export function parseOpenCodeAuthList(raw: string): number | null {
   const clean = stripVTControlCharacters(raw)
@@ -508,9 +508,11 @@ export function parseOpenCodeAuthList(raw: string): number | null {
     const count = Number(match[1])
     return Number.isFinite(count) ? count : null
   }
-  // opencode 2.x prints no frame or summary row: one line per stored credential,
-  // ending in its status. A listing with no such line stays unreadable (null).
-  const storedRows = clean.split('\n').filter((line) => /\S\s{2,}stored\s*$/.test(line))
+  // opencode 2.x prints no frame or summary row: "No authenticated integrations"
+  // when empty, otherwise one line per stored credential ending in its status.
+  // Any other listing stays unreadable (null).
+  if (/^\s*No authenticated integrations\s*$/im.test(clean)) return 0
+  const storedRows = clean.split('\n').filter((line) => /^\S.*\s+stored\s*$/i.test(line))
   return storedRows.length > 0 ? storedRows.length : null
 }
 
