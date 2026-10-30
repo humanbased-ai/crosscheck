@@ -791,6 +791,10 @@ Uses `localhost.run` (SSH) to open a public tunnel — SSH is pre-installed on m
 | `--backtrace` / `--no-backtrace` | Force on/off the scan for unreviewed open PRs |
 | `--backtrace-interval <min>` | Minutes between backtrace re-scans this session (`0` = startup only) |
 
+`watch` reads its config once at startup. If the file changes while it runs, the board shows a warning until you restart it or revert the edit.
+
+An org webhook needs an org owner as well as the `admin:org_hook` scope, and GitHub answers 404 when either is missing. `watch` reads the token's scopes and the account's membership and tells you which it is. On a classic token that check needs `read:org`; without it, or on a fine-grained or App token, the message says the cause could not be confirmed.
+
 ---
 
 ### `crosscheck status`
