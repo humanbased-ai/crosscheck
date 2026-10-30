@@ -5,6 +5,7 @@ import { execa } from 'execa'
 import { resolveCliInvocation, type CliInvocation } from '../lib/cli-invocation.js'
 import { createGithubClient } from '../github/client.js'
 import { getGithubToken, loadConfig } from '../config/loader.js'
+import { resolveReviewerIdentity } from '../lib/reviewer-identity.js'
 import type { Config } from '../config/schema.js'
 import { parseDuration } from '../lib/durations.js'
 import { classifyError, logError } from '../lib/logger.js'
@@ -84,6 +85,7 @@ export async function runKickass(opts: KickassOpts = {}): Promise<void> {
   const workflow = loadWorkflow(process.cwd())
   const board = new PRBoard()
   board.setConfig(config, workflow)
+  board.setReviewerIdentity(await resolveReviewerIdentity(config))
   await runKickassWithDeps(opts, defaultKickassDeps(opts, board))
 }
 

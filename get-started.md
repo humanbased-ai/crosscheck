@@ -384,7 +384,7 @@ crosscheck init
 crosscheck init --config /path/to/crosscheck.config.yml
 ```
 
-What it checks: `codex` CLI, `claude` CLI, `gh` CLI, GitHub auth, and webhook-secret handling. The webhook secret is auto-managed at `~/.crosscheck/webhook-secret` for `watch`.
+What it checks: `codex` CLI, `claude` CLI, `gh` CLI, GitHub auth, webhook-secret handling, and the reviewer identity (plus a code-owner advisory when a GitHub App is configured). The webhook secret is auto-managed at `~/.crosscheck/webhook-secret` for `watch`.
 
 | Flag | Description |
 |---|---|
