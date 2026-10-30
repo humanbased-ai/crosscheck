@@ -1,3 +1,4 @@
+import { runOpenCode } from '../reviewers/opencode-process.js'
 import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
@@ -254,7 +255,7 @@ async function runWithOpenCode(prompt: string): Promise<string> {
     // issue run cannot execute commands or mutate files.
     const { baseArgs, policyFormat } = await requireOpenCodeRun()
     writeFileSync(join(tmpDir, 'opencode.json'), JSON.stringify(opencodePolicy(false, policyFormat), null, 2))
-    const result = await execa('opencode', [
+    const result = await runOpenCode([
       ...baseArgs,
       'Read ISSUE_PROMPT.md and produce a GitHub issue draft. ' +
       'Output exactly: TITLE: line, then ---, then the markdown body.',

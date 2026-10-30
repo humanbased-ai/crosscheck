@@ -80,7 +80,7 @@ function errorTimedOut(err: unknown): boolean {
  */
 export function isSubscriptionLimitError(err: unknown): boolean {
   const msg = errorText(err)
-  return /\b(?:402|429)\b|rate[\s_-]?limit|too many requests|usage\s+limit|quota(?:\s+(?:exceeded|reached|exhausted))?|credits?\s+(?:exhausted|depleted|exceeded)|plan\s+limit|subscription\s+limit|resource\s+exhausted/.test(msg)
+  return /\b(?:402|429)\b|rate[\s_-]?limit|too many requests|usage\s+limit|quota(?:\s+(?:exceeded|reached|exhausted))?|credits?\s+(?:exhausted|depleted|exceeded)|out\s+of\s+credits|insufficient\s+credits|plan\s+limit|subscription\s+limit|resource\s+exhausted/.test(msg)
 }
 
 /**

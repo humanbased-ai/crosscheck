@@ -1,3 +1,4 @@
+import { runOpenCode, openCodeModelArgs } from './opencode-process.js'
 import { execa } from 'execa'
 import { rmSync, mkdtempSync, renameSync, existsSync, writeFileSync, accessSync, statSync, constants } from 'fs'
 import { join, delimiter } from 'path'
@@ -243,6 +244,7 @@ export async function runOpenCodeReview(
   const prompt = [
     `You are reviewing a pull request titled: "${prTitle}".`,
     `The branch \`${baseBranch}\` is the base. Review only the changes introduced in this PR.`,
+    'Available shell commands: git status, git diff, git log, git show. Use the read, glob and grep tools to inspect files; other shell commands are denied. After a denial, use an allowed tool instead of retrying the command.',
     issueContext ?? '',
     focusLine,
     customLine,
@@ -262,14 +264,12 @@ export async function runOpenCodeReview(
   // only when the installed CLI accepts it; a CLI without `--auto` is refused
   // up front (see requireOpenCodeRun).
   //
-  // OpenCode has no separate effort flag — reasoning effort is the `#variant`
-  // suffix on `--model provider/model#variant`. Without a pinned model there is
-  // nowhere to hang the suffix, so `vendors.opencode.effort` is honoured only
-  // when `vendors.opencode.model` is set; otherwise OpenCode's configured
+  // OpenCode V1 uses --variant; V2 uses the #variant model suffix.
+  // Effort is honoured only when `vendors.opencode.model` is set; otherwise OpenCode's configured
   // default model AND its default variant run, and `effort` is reported but
   // not applied (it is not a claim the CLI was given).
-  const modelArgs = model ? ['--model', `${model}#${effort}`] : []
   const { baseArgs, policyFormat } = await requireOpenCodeRun()
+  const modelArgs = openCodeModelArgs(model, effort, policyFormat === 'v2')
   const args = [...baseArgs, ...modelArgs]
 
   onLog?.(`  running: opencode ${args.join(' ')}`)
@@ -283,7 +283,7 @@ export async function runOpenCodeReview(
         const restoreConfig = isolateCheckoutOpenCodeConfig(repoDir, false, policyFormat)
         return withTimeoutRetry(
           resolvedTimeout,
-          (t) => execa('opencode', args, {
+          (t) => runOpenCode(args, {
             cwd: repoDir,
             timeout: t,
             input: prompt,
@@ -306,7 +306,7 @@ export async function runOpenCodeReview(
       const { review: parsedReview, tokensUsed } = parseOpenCodeOutput(stdout ?? '')
       const rawReview = parsedReview.trim()
       const review = inferVerdictFromOpenCodeOutput(rawReview)
-      // Report effort only when a pinned model actually carried the #variant;
+      // Report effort only when a pinned model actually carried the variant;
       // with no model there is no suffix, so claiming a level would be false.
       return { review, tokensUsed, model: model ?? 'default', effort: model ? effort : undefined, retried }
     } catch (err: unknown) {

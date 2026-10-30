@@ -148,7 +148,7 @@ describe('multi-vendor conflict resolution', () => {
     expect(options.input).toContain('src/conflicted.ts')
   })
 
-  it('runs opencode with edit permission and model effort suffix', async () => {
+  it('runs opencode with edit permission and V1 model variant', async () => {
     execaMock.mockImplementation((async (bin: string, args: string[]) => {
       if (bin === 'opencode' && args.includes('--help')) {
         return { stdout: 'Options:\n  --attach <url>\n  --port <number>\n  --auto', exitCode: 0 }
@@ -170,7 +170,9 @@ describe('multi-vendor conflict resolution', () => {
     expect(runCall).toBeDefined()
     const args = runCall?.[1] as string[]
     expect(args).toContain('--model')
-    expect(args).toContain('provider/model#high')
+    expect(args).toContain('provider/model')
+    expect(args).toContain('--variant')
+    expect(args).toContain('high')
     const prompt = (runCall?.[2] as { input?: string })?.input ?? ''
     expect(prompt).toContain('Edit the files directly')
   })
