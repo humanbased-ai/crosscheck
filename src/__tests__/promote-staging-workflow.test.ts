@@ -142,4 +142,30 @@ describe('promote-staging.yml', () => {
       expect(stepOutputs()).toBe('ahead=2\n')
     })
   })
+
+  describe('Open promotion PR', () => {
+    const OPEN = 'Open promotion PR'
+    const promotionBranches = (): string => git(workDir, 'ls-remote', '--heads', 'origin', 'ci/promote-staging-*')
+
+    beforeEach(() => {
+      landOnStaging(381, 'fix/quota-failover', 'fix: fail over when a vendor runs out of quota')
+    })
+
+    it('records the PR and keeps its branch when the PR opens', () => {
+      expect(runStep(OPEN).status).toBe(0)
+
+      expect(stepOutputs()).toBe('url=https://github.com/humanbased-ai/crosscheck/pull/400\n')
+      expect(promotionBranches()).toContain(git(workDir, 'rev-parse', 'origin/staging'))
+    })
+
+    it('fails, names the missing secret and leaves no branch behind when the PR is refused', () => {
+      const { status, stdout } = runStep(OPEN, { GH_STUB_CREATE: 'refused' })
+
+      expect(status).not.toBe(0)
+      expect(stdout).toContain('::error::')
+      expect(stdout).toContain('RELEASE_TOKEN')
+      expect(stepOutputs()).toBe('')
+      expect(promotionBranches()).toBe('')
+    })
+  })
 })
