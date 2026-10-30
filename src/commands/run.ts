@@ -660,12 +660,18 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         ? await resolveLinearAuth(config.linear, getLinearCredentials(config.linear.auth))
         : null
 
+      // Before the clone, which can queue for longer than the remote lock's stale window.
+      if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
       const { baseRefStatus } = await clonePRForReview({
         owner, repo, prNumber: number, baseRef: prData.base.ref, baseSha: prData.base.sha,
         tmpDir, token, protocol: config.clone_protocol, repositoryCache: config.repository_cache,
         onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref }),
         onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref, via: status }),
         onCacheFailed: message => fileLog({ level: 'warn', event: 'repository_cache_failed', repo: `${owner}/${repo}`, pr: number, error: message }),
+        onCloneWaiting: status => {
+          cloneSpinner.text = status ?? 'Cloning repo...'
+          if (status) fileLog({ level: 'warn', event: 'clone_waiting', repo: `${owner}/${repo}`, pr: number, status })
+        },
       })
       cloneSpinner.succeed('Repo ready')
       if (baseRefStatus === 'unavailable') {
@@ -689,7 +695,6 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       )) ?? undefined
       if (issueContext) console.log(chalk.dim('  issue enrichment: linked tracker issue attached'))
 
-      if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
       let activeSpinner = ora('').start()
 
       const sharedCtx = {

@@ -63,6 +63,8 @@ import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, claimRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
+import { configFingerprint, watchConfigDrift } from '../lib/config-drift.js'
+import { webhookFailureHint, webhookFailureReason, type WebhookFailureReason } from '../lib/webhook-failure.js'
 
 const WEBHOOK_EVENTS = ['pull_request', 'issue_comment']
 
@@ -237,6 +239,7 @@ export interface WatchOpts {
 export async function runWatch(opts: WatchOpts = {}) {
   const configPath = opts.config
   let config = loadConfig(configPath)
+  let loadedConfigFingerprint = configFingerprint(resolveConfigPath(configPath))
   // --port forces the webhook server port for this session only. Overriding
   // config.server.port here propagates to server.listen and both tunnels.
   if (opts.port !== undefined) {
@@ -355,6 +358,7 @@ export async function runWatch(opts: WatchOpts = {}) {
   let idleAnalysisRunning = false
   let idleIntervalRef: ReturnType<typeof setInterval> | null = null
   let backtraceIntervalRef: ReturnType<typeof setInterval> | null = null
+  let stopConfigDriftWatch = () => {}
 
   async function reviewPR(params: ReviewPRParams): Promise<void> {
     lastActivityAt = Date.now()  // reset idle timer on any PR event
@@ -663,12 +667,18 @@ export async function runWatch(opts: WatchOpts = {}) {
           }
         }
 
+        // Before the clone, which can queue for longer than the remote lock's stale window.
+        stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
         const { baseRefStatus } = await clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef, baseSha: params.baseSha,
           tmpDir, token, protocol: config.clone_protocol, repositoryCache: config.repository_cache,
           onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef }),
           onBaseRefRecovered: status => fileLog({ level: 'info', event: 'base_ref_recovered', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef, via: status }),
           onCacheFailed: message => fileLog({ level: 'warn', event: 'repository_cache_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: message }),
+          onCloneWaiting: status => {
+            board.updatePR(key, { label: status ?? 'cloning...' })
+            if (status) fileLog({ level: 'warn', event: 'clone_waiting', repo: `${owner}/${repoName}`, pr: prNumber, status })
+          },
         })
         // Fail closed rather than review a PR whose diff cannot be computed: the
         // vendor would answer "could not review" and that answer would become a
@@ -710,6 +720,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           } catch (err: unknown) {
             logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'no_diff_comment' }, err)
           }
+          stopHeartbeat()
           await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
           // The PR is on the board from before the clone, so close its slot rather
           // than leaving a row that never resolves.
@@ -720,7 +731,6 @@ export async function runWatch(opts: WatchOpts = {}) {
 
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })
-        stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
         const { verdict, fixAppliedCount, strategySkipped } = await runWorkflow({
           owner, repoName, prNumber, pr,
@@ -1204,6 +1214,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     // force=true only for --reconfigure; first-run preserves any manually-configured orgs/authors
     patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, !!opts.reconfigure)
     config = loadConfig(configPath)
+    loadedConfigFingerprint = configFingerprint(resolveConfigPath(configPath))
     // Re-apply the session port override — loadConfig re-read the file, dropping it.
     if (opts.port !== undefined) {
       config = { ...config, server: { ...config.server, port: opts.port } }
@@ -1278,16 +1289,9 @@ export async function runWatch(opts: WatchOpts = {}) {
     | { type: 'org'; org: string; hookId: number }
     | { type: 'repo'; owner: string; repo: string; hookId: number }
 
-  function webhookFailureReason(msg: string, isOrg: boolean): string {
-    const isCreds = /bad credentials|\[401\]/i.test(msg)
-    const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
-      || (isOrg && /\[404\]/i.test(msg))
-    return isCreds ? 'creds' : isScope ? 'scope' : `other:${msg}`
-  }
-
   function addWebhookFailure(
-    failures: Map<string, { labels: string[]; msg: string }>,
-    reason: string,
+    failures: Map<WebhookFailureReason, { labels: string[]; msg: string }>,
+    reason: WebhookFailureReason,
     label: string,
     msg: string,
   ): void {
@@ -1322,6 +1326,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     if (idleIntervalRef !== null) clearInterval(idleIntervalRef)
     if (backtraceIntervalRef !== null) clearInterval(backtraceIntervalRef)
     if (drainIntervalRef !== null) clearInterval(drainIntervalRef)
+    stopConfigDriftWatch()
     board.stop()
     stopSmartSwitch()
     console.log('\nCleaning up...')
@@ -1369,7 +1374,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     console.log(`  workflows   ${labels.map(label => chalk.cyan(label)).join(', ')}${repoWorkflowOverrides.length > 4 ? chalk.dim(` +${repoWorkflowOverrides.length - 4} more`) : ''}`)
   }
   const cfgPath = resolveConfigPath(configPath)
-  console.log(`  config      ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
+  console.log(`  config      ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit and restart to change above')}`)
   if (effectiveDeployment === 'team' && config.routing.allowed_authors.length === 0) {
     console.log(`  authors     ${chalk.dim('all PRs (team mode)')}`)
   } else if (config.routing.allowed_authors.length > 0) {
@@ -1419,6 +1424,23 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   // Board starts after the banner — all output below is live-updated
   board.start()
+
+  stopConfigDriftWatch = watchConfigDrift({
+    loaded: loadedConfigFingerprint,
+    resolvePath: () => resolveConfigPath(configPath),
+    onChange: drifted => {
+      const path = resolveConfigPath(configPath)
+      fileLog({ level: drifted ? 'warn' : 'info', event: drifted ? 'config_changed_since_start' : 'config_matches_session', path })
+      if (!drifted) {
+        board.setConfigDrift(null)
+        return
+      }
+      const warning = `${path ?? 'The config file'} changed since this session started — restart watch to apply it`
+      board.setConfigDrift(warning)
+      // The live block is TTY-only; a non-TTY run would otherwise never see this.
+      board.log(`${chalk.yellow('⚠')} ${warning}`)
+    },
+  })
 
   // ── Idle issue timer ─────────────────────────────────────────────────────
   // When watch has been idle (no PR activity) for the configured duration,
@@ -1516,7 +1538,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     // The smee channel URL never changes, so this survives restarts without creating duplicates.
     let smeeOk = 0, smeeFail = 0
     let smeeTotal = scopes.length
-    const smeeFailuresByReason = new Map<string, { labels: string[]; msg: string }>()
+    const smeeFailuresByReason = new Map<WebhookFailureReason, { labels: string[]; msg: string }>()
     const succeededOrgs = new Set<string>()
 
     for (const scope of scopes) {
@@ -1539,7 +1561,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         const msg = err instanceof Error ? err.message : String(err)
         const fallbackOrg = 'org' in scope ? scope.org : null
         smeeFail++
-        addWebhookFailure(smeeFailuresByReason, webhookFailureReason(msg, fallbackOrg !== null), label, msg)
+        addWebhookFailure(smeeFailuresByReason, await webhookFailureReason(msg, fallbackOrg, token), label, msg)
         fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: msg })
 
         const fallback = fallbackOrg ? fallbackRepos.get(fallbackOrg) ?? [] : []
@@ -1555,7 +1577,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           } catch (fallbackErr: unknown) {
             const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
             smeeFail++
-            addWebhookFailure(smeeFailuresByReason, webhookFailureReason(fallbackMsg, false), repoLabel, fallbackMsg)
+            addWebhookFailure(smeeFailuresByReason, await webhookFailureReason(fallbackMsg, null, token), repoLabel, fallbackMsg)
             fileLog({ level: 'warn', event: 'webhook_error', scope: repoLabel, message: fallbackMsg, fallback_for_org: fallbackOrg })
           }
         }))
@@ -1585,13 +1607,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       const overflow = count - shown.length
       const sample = shown.join(', ') + (overflow > 0 ? ` +${overflow} more` : '')
       const noun = count === 1 ? 'webhook' : 'webhooks'
-      if (reason === 'creds') {
-        cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: token invalid — run: ${chalk.cyan('gh auth refresh')}`)
-      } else if (reason === 'scope') {
-        cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: missing scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
-      } else {
-        cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: ${msg}`)
-      }
+      cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: ${webhookFailureHint(reason, msg, authenticatedLogin)}`)
       cLog(`  ${chalk.dim(sample)}`)
     }
     cLog(`${smeeFail === 0 ? chalk.green('✓') : chalk.yellow('⚠')} webhooks registered: ${smeeOk}/${smeeTotal}${smeeFail > 0 ? ` (${smeeFail} failed)` : ''}`)
@@ -1664,7 +1680,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     currentRegistered = []
     let hookOk = 0, hookFail = 0
     let hookTotal = scopes.length
-    const failuresByReason = new Map<string, { labels: string[]; msg: string }>()
+    const failuresByReason = new Map<WebhookFailureReason, { labels: string[]; msg: string }>()
 
     await Promise.all(scopes.map(async (scope) => {
       const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
@@ -1721,7 +1737,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       } else {
         const fallbackOrg = 'org' in scope ? scope.org : null
         hookFail++
-        addWebhookFailure(failuresByReason, webhookFailureReason(lastErr, fallbackOrg !== null), label, lastErr)
+        addWebhookFailure(failuresByReason, await webhookFailureReason(lastErr, fallbackOrg, token), label, lastErr)
         fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: lastErr })
 
         const fallback = fallbackOrg ? fallbackRepos.get(fallbackOrg) ?? [] : []
@@ -1755,7 +1771,7 @@ export async function runWatch(opts: WatchOpts = {}) {
             fileLog({ level: 'info', event: 'webhook_registered', scope: repoLabel, url: webhookUrl, fallback_for_org: fallbackOrg })
           } else {
             hookFail++
-            addWebhookFailure(failuresByReason, webhookFailureReason(fallbackLastErr, false), repoLabel, fallbackLastErr)
+            addWebhookFailure(failuresByReason, await webhookFailureReason(fallbackLastErr, null, token), repoLabel, fallbackLastErr)
             fileLog({ level: 'warn', event: 'webhook_error', scope: repoLabel, message: fallbackLastErr, fallback_for_org: fallbackOrg })
           }
         }))
@@ -1769,13 +1785,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       const overflow = count - shown.length
       const sample = shown.join(', ') + (overflow > 0 ? ` +${overflow} more` : '')
       const noun = count === 1 ? 'webhook' : 'webhooks'
-      if (reason === 'creds') {
-        bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: token invalid — run: ${chalk.cyan('gh auth refresh')}`)
-      } else if (reason === 'scope') {
-        bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: missing scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
-      } else {
-        bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: ${msg}`)
-      }
+      bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: ${webhookFailureHint(reason, msg, authenticatedLogin)}`)
       bLog(`    ${chalk.dim(sample)}`)
       bLog(`  manual Payload URL: ${chalk.cyan(webhookUrl)}`)
     }

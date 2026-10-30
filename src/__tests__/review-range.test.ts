@@ -131,7 +131,7 @@ beforeEach(() => {
   process.env.HOME = join(root, 'home')
   process.env.GIT_CONFIG_COUNT = '1'
   process.env.GIT_CONFIG_KEY_0 = `url.file://${origin}.insteadOf`
-  process.env.GIT_CONFIG_VALUE_0 = 'https://x-access-token:test-token@github.com/team/monorepo.git'
+  process.env.GIT_CONFIG_VALUE_0 = 'https://github.com/team/monorepo.git'
 })
 
 afterEach(() => {

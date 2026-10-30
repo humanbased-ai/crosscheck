@@ -791,6 +791,10 @@ Uses `localhost.run` (SSH) to open a public tunnel — SSH is pre-installed on m
 | `--backtrace` / `--no-backtrace` | Force on/off the scan for unreviewed open PRs |
 | `--backtrace-interval <min>` | Minutes between backtrace re-scans this session (`0` = startup only) |
 
+`watch` reads its config once at startup. If the file changes while it runs, the board shows a warning until you restart it or revert the edit.
+
+An org webhook needs an org owner as well as the `admin:org_hook` scope, and GitHub answers 404 when either is missing. `watch` reads the token's scopes and the account's membership and tells you which it is. On a classic token that check needs `read:org`; without it, or on a fine-grained or App token, the message says the cause could not be confirmed.
+
 ---
 
 ### `crosscheck status`
@@ -1679,7 +1683,7 @@ The fix (file lock for same-machine + GitHub commit status for cross-machine) is
 - **Webhook signature** — every request verified with HMAC-SHA256 before parsing
 - **Temp isolation** — each PR cloned into a fresh temp dir, deleted after review
 - **Read-only tools** — Claude restricted to `git diff` and `git log` only
-- **Temp credential isolation** — with `clone_protocol: ssh` (default) no tokens touch disk; with `clone_protocol: https` a short-lived token is embedded in the temp clone's remote URL and removed when the temp dir is deleted after review
+- **Temp credential isolation** — no tokens touch disk with either protocol. `clone_protocol: ssh` (default) uses your SSH keys. `clone_protocol: https` gives git the token through a credential helper that reads it from that one process's environment, so it is not in the remote URL, `.git/config`, or `ps`; this needs git 2.31 or newer.
 - **Skill package validation** — installs reject unsafe names, attribution injection, symbolic links, packages over 1,000 files or 10 MiB, and collisions; Git sources record their checked-out commit
 - **Skill integrity** — Crosscheck verifies every installed package against its SHA-256 receipt before exposing it to agents; modified or malformed packages fail closed and appear as unavailable in `crosscheck status`
 - **Skill execution boundary** — the activation broker exposes instructions and referenced files but never executes bundled scripts itself. Skills are third-party instructions: inspect their source and license before enabling them; the selected coding agent still operates under its normal sandbox and permissions
@@ -1873,10 +1877,13 @@ work with `review`, `run`/`recheck`, and `watch`; no CLI flags change.
 
 The repository cache lives in `~/.crosscheck/repository-cache`. It fetches the
 PR head under a per-repository lock and makes an independent checkout with no
-hardlinks or object alternates. Cache credentials are never stored: only the
-temporary checkout has the authenticated remote URL, as before. A cold fetch
+hardlinks or object alternates. Credentials are stored in neither the cache nor
+the checkout: git reads the token from a credential helper's environment. A cold fetch
 still costs network time; concurrent preparation for the same repository waits
-for the lock. A lock whose owning process has exited (or that is older than 30
+for the lock. After two minutes a waiting review may use a fresh clone instead, but
+at most two fresh clones run at once across the machine, with or without the cache;
+the rest keep waiting and show `waiting for ...` on the board (logged as
+`clone_waiting`). A lock whose owning process has exited (or that is older than 30
 minutes) is broken automatically. The cache fetch uses the same network retries
 as a fresh clone; if the cache fails anyway it is discarded and the review falls
 back to a fresh clone. Caches unused for 30 days are pruned. Disable the option

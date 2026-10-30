@@ -19,6 +19,15 @@ const LOCK_WAIT_MS = 120_000
 // owner process is gone, or one far older than any real fetch, is broken.
 const LOCK_STALE_MS = 30 * 60_000
 const UNUSED_CACHE_MS = 30 * 24 * 60 * 60_000
+const MAX_FRESH_CLONES = 2
+const FRESH_CLONE_POLL_MS = 250
+
+export class RepositoryCacheBusyError extends Error {
+  constructor(label: string, lock: string) {
+    super(`Repository cache busy: ${label}; retry later or remove ${lock} after verifying its owner stopped`)
+    this.name = 'RepositoryCacheBusyError'
+  }
+}
 
 function isErrorCode(err: unknown, code: string): boolean {
   return err instanceof Error && 'code' in err && err.code === code
@@ -58,8 +67,8 @@ async function tryLock(lock: string): Promise<boolean> {
   return true
 }
 
-async function acquireLock(lock: string, label: string): Promise<void> {
-  const deadline = Date.now() + LOCK_WAIT_MS
+async function acquireLock(lock: string, label: string, waitMs: number): Promise<void> {
+  const deadline = Date.now() + waitMs
   // Polling a filesystem lock is inherently sequential.
   for (;;) {
     if (await tryLock(lock)) return
@@ -67,7 +76,7 @@ async function acquireLock(lock: string, label: string): Promise<void> {
       await rm(lock, { recursive: true, force: true })
       continue
     }
-    if (Date.now() >= deadline) throw new Error(`Repository cache busy: ${label}; retry later or remove ${lock} after verifying its owner stopped`)
+    if (Date.now() >= deadline) throw new RepositoryCacheBusyError(label, lock)
     await sleep(100)
   }
 }
@@ -89,7 +98,7 @@ async function pruneUnused(root: string, keep: string): Promise<void> {
 // Each checkout owns its objects and config. Agents never receive an alternates
 // link or shared worktree metadata pointing back into the cache.
 export async function cloneFromCache(input: {
-  source: string; repository: string; prNumber: number; destination: string; root?: string; git?: CacheGitRunner
+  source: string; repository: string; prNumber: number; destination: string; root?: string; git?: CacheGitRunner; lockWaitMs?: number
 }): Promise<void> {
   const root = input.root ?? join(homedir(), '.crosscheck', 'repository-cache')
   const git = input.git ?? defaultRunner
@@ -99,7 +108,7 @@ export async function cloneFromCache(input: {
   await mkdir(root, { recursive: true, mode: 0o700 })
   // mkdir's mode only applies on creation; the cache holds private source.
   await chmod(root, 0o700)
-  await acquireLock(lock, key)
+  await acquireLock(lock, key, input.lockWaitMs ?? LOCK_WAIT_MS)
   try {
     // Fetch by URL, not a stored remote: the operator's token never enters the cache config.
     const branch = `cache-pr-${input.prNumber}`
@@ -133,4 +142,37 @@ export async function cloneFromCache(input: {
     await rm(lock, { recursive: true, force: true })
   }
   await pruneUnused(root, cache)
+}
+
+export type ReleaseFreshClone = () => Promise<void>
+
+/**
+ * Takes one of the machine-wide slots a fresh clone must hold, or returns null when
+ * none is free. Reviews waiting on a busy cache all give up at the same moment, so
+ * without a cap a burst of PR events turns into the same number of full clones, each
+ * writing a checkout to disk at once. Slots are lock directories because the reviews
+ * can be separate processes: `watch` clones in-process, `run` and `review` do not.
+ */
+export async function tryClaimFreshClone(): Promise<ReleaseFreshClone | null> {
+  const dir = join(homedir(), '.crosscheck', 'fresh-clone-slots')
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  // Sequential on purpose: the first free slot ends the search.
+  for (let slot = 0; slot < MAX_FRESH_CLONES; slot++) {
+    const lock = join(dir, `${slot}.lock`)
+    if (await lockIsStale(lock)) await rm(lock, { recursive: true, force: true })
+    if (await tryLock(lock)) return () => rm(lock, { recursive: true, force: true })
+  }
+  return null
+}
+
+export async function claimFreshClone(onWaiting?: () => void): Promise<ReleaseFreshClone> {
+  let release = await tryClaimFreshClone()
+  if (release === null) onWaiting?.()
+  // Polling a filesystem lock is inherently sequential. Bounded by the holders: a clone
+  // that stalls is killed by git's low-speed limit, and a dead or ancient slot is stale.
+  while (release === null) {
+    await sleep(FRESH_CLONE_POLL_MS)
+    release = await tryClaimFreshClone()
+  }
+  return release
 }

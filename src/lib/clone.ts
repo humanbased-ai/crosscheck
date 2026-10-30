@@ -7,7 +7,7 @@ import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 import { getGitIdentityFromEnv } from '../config/loader.js'
 import { getMergeBase } from '../github/client.js'
-import { cloneFromCache } from './repository-cache.js'
+import { claimFreshClone, cloneFromCache, RepositoryCacheBusyError, tryClaimFreshClone, type ReleaseFreshClone } from './repository-cache.js'
 
 const GIT_RESILIENCE_ARGS = [
   '-c', 'http.postBuffer=524288000',
@@ -48,11 +48,41 @@ export function isolateGitConfig(): void {
 }
 
 // Bypass `gh repo clone` so gh's keyring auth (which may bridge to VS Code's
-// GitHub extension) is never invoked. HTTPS embeds the token in the URL.
-function buildCloneUrl(owner: string, repo: string, token: string, protocol: Config['clone_protocol']): string {
+// GitHub extension) is never invoked.
+function buildCloneUrl(owner: string, repo: string, protocol: Config['clone_protocol']): string {
   return protocol === 'https'
-    ? `https://x-access-token:${token}@github.com/${owner}/${repo}.git`
+    ? `https://github.com/${owner}/${repo}.git`
     : `git@github.com:${owner}/${repo}.git`
+}
+
+const GIT_TOKEN_VAR = 'CROSSCHECK_GIT_TOKEN'
+
+/**
+ * Authenticates a git child without putting the token in a URL. Git hands a remote's
+ * URL to git-remote-https on its command line, so a token in the clone URL, or in
+ * `origin` for every later fetch and push, is readable by anyone who can run `ps`.
+ *
+ * The helper reads the token from the environment, so the shell running it shows only
+ * the variable's name, and it is set through GIT_CONFIG_* because `-c` is argv again.
+ * Scoping it to github.com keeps the token from a redirect to another host, and the
+ * empty value first drops any helper already configured, such as one an agent planted
+ * in .git/config.
+ *
+ * Spread this into a git child's environment, never into process.env: vendor agents
+ * inherit process.env, and an agent must not be able to push as the operator.
+ */
+export function gitCredentialEnv(token: string): NodeJS.ProcessEnv {
+  const next = Number(process.env.GIT_CONFIG_COUNT ?? 0)
+  return {
+    [GIT_TOKEN_VAR]: token,
+    // A helper that did not answer must fail the command, not wait on a terminal.
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_COUNT: String(next + 2),
+    [`GIT_CONFIG_KEY_${next}`]: 'credential.helper',
+    [`GIT_CONFIG_VALUE_${next}`]: '',
+    [`GIT_CONFIG_KEY_${next + 1}`]: 'credential.https://github.com.helper',
+    [`GIT_CONFIG_VALUE_${next + 1}`]: `!f() { test "$1" = get && printf 'username=x-access-token\\npassword=%s\\n' "$${GIT_TOKEN_VAR}"; }; f`,
+  }
 }
 
 export function redactCloneSecrets(value: string): string {
@@ -68,15 +98,19 @@ function isTransientGitError(message: string): boolean {
   return /curl 16|http2 framing|curl 18|partial file|early eof|rpc failed|unexpected disconnect|fetch-pack: invalid|bytes of body.*expected/.test(m)
 }
 
+// How long a review already queued for a busy cache holds out for it before checking
+// whether a fresh clone slot has opened. The first wait is the cache's own, and longer.
+const CACHE_REQUEUE_WAIT_MS = 5_000
+
 const MAX_GIT_RETRIES = 3
 const GIT_RETRY_DELAY_MS = 2000
 
-async function runGit(args: string[], cwd?: string, retryable = false, onProgress?: (line: string) => void): Promise<void> {
+async function runGit(args: string[], cwd?: string, retryable = false, onProgress?: (line: string) => void, env?: NodeJS.ProcessEnv): Promise<void> {
   isolateGitConfig()
   let lastErr: Error | undefined
   for (let attempt = 1; attempt <= (retryable ? MAX_GIT_RETRIES : 1); attempt++) {
     try {
-      const subprocess = execa('git', args, { cwd })
+      const subprocess = execa('git', args, { cwd, ...(env !== undefined && { env }) })
       if (onProgress && subprocess.stderr) {
         // git emits progress on stderr as \r-terminated updates ("Receiving
         // objects: 42% ..."); flush on both \r and \n so each update surfaces.
@@ -201,15 +235,18 @@ export async function clonePRForReview(params: {
   onProgress?: (line: string) => void
   /** The repository cache failed and a fresh clone is being used instead. */
   onCacheFailed?: (message: string) => void
+  /** What this review is queued behind, then null once it moves on. */
+  onCloneWaiting?: (status: string | null) => void
 }): Promise<CloneResult> {
   // Isolation is scoped here, not globally in cli.ts, so commands like `skill install`
   // that don't execute agents keep using the operator's normal Git config (credential
   // helpers, url.*.insteadOf, CA/proxy settings).
   isolateGitConfig()
   const { owner, repo, prNumber, baseRef, baseSha, tmpDir, token, protocol, onBaseFetchFailed, onBaseRefRecovered, onProgress } = params
-  const cloneUrl = buildCloneUrl(owner, repo, token, protocol)
+  const cloneUrl = buildCloneUrl(owner, repo, protocol)
+  const gitEnv = gitCredentialEnv(token)
   const checkout = (deepenOnMismatch: boolean): Promise<CloneResult> => checkoutPRAgainstBase({
-    tmpDir, baseRef, prNumber, deepenOnMismatch,
+    tmpDir, baseRef, prNumber, deepenOnMismatch, gitEnv,
     githubMergeBase: (base, head) => getMergeBase(owner, repo, base, head, token),
     ...(baseSha !== undefined && { baseSha }),
     ...(onBaseFetchFailed !== undefined && { onBaseFetchFailed }),
@@ -217,21 +254,46 @@ export async function clonePRForReview(params: {
     ...(onProgress !== undefined && { onProgress }),
   })
 
+  let waitingFor: string | null = null
+  const reportWaiting = (status: string): void => {
+    if (status !== waitingFor) params.onCloneWaiting?.(status)
+    waitingFor = status
+  }
+  const reportWaitOver = (): void => {
+    if (waitingFor !== null) params.onCloneWaiting?.(null)
+    waitingFor = null
+  }
+
+  let releaseFreshClone: ReleaseFreshClone | null = null
   if (params.repositoryCache) {
     let cached = false
-    try {
-      await cloneFromCache({
-        source: cloneUrl, repository: `${owner}/${repo}`, prNumber, destination: tmpDir,
-        // Same hardening as the fresh clone: resilience flags, transient retries,
-        // progress, and redacted errors for the one step that hits the network.
-        git: (subcommand, args, { cwd, network }) => network
-          ? runGit([...GIT_RESILIENCE_ARGS, subcommand, ...(onProgress ? ['--progress'] : []), ...args], cwd, true, onProgress)
-          : runGit([subcommand, ...args], cwd),
-      })
-      cached = true
-    } catch (err) {
-      params.onCacheFailed?.(redactCloneSecrets(err instanceof Error ? err.message : String(err)))
+    // A busy cache is not a broken one, so this keeps queueing for it unless a fresh
+    // clone can start right now. Sequential because cloneFromCache is what waits: it
+    // only reports busy after holding out for the lock.
+    while (!cached && releaseFreshClone === null) {
+      try {
+        await cloneFromCache({
+          source: cloneUrl, repository: `${owner}/${repo}`, prNumber, destination: tmpDir,
+          ...(waitingFor !== null && { lockWaitMs: CACHE_REQUEUE_WAIT_MS }),
+          // Same hardening as the fresh clone: resilience flags, transient retries,
+          // progress, and redacted errors for the one step that hits the network.
+          git: (subcommand, args, { cwd, network }) => network
+            ? runGit([...GIT_RESILIENCE_ARGS, subcommand, ...(onProgress ? ['--progress'] : []), ...args], cwd, true, onProgress, gitEnv)
+            : runGit([subcommand, ...args], cwd),
+        })
+        cached = true
+      } catch (err) {
+        const message = redactCloneSecrets(err instanceof Error ? err.message : String(err))
+        if (!(err instanceof RepositoryCacheBusyError)) {
+          params.onCacheFailed?.(message)
+          break
+        }
+        releaseFreshClone = await tryClaimFreshClone()
+        if (releaseFreshClone === null) reportWaiting('waiting for the repository cache')
+        else params.onCacheFailed?.(message)
+      }
     }
+    reportWaitOver()
     if (cached) {
       try {
         return await checkout(false)
@@ -248,13 +310,20 @@ export async function clonePRForReview(params: {
     }
   }
 
-  // Clone is retryable — transient network issues (curl 16/18, framing errors) are common.
-  // GIT_RESILIENCE_ARGS inline (-c flags) apply HTTP buffer/timeout settings without
-  // requiring a local repo to already exist.
-  // --progress forces git to emit stderr progress even when piped; without a
-  // progress consumer, stay --quiet so error output remains clean.
-  await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress)
-  return checkout(true)
+  releaseFreshClone ??= await claimFreshClone(() => reportWaiting('waiting for a fresh clone slot'))
+  reportWaitOver()
+  try {
+    // Clone is retryable — transient network issues (curl 16/18, framing errors) are common.
+    // GIT_RESILIENCE_ARGS inline (-c flags) apply HTTP buffer/timeout settings without
+    // requiring a local repo to already exist.
+    // --progress forces git to emit stderr progress even when piped; without a
+    // progress consumer, stay --quiet so error output remains clean.
+    await runGit([...GIT_RESILIENCE_ARGS, 'clone', '--depth=50', onProgress ? '--progress' : '--quiet', cloneUrl, tmpDir], undefined, true, onProgress, gitEnv)
+    // Held through the checkout: its fetches, and deepening the base, cost more than the clone.
+    return await checkout(true)
+  } finally {
+    await releaseFreshClone()
+  }
 }
 
 async function checkoutPRAgainstBase(params: {
@@ -264,13 +333,14 @@ async function checkoutPRAgainstBase(params: {
   baseSha?: string
   /** Fetch the base's whole history when its range proves wrong. Only a fresh clone is worth that. */
   deepenOnMismatch: boolean
+  gitEnv: NodeJS.ProcessEnv
   githubMergeBase: (base: string, head: string) => Promise<string>
   onBaseFetchFailed?: () => void
   onBaseRefRecovered?: (status: BaseRefStatus) => void
   onProgress?: (line: string) => void
 }): Promise<CloneResult> {
-  const { tmpDir, baseRef, prNumber, baseSha, deepenOnMismatch, githubMergeBase, onBaseFetchFailed, onBaseRefRecovered, onProgress } = params
-  await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir, true, onProgress)
+  const { tmpDir, baseRef, prNumber, baseSha, deepenOnMismatch, gitEnv, githubMergeBase, onBaseFetchFailed, onBaseRefRecovered, onProgress } = params
+  await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), 'origin', `pull/${prNumber}/head:pr-${prNumber}`], tmpDir, true, onProgress, gitEnv)
   await runGit(['checkout', `pr-${prNumber}`], tmpDir)
 
   // Fetch base after PR checkout so we are never on the base branch during the fetch
@@ -283,7 +353,7 @@ async function checkoutPRAgainstBase(params: {
   // back to counting the whole history — which trips the auto-fix commit cap on
   // any repo with prior [crosscheck] commits and silently disables fixing.
   const baseRefStatus = await resolveBaseRef({
-    tmpDir, baseRef, prNumber,
+    tmpDir, baseRef, prNumber, gitEnv,
     ...(baseSha !== undefined && { baseSha }),
     ...(onBaseFetchFailed !== undefined && { onBaseFetchFailed }),
     ...(onBaseRefRecovered !== undefined && { onBaseRefRecovered }),
@@ -302,7 +372,7 @@ async function checkoutPRAgainstBase(params: {
       // reserved for a range that was just proven wrong, in a clone that has no
       // cheaper fallback — the cached checkout falls back to this clone instead.
       if (!deepenOnMismatch || !(err instanceof ReviewRangeMismatchError) || !isShallowRepository(tmpDir)) throw err
-      await deepenBaseRef({ tmpDir, baseRef, onProgress })
+      await deepenBaseRef({ tmpDir, baseRef, gitEnv, onProgress })
       await verifyReviewRange({ tmpDir, baseRef, githubMergeBase })
     }
   }
@@ -316,10 +386,10 @@ function isShallowRepository(tmpDir: string): boolean {
 // Fetched by commit, not name: the base ref may have been recovered from a sha or a
 // merge ref and exist only locally, and `--unshallow` lifts the depth limit on
 // everything the fetch reaches, which is the base's whole history.
-async function deepenBaseRef(params: { tmpDir: string; baseRef: string; onProgress?: (line: string) => void }): Promise<void> {
-  const { tmpDir, baseRef, onProgress } = params
+async function deepenBaseRef(params: { tmpDir: string; baseRef: string; gitEnv: NodeJS.ProcessEnv; onProgress?: (line: string) => void }): Promise<void> {
+  const { tmpDir, baseRef, gitEnv, onProgress } = params
   const tip = execFileSync('git', ['rev-parse', '--verify', `refs/remotes/origin/${baseRef}^{commit}`], { cwd: tmpDir, encoding: 'utf8' }).trim()
-  await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), '--unshallow', 'origin', tip], tmpDir, true, onProgress)
+  await runGit([...GIT_RESILIENCE_ARGS, 'fetch', ...(onProgress ? ['--progress'] : []), '--unshallow', 'origin', tip], tmpDir, true, onProgress, gitEnv)
 }
 
 /**
@@ -337,6 +407,7 @@ export async function resolveBaseRef(params: {
   baseRef: string
   prNumber: number
   baseSha?: string
+  gitEnv?: NodeJS.ProcessEnv
   onBaseFetchFailed?: () => void
   onBaseRefRecovered?: (status: BaseRefStatus) => void
 }): Promise<BaseRefStatus> {
@@ -344,10 +415,10 @@ export async function resolveBaseRef(params: {
   // and reachable on its own, and every public git entry point in this module
   // isolates for itself rather than trusting its caller to have done it.
   isolateGitConfig()
-  const { tmpDir, baseRef, prNumber, baseSha, onBaseFetchFailed, onBaseRefRecovered } = params
+  const { tmpDir, baseRef, prNumber, baseSha, gitEnv, onBaseFetchFailed, onBaseRefRecovered } = params
   let baseRefStatus: BaseRefStatus = 'fetched'
   try {
-    await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir, true)
+    await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `${baseRef}:refs/remotes/origin/${baseRef}`], tmpDir, true, undefined, gitEnv)
   } catch {
     onBaseFetchFailed?.()
     baseRefStatus = 'unavailable'
@@ -368,7 +439,7 @@ export async function resolveBaseRef(params: {
   // the PR is further behind than that, which cuts the base off from the merge base.
   if (baseRefStatus === 'unavailable' && baseSha) {
     try {
-      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', baseSha], tmpDir, true)
+      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', baseSha], tmpDir, true, undefined, gitEnv)
       execFileSync('git', ['update-ref', `refs/remotes/origin/${baseRef}`, 'FETCH_HEAD'], { cwd: tmpDir, stdio: 'ignore' })
       if (refExists(tmpDir, `refs/remotes/origin/${baseRef}`)) baseRefStatus = 'recovered_by_sha'
     } catch { /* fall through to the merge-ref recovery */ }
@@ -380,7 +451,7 @@ export async function resolveBaseRef(params: {
   // reason as recovery 1.
   if (baseRefStatus === 'unavailable') {
     try {
-      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `pull/${prNumber}/merge:refs/crosscheck/pr-${prNumber}-merge`], tmpDir, true)
+      await runGit([...GIT_RESILIENCE_ARGS, 'fetch', 'origin', `pull/${prNumber}/merge:refs/crosscheck/pr-${prNumber}-merge`], tmpDir, true, undefined, gitEnv)
       const parent = execFileSync('git', ['rev-parse', `refs/crosscheck/pr-${prNumber}-merge^1`], { cwd: tmpDir, encoding: 'utf8' }).trim()
       execFileSync('git', ['update-ref', `refs/remotes/origin/${baseRef}`, parent], { cwd: tmpDir, stdio: 'ignore' })
       if (refExists(tmpDir, `refs/remotes/origin/${baseRef}`)) baseRefStatus = 'recovered_by_merge_ref'
@@ -538,18 +609,13 @@ export function changedFilesVsBase(tmpDir: string, baseRef: string): ChangedFile
   }
 }
 
-// Runs `fn` with the clone's `origin` URL stripped of its embedded credentials.
+// Runs `fn` with the clone's `origin` URL stripped of any embedded credentials.
 //
-// An HTTPS clone stores `https://x-access-token:<token>@github.com/...` in
-// .git/config, so the checkout carries a writable GitHub token as a plain file.
-// That is fine while only crosscheck runs there, and not fine once a vendor
-// agent executes shell commands in it — reading .git/config or simply running
-// `git push` is then enough to act on the repository as the token's owner.
-//
-// The token is not needed while an agent runs: reviews only read, and the fix
-// step's push happens back in the runner after the agent has exited. So it is
-// removed for the duration and restored afterwards, whether `fn` returned or
-// threw. A crash hard enough to skip that loses only the throwaway clone.
+// clonePRForReview no longer writes a token into .git/config, but a checkout that
+// carries one anyway must not reach a vendor agent: reading .git/config or simply
+// running `git push` would then be enough to act on the repository as the token's
+// owner. It is removed for the duration and restored afterwards, whether `fn`
+// returned or threw. A crash hard enough to skip that loses only the throwaway clone.
 //
 // Git config is the second half of the same hole: hooks, fsmonitor, filters, and
 // other settings can execute programs during the runner's later Git commands.

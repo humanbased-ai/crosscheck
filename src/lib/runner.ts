@@ -43,7 +43,7 @@ import { loadSkillCatalog } from '../skills/catalog.js'
 import { createSkillActivationSession, type SkillActivationSession } from '../skills/broker.js'
 import { formatSkillAttribution } from '../skills/attribution.js'
 import { parseAuthorAttribution } from './author-attribution.js'
-import { CompromisedCloneError, runGitWithoutHooks, changedFilesVsBase } from './clone.js'
+import { CompromisedCloneError, gitCredentialEnv, runGitWithoutHooks, changedFilesVsBase } from './clone.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
@@ -1103,7 +1103,7 @@ export async function pushWithNonFastForwardHandling(params: {
   prNumber: number
 }): Promise<void> {
   const { tmpDir, branch, token, log, fileLog, owner, repoName, prNumber } = params
-  const env = { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token }
+  const env = { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token, ...gitCredentialEnv(token) }
   
   try {
     runGitWithoutHooks(tmpDir, ['push', 'origin', `HEAD:${branch}`], env)
@@ -2114,7 +2114,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           // Fallback: the fix could not land on the PR branch. Push the same commit to a
           // dedicated branch and open a follow-up PR targeting the original branch.
           const fixBranch = autoFixBranchName(prNumber)
-          const gitEnv = { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token }
+          const gitEnv = { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token, ...gitCredentialEnv(token) }
           const octokit = createGithubClient(token)
 
           // The fallback commit exists only in this clone until something pushes it, so
