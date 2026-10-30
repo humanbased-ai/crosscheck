@@ -180,7 +180,7 @@ export const RoutingConfigSchema = z.object({
   // and detection falls through to `fallback_reviewer` instead. A static author→vendor
   // map would silently mis-route PRs when the author switches between agents — set
   // `fallback_reviewer` to handle this case explicitly.
-  author_routes: z.record(z.enum(['claude', 'codex', 'opencode'])).default({}),
+  author_routes: z.record(z.string(), z.enum(['claude', 'codex', 'opencode'])).default({}),
   // When origin detection cannot determine a vendor (origin: human), use this reviewer
   // instead of skipping the PR.
   // 'auto' = pick whichever vendor is currently enabled (codex first, then claude).
@@ -228,7 +228,7 @@ export const LogsConfigSchema = z.object({
   enabled: z.boolean().default(true),
   retention_days: z.number().int().min(1).max(365).default(30),
   // Not exposed in CLI or onboard — see consent note above.
-  extended: ExtendedLoggingSchema.default({}),
+  extended: ExtendedLoggingSchema.prefault({}),
 })
 
 export const TunnelConfigSchema = z.object({
@@ -284,7 +284,7 @@ export const WatchIdleIssueSchema = z.object({
 })
 
 export const WatchConfigSchema = z.object({
-  idle_issue: WatchIdleIssueSchema.default({}),
+  idle_issue: WatchIdleIssueSchema.prefault({}),
 })
 
 export const PostReviewDeliverySchema = z.object({
@@ -302,7 +302,7 @@ export const PostReviewDeliverySchema = z.object({
 // workflow.yml (type, when, reviewer). This schema retains only the delivery
 // mechanism — how fixes land on the PR — which is operational config, not pipeline logic.
 export const PostReviewFixSchema = z.object({
-  delivery: PostReviewDeliverySchema.default({}),
+  delivery: PostReviewDeliverySchema.prefault({}),
   // Migration compat: honored with a deprecation warning but no longer the control plane.
   // Remove these from config and use workflow.yml to control when fix steps run.
   enabled: z.boolean().optional(),
@@ -310,7 +310,7 @@ export const PostReviewFixSchema = z.object({
 })
 
 export const PostReviewConfigSchema = z.object({
-  auto_fix: PostReviewFixSchema.default({}),
+  auto_fix: PostReviewFixSchema.prefault({}),
 })
 
 export const DisplayThemeSchema = z.object({
@@ -323,7 +323,7 @@ export const DisplayThemeSchema = z.object({
 })
 
 export const DisplayConfigSchema = z.object({
-  theme: DisplayThemeSchema.default({}),
+  theme: DisplayThemeSchema.prefault({}),
 })
 
 export const BrandConfigSchema = z.object({
@@ -376,8 +376,8 @@ export type LinearVerdictFilter = z.infer<typeof LinearVerdictFilterSchema>
 
 export const LinearConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  auth: LinearAuthConfigSchema.default({}),
-  identity: LinearIdentityConfigSchema.default({}),
+  auth: LinearAuthConfigSchema.prefault({}),
+  identity: LinearIdentityConfigSchema.prefault({}),
   // Which verdicts get mirrored to the linked Linear issue. Defaults to the ones
   // that need someone to act: a clean PR posting an APPROVE onto its issue is noise
   // on every green review. Add 'APPROVE' (and 'UNKNOWN') to hear about those too.
@@ -400,29 +400,29 @@ export const ConfigSchema = z.object({
   clone_protocol: z.enum(['ssh', 'https']).default('ssh'),
   repository_cache: z.boolean().default(true),
   vendors: z.object({
-    codex: CodexVendorConfigSchema.default({}),
-    claude: VendorConfigSchema.default({}),
-    opencode: OpenCodeVendorConfigSchema.default({}),
-  }).default({}),
-  quality: QualityConfigSchema.default({}),
-  skills: SkillsConfigSchema.default({}),
-  budget: BudgetConfigSchema.default({}),
+    codex: CodexVendorConfigSchema.prefault({}),
+    claude: VendorConfigSchema.prefault({}),
+    opencode: OpenCodeVendorConfigSchema.prefault({}),
+  }).prefault({}),
+  quality: QualityConfigSchema.prefault({}),
+  skills: SkillsConfigSchema.prefault({}),
+  budget: BudgetConfigSchema.prefault({}),
   orgs: z.array(z.string()).default([]),
   users: z.array(z.string()).default([]),
   repos: z.array(RepoConfigSchema).default([]),
-  routing: RoutingConfigSchema.default({}),
+  routing: RoutingConfigSchema.prefault({}),
   agent_priority: AgentPriorityConfigSchema,
-  server: ServerConfigSchema.default({}),
-  tunnel: TunnelConfigSchema.default({}),
-  logs: LogsConfigSchema.default({}),
-  impact: ImpactConfigSchema.default({}),
-  backtrace: BacktraceConfigSchema.default({}),
-  issue_enrichment: IssueEnrichmentConfigSchema.default({}),
-  watch: WatchConfigSchema.default({}),
-  post_review: PostReviewConfigSchema.default({}),
-  display: DisplayConfigSchema.default({}),
-  brand: BrandConfigSchema.default({}),
-  linear: LinearConfigSchema.default({}),
+  server: ServerConfigSchema.prefault({}),
+  tunnel: TunnelConfigSchema.prefault({}),
+  logs: LogsConfigSchema.prefault({}),
+  impact: ImpactConfigSchema.prefault({}),
+  backtrace: BacktraceConfigSchema.prefault({}),
+  issue_enrichment: IssueEnrichmentConfigSchema.prefault({}),
+  watch: WatchConfigSchema.prefault({}),
+  post_review: PostReviewConfigSchema.prefault({}),
+  display: DisplayConfigSchema.prefault({}),
+  brand: BrandConfigSchema.prefault({}),
+  linear: LinearConfigSchema.prefault({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
