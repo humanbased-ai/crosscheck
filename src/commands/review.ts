@@ -9,7 +9,7 @@ import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detec
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runOpenCodeReview } from '../reviewers/opencode.js'
-import { loadConfig, getGithubToken, getLinearCredentials } from '../config/loader.js'
+import { loadConfig, getGithubToken, getLinearCredentials, resolveReviewerToken } from '../config/loader.js'
 import { resolveLinearAuth, withWorker, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
@@ -62,6 +62,23 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     process.exit(1)
   }
   const { owner, repo, number } = parsed
+
+  // Review output may be posted by a GitHub App rather than the operator. Resolve
+  // it after the PR is parsed, since an unpinned installation is resolved from
+  // the repo. Only when an app is configured: the default path reuses the actor
+  // token instead of resolving a second credential. A configured-but-broken app
+  // fails here, before the clone and the vendor calls are paid for.
+  let reviewerToken = token
+  if (config.github.app.app_id !== null) {
+    try {
+      reviewerToken = (await resolveReviewerToken(config, { owner, repo })).token
+    } catch (err) {
+      logError({ command: 'review', phase: 'auth' }, err)
+      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+      process.exit(1)
+    }
+  }
+  const reviewerOctokit = createGithubClient(reviewerToken)
 
   const spinner = ora(`Fetching PR #${number}...`).start()
   const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
@@ -363,7 +380,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       assertReviewFresh(memoryPlan, current, pr.head.sha, pr.head.sha, pr.state)
     }
     await postReviewComment(
-      octokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort,
+      reviewerOctokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort,
       strategyCitation(reviewer === 'codex' ? config.vendors.codex : reviewer === 'opencode' ? config.vendors.opencode : config.vendors.claude, strategy, appliedStrategy, model),
       parseAuthorAttribution(pr.body ?? '') ?? undefined,
     )

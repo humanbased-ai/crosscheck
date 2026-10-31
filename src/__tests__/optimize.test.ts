@@ -41,6 +41,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean, opencodeEnabl
       },
     },
     brand: { service_name: 'crosscheck', comment_header: '', comment_footer: '', reviewer_attribution: '' },
+    github: { app: { app_id: null, installation_id: null, private_key_path: '~/.crosscheck/app.pem', private_key_env: 'CROSSCHECK_APP_PRIVATE_KEY' } },
   }
 }
 

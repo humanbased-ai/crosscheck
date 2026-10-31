@@ -15,6 +15,7 @@
 - [Step 4 — Verify it's working](#step-4--verify-its-working)
 - [Commands](#commands)
   - [init](#crosscheck-init)
+  - [auth](#crosscheck-auth)
   - [onboard](#crosscheck-onboard)
   - [review](#crosscheck-review-pr-urls)
   - [run](#crosscheck-run-pr-urls)
@@ -388,6 +389,31 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, GitHub auth, and webhook-se
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Write the config file to a specific path |
+
+---
+
+### `crosscheck auth`
+
+Shows which identity posts reviews: your GitHub account, or a GitHub App installation.
+
+```bash
+crosscheck auth                       # actor + reviewer, with a readiness probe
+crosscheck auth app --app-id 1234567 --key ~/.crosscheck/app.pem --repo owner/name
+crosscheck auth app --check           # verify without writing config
+crosscheck auth app --clear           # go back to posting as your account
+```
+
+By default reviews are posted with your GitHub token, so a comment on your own PR reads as a self-review. A GitHub App gives crosscheck its own identity: review comments are authored by `<app-slug>[bot]` while clone, push, and merge keep using your token. See [docs/github-app-identity.md](docs/github-app-identity.md) for creating the app and the permissions it needs.
+
+| Flag | Description |
+|---|---|
+| `-c, --config <path>` | Config file path |
+| `--app-id <id>` | GitHub App id |
+| `--key <path>` | Path to the app private key PEM |
+| `--installation-id <id>` | Pin one installation (otherwise resolved from `--repo`) |
+| `--repo <owner/name>` | Verify against this repo and resolve its installation |
+| `--check` | Probe the configured identity without writing config |
+| `--clear` | Remove the GitHub App identity |
 
 ---
 
@@ -1414,6 +1440,13 @@ post_review:
 server:
   port: 7891
   webhook_path: /webhook
+
+github:                       # identity review comments are posted as
+  app:
+    app_id: null              # set a GitHub App id to post as <slug>[bot]
+    installation_id: null     # pin one installation, or resolve it from the repo
+    private_key_path: ~/.crosscheck/app.pem
+    private_key_env: CROSSCHECK_APP_PRIVATE_KEY   # env wins over the file
 
 linear:                       # write review verdicts back to a Linear issue (opt-in)
   enabled: false

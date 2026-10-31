@@ -1,5 +1,5 @@
 import { Octokit } from 'octokit'
-import { createHmac, timingSafeEqual } from 'crypto'
+import { createHmac, createSign, timingSafeEqual } from 'crypto'
 import { buildAnnotation, parseAnnotation, parseAnnotationFields, type CrosscheckStepType } from '../lib/annotation.js'
 import { modelDisplayName } from '../lib/review-models.js'
 import { buildAttributionFooter, renderAuthorLine } from '../lib/comment-bodies.js'
@@ -27,6 +27,341 @@ async function throwGithubRequestError(res: Response, context: string): Promise<
 
 function repoPath(owner: string, repo: string): string {
   return `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+}
+
+// ── GitHub App identity ──────────────────────────────────────────────────────
+// A GitHub App proves itself with a short-lived RS256 JWT, exchanges it for a
+// one-hour installation token, and makes REST calls with that token. Crosscheck
+// uses this for exactly one thing: posting review output under a bot identity
+// instead of the operator's account. Clone, push, and merge keep the user token.
+
+const GITHUB_API = 'https://api.github.com'
+
+export class GithubApiError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'GithubApiError'
+    this.status = status
+  }
+}
+
+export interface GithubAppKey {
+  appId: number
+  privateKey: string
+}
+
+export interface GithubAppInfo {
+  id: number
+  slug: string
+  name: string
+}
+
+export interface GithubInstallationInfo {
+  id: number
+  account: string | null
+  targetType: string | null
+  permissions: Record<string, string>
+}
+
+export interface InstallationToken {
+  token: string
+  /** Epoch milliseconds. */
+  expiresAt: number
+}
+
+function base64url(value: string): string {
+  return Buffer.from(value, 'utf8').toString('base64url')
+}
+
+/**
+ * RS256 JWT for the /app endpoints. `iat` is backdated 60s for clock skew and
+ * `exp` is 9 minutes out — inside GitHub's 10-minute ceiling. Pure: no network,
+ * no ambient clock, so the shape is unit-testable.
+ */
+export function signAppJwt(key: GithubAppKey, nowMs: number = Date.now()): string {
+  const now = Math.floor(nowMs / 1000)
+  const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
+  const payload = base64url(JSON.stringify({ iat: now - 60, exp: now + 540, iss: key.appId }))
+  const signer = createSign('RSA-SHA256')
+  signer.update(`${header}.${payload}`)
+  const signature = signer.sign(key.privateKey).toString('base64url')
+  return `${header}.${payload}.${signature}`
+}
+
+async function appApi<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
+  const extraHeaders = (init.headers ?? {}) as Record<string, string>
+  const res = await fetch(`${GITHUB_API}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...extraHeaders,
+    },
+  })
+  if (!res.ok) throw new GithubApiError(res.status, await readGithubErrorMessage(res))
+  return await res.json() as T
+}
+
+interface RawInstallation {
+  id: number
+  account?: { login?: string } | null
+  target_type?: string
+  permissions?: Record<string, string>
+}
+
+function toInstallation(raw: RawInstallation): GithubInstallationInfo {
+  return {
+    id: raw.id,
+    account: raw.account?.login ?? null,
+    targetType: raw.target_type ?? null,
+    permissions: raw.permissions ?? {},
+  }
+}
+
+const appInfoCache = new Map<number, GithubAppInfo>()
+
+export async function getAppInfo(key: GithubAppKey): Promise<GithubAppInfo> {
+  const cached = appInfoCache.get(key.appId)
+  if (cached) return cached
+  const data = await appApi<{ id: number; slug: string; name: string }>('/app', signAppJwt(key))
+  const info: GithubAppInfo = { id: data.id, slug: data.slug, name: data.name }
+  appInfoCache.set(key.appId, info)
+  return info
+}
+
+export async function listAppInstallations(key: GithubAppKey): Promise<GithubInstallationInfo[]> {
+  const data = await appApi<RawInstallation[]>('/app/installations?per_page=100', signAppJwt(key))
+  return data.map(toInstallation)
+}
+
+/** The installation covering a repo, or null when the app is not installed on it. */
+export async function getInstallationForRepo(
+  key: GithubAppKey,
+  owner: string,
+  repo: string,
+): Promise<GithubInstallationInfo | null> {
+  try {
+    const data = await appApi<RawInstallation>(`/repos/${repoPath(owner, repo)}/installation`, signAppJwt(key))
+    return toInstallation(data)
+  } catch (err) {
+    if (err instanceof GithubApiError && err.status === 404) return null
+    throw err
+  }
+}
+
+export async function createInstallationToken(
+  key: GithubAppKey,
+  installationId: number,
+): Promise<InstallationToken> {
+  const data = await appApi<{ token: string; expires_at: string }>(
+    `/app/installations/${installationId}/access_tokens`,
+    signAppJwt(key),
+    { method: 'POST' },
+  )
+  return { token: data.token, expiresAt: Date.parse(data.expires_at) }
+}
+
+// Installation tokens live one hour. Mint lazily, reuse while comfortably
+// valid, and never persist: a stale token on disk is a credential leak with no
+// upside, and minting is a single round trip.
+const installationTokens = new Map<string, InstallationToken>()
+const TOKEN_REFRESH_MARGIN_MS = 60_000
+
+export async function getInstallationToken(
+  key: GithubAppKey,
+  installationId: number,
+  nowMs: number = Date.now(),
+): Promise<string> {
+  const cacheKey = `${key.appId}:${installationId}`
+  const cached = installationTokens.get(cacheKey)
+  if (cached && cached.expiresAt - nowMs > TOKEN_REFRESH_MARGIN_MS) return cached.token
+  const minted = await createInstallationToken(key, installationId)
+  installationTokens.set(cacheKey, minted)
+  return minted.token
+}
+
+/** Test hook — also called when `ck auth app` rewrites the key or installation. */
+export function clearGithubAppCache(): void {
+  installationTokens.clear()
+  appInfoCache.clear()
+}
+
+// ── App readiness probe ──────────────────────────────────────────────────────
+
+export type AppProbeStep = 'private key' | 'app credentials' | 'installation' | 'repo access' | 'permissions'
+
+export interface AppProbeCheck {
+  step: AppProbeStep
+  ok: boolean
+  detail: string
+  fix?: string
+}
+
+export interface AppProbeResult {
+  ok: boolean
+  /** `slug[bot]` when the app is known, so callers can show who reviews. */
+  login: string | null
+  app: GithubAppInfo | null
+  installation: GithubInstallationInfo | null
+  checks: AppProbeCheck[]
+}
+
+export interface AppProbeOptions {
+  key: GithubAppKey
+  installationId?: number | null
+  owner?: string
+  repo?: string
+}
+
+function appSettingsUrl(app: GithubAppInfo, installation: GithubInstallationInfo | null, page: 'permissions' | ''): string {
+  const org = installation?.targetType === 'Organization' ? installation.account : null
+  const path = org
+    ? `organizations/${encodeURIComponent(org)}/settings/apps/${encodeURIComponent(app.slug)}`
+    : `settings/apps/${encodeURIComponent(app.slug)}`
+  return `https://github.com/${path}${page ? `/${page}` : ''}`
+}
+
+/**
+ * Everything a review run needs from the app, checked in dependency order so the
+ * first failure is the one to fix: key → app → installation → repo → permissions.
+ * Never throws for an expected misconfiguration; network/API surprises surface as
+ * a failed check instead of escaping.
+ */
+export async function probeGithubApp(opts: AppProbeOptions): Promise<AppProbeResult> {
+  const checks: AppProbeCheck[] = []
+  const { key } = opts
+  let app: GithubAppInfo | null = null
+  let installation: GithubInstallationInfo | null = null
+
+  try {
+    signAppJwt(key)
+    checks.push({ step: 'private key', ok: true, detail: 'parses and signs RS256' })
+  } catch (err) {
+    checks.push({
+      step: 'private key',
+      ok: false,
+      detail: err instanceof Error ? err.message : String(err),
+      fix: 'generate a new private key on the app settings page and point --key at it',
+    })
+    return { ok: false, login: null, app: null, installation: null, checks }
+  }
+
+  try {
+    app = await getAppInfo(key)
+    checks.push({ step: 'app credentials', ok: true, detail: `${app.slug} (app ${app.id})` })
+  } catch (err) {
+    const status = err instanceof GithubApiError ? err.status : 0
+    const rejected = status === 401 || status === 403
+    // A key that is valid but belongs to an unknown id returns 404 from /app —
+    // distinct from a bad signature, and the fix is the opposite (check the id,
+    // not the key).
+    const unknown = status === 404
+    checks.push({
+      step: 'app credentials',
+      ok: false,
+      detail: rejected
+        ? 'GitHub rejected the app id / private key'
+        : unknown
+          ? `no app with id ${key.appId}`
+          : (err instanceof Error ? err.message : String(err)),
+      fix: rejected
+        ? 'check --app-id matches the key, then generate a new key if needed'
+        : unknown
+          ? 'check --app-id — it must be the numeric id from the app settings page'
+          : undefined,
+    })
+    return { ok: false, login: null, app: null, installation: null, checks }
+  }
+
+  try {
+    if (opts.installationId != null) {
+      const installations = await listAppInstallations(key)
+      installation = installations.find(i => i.id === opts.installationId) ?? null
+      if (installation) {
+        checks.push({ step: 'installation', ok: true, detail: `${installation.account ?? 'unknown account'} (id ${installation.id})` })
+      } else {
+        checks.push({
+          step: 'installation',
+          ok: false,
+          detail: `installation ${opts.installationId} does not exist for this app`,
+          fix: `install it: ${appSettingsUrl(app, null, '')}/installations/new`,
+        })
+      }
+    } else if (opts.owner && opts.repo) {
+      installation = await getInstallationForRepo(key, opts.owner, opts.repo)
+      if (installation) {
+        checks.push({ step: 'installation', ok: true, detail: `${installation.account ?? 'unknown account'} (id ${installation.id})` })
+      } else {
+        checks.push({
+          step: 'installation',
+          ok: false,
+          detail: `app ${key.appId} is not installed on ${opts.owner}/${opts.repo}`,
+          fix: `install it: ${appSettingsUrl(app, null, '')}/installations/new`,
+        })
+      }
+    } else {
+      const installations = await listAppInstallations(key)
+      installation = installations[0] ?? null
+      if (installation) {
+        checks.push({ step: 'installation', ok: true, detail: `${installation.account ?? 'unknown account'} (id ${installation.id})` })
+      } else {
+        checks.push({
+          step: 'installation',
+          ok: false,
+          detail: 'the app is not installed anywhere',
+          fix: `install it: ${appSettingsUrl(app, null, '')}/installations/new`,
+        })
+      }
+    }
+  } catch (err) {
+    checks.push({ step: 'installation', ok: false, detail: err instanceof Error ? err.message : String(err) })
+    return { ok: false, login: `${app.slug}[bot]`, app, installation: null, checks }
+  }
+
+  if (!installation) return { ok: false, login: `${app.slug}[bot]`, app, installation: null, checks }
+
+  if (opts.owner && opts.repo) {
+    try {
+      const token = await getInstallationToken(key, installation.id)
+      await appApi(`/repos/${repoPath(opts.owner, opts.repo)}`, token)
+      checks.push({ step: 'repo access', ok: true, detail: `${opts.owner}/${opts.repo}` })
+    } catch (err) {
+      const notSelected = err instanceof GithubApiError && err.status === 404
+      checks.push({
+        step: 'repo access',
+        ok: false,
+        detail: notSelected
+          ? `${opts.owner}/${opts.repo} is not selected in the installation`
+          : (err instanceof Error ? err.message : String(err)),
+        fix: notSelected ? `add the repo: ${appSettingsUrl(app, installation, '')}/installations/new` : undefined,
+      })
+    }
+  }
+
+  const missing = ['pull_requests', 'issues'].filter(
+    permission => installation.permissions[permission] !== 'write',
+  )
+  if (missing.length === 0) {
+    checks.push({ step: 'permissions', ok: true, detail: 'pull_requests:write issues:write' })
+  } else {
+    checks.push({
+      step: 'permissions',
+      ok: false,
+      detail: `missing write access: ${missing.join(', ')}`,
+      fix: `grant Read & write for ${missing.join(', ')}: ${appSettingsUrl(app, installation, 'permissions')}`,
+    })
+  }
+
+  return {
+    ok: checks.every(check => check.ok),
+    login: `${app.slug}[bot]`,
+    app,
+    installation,
+    checks,
+  }
 }
 
 export function verifyWebhookSignature(payload: string, signature: string, secret: string): boolean {
