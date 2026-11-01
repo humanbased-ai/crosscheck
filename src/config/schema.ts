@@ -65,7 +65,28 @@ export const OpenCodeVendorConfigSchema = VendorConfigSchema.extend({
   }).optional(),
 })
 
+export const ReviewModelSchema = z.object({
+  id: z.string().min(1),
+  model_class: z.enum(['fast', 'standard']),
+  source: z.enum(['cli', 'configured', 'catalog']),
+  auto_free: z.boolean().optional(),
+  efforts: z.array(z.string()),
+  input_usd_mtok: z.number().nonnegative().optional(),
+  output_usd_mtok: z.number().nonnegative().optional(),
+  family: z.string().optional(),
+})
+export type ReviewModel = z.infer<typeof ReviewModelSchema>
+
 export const QualityConfigSchema = z.object({
+  refresh_free_models: z.boolean().optional(),
+  excluded_models: z.array(z.string()).optional(),
+  model_refresh_sec: z.number().int().min(30).max(86400).optional(),
+  preference: z.enum(['balanced', 'speed-max', 'cost-min']).optional(),
+  review_models: z.object({
+    claude: z.array(ReviewModelSchema).optional(),
+    codex: z.array(ReviewModelSchema).optional(),
+    opencode: z.array(ReviewModelSchema).optional(),
+  }).optional(),
   // The tier when `mode: fixed`, and the fallback under `mode: smart` whenever a
   // PR's file list cannot be read from its clone, or when an explicit request
   // (`crosscheck review`, `run --steps`) overrides a class that would skip the PR.

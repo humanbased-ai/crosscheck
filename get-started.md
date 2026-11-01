@@ -65,6 +65,36 @@ printenv OPENAI_API_KEY | codex login --with-api-key
 
 Then set `auth: api-key` in your config to enable model selection.
 
+### User-specific review strategies
+
+Run `ck init` to scan installed agents and their model configuration. Choose the
+allowed models and `balanced`, `speed-max`, or `cost-min`. Balanced favors a
+standard model for normal/risky work; speed-max favors fast models with lower
+effort; cost-min favors advertised free and cheaper allowed models, raising
+effort for risk and unresolved findings. Speed classes are heuristics; cost
+estimates use API-equivalent rates, not subscription invoices.
+
+The saved `quality.review_models` pool controls reviews and rechecks ahead of
+legacy global pins; it does not replace authoring/fixing preferences. Every
+provider's flagship is excluded, including free listings and resolved aliases.
+Unknown custom deployments need explicit fast/standard classification. A model
+with unknown price is not presumed free. Discovery reads metadata and makes no
+paid inference request. Raw settings, provider headers and credentials are not
+saved in the inventory. Custom Codex provider definitions are reported as
+configured-only because the isolated runner ignores them; use the equivalent
+OpenCode route or a supported native provider.
+
+When `quality.refresh_free_models: true`, `ck watch` refreshes metadata before a
+new review after `model_refresh_sec` (900 seconds by default). It may add newly
+advertised free OpenCode models to an already enabled agent. Disabled agents,
+explicit exclusions and the flagship ceiling still apply. Vanished free models
+and models that become paid are removed from that session's pool. Active reviews
+retain their original snapshot. The watcher does not rewrite user configuration. Restart a running watcher to
+load changes to saved preferences, allowlists or enabled agents from another
+`ck init`; free catalog refreshes happen within the current session.
+Free-tier quota failure tries another allowed model and cools down the failed
+route for 15 minutes; paid fallback requires an already allowed paid model.
+
 ### OpenCode
 
 ```bash
@@ -74,7 +104,7 @@ opencode auth login   # sign in to a provider (e.g. DeepSeek, Anthropic, OpenAI)
 
 OpenCode is **opt-in**: enable it with `vendors.opencode.enabled: true` (or `crosscheck onboard`). Model selection is `model` → `model_tiers[effective tier]` → your OpenCode default. The optional tier map lets smart-mode risk promotion and rechecks select different provider-qualified models. Missing entries preserve your default; crosscheck does not enable a new provider or purchase credits. See the [current candidate profile and prices](docs/dynamic-thoroughness.md#65-the-strategy-table).
 
-Variants are provider-specific. Put a verified variant in an explicit model ID, such as `provider/model#max`; Crosscheck emits V1 `--variant max` or a V2 suffix. Catalog candidates without verified OpenCode variant evidence use the provider default and report no effort. Custom providers retain `vendors.opencode.effort` (none | high | max), so confirm that vocabulary with your provider. Native API reasoning controls do not prove the same OpenCode variant exists.
+Variants are provider-specific. Put a verified variant in an explicit model ID, such as `provider/model#max`; Crosscheck emits V1 `--variant max` or a V2 suffix. Catalog candidates without verified OpenCode variant evidence use the provider default and report no effort. Generated review pools use the exact scanned variant names. Classify unknown custom deployments with `ck init` before reviewing. Native API reasoning controls do not prove the same OpenCode variant exists.
 
 ### GitHub CLI
 
@@ -1229,8 +1259,8 @@ vendors:
     # model: provider/model   # global pin, ahead of model_tiers
     # model_tiers:            # opt-in example; confirm IDs with opencode models
     #   fast: opencode/glm-5.3-flash
-    #   balanced: opencode/glm-5.3
-    #   thorough: opencode/kimi-k3
+    #   balanced: opencode/deepseek-v4.1-flash
+    #   thorough: opencode/deepseek-v4.1-flash
     # Missing tiers use the OpenCode default. An explicit #variant is honored
     # (V1: --variant, V2: suffix); catalog models otherwise keep provider defaults.
     # Console prices and candidate evaluation: docs/dynamic-thoroughness.md §6.5
@@ -1241,6 +1271,20 @@ vendors:
 quality:
   # Structured findings and incremental follow-ups; set false for legacy prose reviews.
   review_memory: true
+  # ck init scans installed agents and lets you choose the review pool.
+  # These preferences affect reviews/rechecks; flagged provider flagships are excluded.
+  # preference: cost-min        # balanced | speed-max | cost-min
+  # refresh_free_models: true   # watch adds eligible advertised-free OpenCode models
+  # model_refresh_sec: 900      # refresh before the next review once this interval passes
+  # excluded_models: []        # deselected IDs; watch must not re-add them
+  # review_models:              # generated by ck init; edit for known custom deployments
+  #   opencode:
+  #     - id: private/flash-review
+  #       model_class: fast    # fast | standard; never classify a flagship as eligible
+  #       source: configured
+  #       efforts: [high]      # exact supported variant names; [] keeps provider default
+  #       input_usd_mtok: 0    # only when the provider advertises this route as free
+  #       output_usd_mtok: 0
   mode: smart               # smart (default) | fixed — see Review thoroughness
   tier: balanced            # fast | balanced | thorough (fallback under smart)
   focus:                    # narrows review scope (optional)
@@ -1487,11 +1531,11 @@ Every comment cites the policy that produced it:
 <!-- crosscheck: … verdict=BLOCK strategy=1.1.0 class=risky tier=thorough … -->
 ```
 
-> **Leave `vendors.*.model` unset under smart mode.** An explicit model outranks
-> the strategy, so pinning one makes per-PR selection a no-op. When that happens
-> crosscheck **withholds** the tier from the comment rather than citing one that
-> did not run. `crosscheck onboard` clears the pin — and prints what it cleared —
-> when you choose smart.
+The `quality.review_models` pool generated by `ck init` controls reviews ahead of
+legacy authoring/fixing pins. Without a saved pool, leave `vendors.*.model` unset
+under smart mode; an eligible explicit pin otherwise wins over tier selection.
+A flagship pin is rejected. Unknown custom review models need classification
+through `ck init`.
 
 Verify the policy is current with `npm run verify:strategy`. Full rationale:
 [docs/dynamic-thoroughness.md](./docs/dynamic-thoroughness.md).
@@ -1502,19 +1546,21 @@ Under `fixed`, the tier applies to every call. Under `smart`, it is the fallback
 when a PR's file list cannot be read, and when an explicit request (`crosscheck
 review`, `run --steps`) overrides a class that would skip the PR.
 
-| Tier | Claude | Codex | Cost per review | Best for |
-|---|---|---|---|---|
-| `fast` | Haiku 4.5 | GPT-5.6 Luna | $0.24 · $0.06 | High-volume repos, draft PRs |
-| `balanced` | Sonnet 5 | GPT-5.6 Terra | $0.72 · $0.58 | Default for most teams |
-| `thorough` | Opus 5 | GPT-5.6 Sol | $1.20 · $1.44 | Before merging to main |
+| Tier | Claude built-in | Codex API built-in | Generated effort |
+|---|---|---|---|
+| `fast` | Haiku 5.5 | GPT-6 Luna | low |
+| `balanced` | Sonnet 5.5 | GPT-6.1 Sol | medium |
+| `thorough` | Sonnet 5.5 | GPT-6.1 Sol | high |
 
-Cost is output-token cost at 48k output tokens, the measured median for one
-review. A review is an agentic session, not a single call — expect 10–16 minutes
-of wall clock (median 643s, p90 984s across 43 logged runs). Tier changes depth
-and the subprocess timeout, not seconds-scale latency.
-
-`claude-fable-5` is banned from review: 2× Opus 5's price for a lower coding
-benchmark score.
+Saved model pools and the chosen preference can select another eligible model.
+All provider flagships are excluded, including free listings. Risk and unresolved
+findings raise supported effort within the generated ceiling, rather than unlock
+Fable, Opus, Astra or another provider's flagship. When a model has no known
+effort control, the provider default applies and no effort is claimed. Legacy
+explicit variants remain operator overrides. See the [full cost comparison](docs/dynamic-thoroughness.md#65-the-strategy-table)
+for input/output, cache and context rates; an output-only estimate is not a review
+invoice. No fixed seconds-scale latency or matched review-quality result is
+claimed for these preferences.
 
 ### Issue enrichment
 

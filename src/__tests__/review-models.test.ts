@@ -31,7 +31,7 @@ describe('review model resolution', () => {
   it('resolves Claude models by tier', () => {
     expect(resolveClaudeModel(quality('fast'))).toBe('claude-haiku-5-5')
     expect(resolveClaudeModel(quality('balanced'))).toBe('claude-sonnet-5-5')
-    expect(resolveClaudeModel(quality('thorough'))).toBe('claude-opus-5-5')
+    expect(resolveClaudeModel(quality('thorough'))).toBe('claude-sonnet-5-5')
   })
 
   it('honors an explicit vendors.claude.model over the tier mapping', () => {
@@ -43,13 +43,13 @@ describe('review model resolution', () => {
   })
 
   it('falls back to the tier mapping when vendors.claude.model is unset', () => {
-    expect(resolveClaudeModel(quality('thorough'), claudeVendor(null))).toBe('claude-opus-5-5')
+    expect(resolveClaudeModel(quality('thorough'), claudeVendor(null))).toBe('claude-sonnet-5-5')
   })
 
   it('resolves Codex API-key models by tier and configured override', () => {
     expect(resolveCodexModel(quality('fast'), codexVendor('api-key'))).toBe('gpt-6-luna')
     expect(resolveCodexModel(quality('balanced'), codexVendor('api-key'))).toBe('gpt-6.1-sol')
-    expect(resolveCodexModel(quality('thorough'), codexVendor('api-key'))).toBe('gpt-6-astra')
+    expect(resolveCodexModel(quality('thorough'), codexVendor('api-key'))).toBe('gpt-6.1-sol')
     expect(resolveCodexModel(quality('thorough'), codexVendor('api-key', 'custom-model'))).toBe('custom-model')
   })
 

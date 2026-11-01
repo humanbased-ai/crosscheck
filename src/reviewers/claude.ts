@@ -3,7 +3,8 @@ import { accessSync, constants as fsConstants } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
-import { primaryModelFromUsage, resolveClaudeModel } from '../lib/review-models.js'
+import { selectReviewModel, reviewModelExcluded } from '../lib/review-selection.js'
+import { primaryModelFromUsage } from '../lib/review-models.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { vendorFailureSummary } from '../lib/vendor-error-summary.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
@@ -92,8 +93,9 @@ export async function runClaudeReview(
   issueContext?: string,
   skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
-  const model = resolveClaudeModel(quality, vendor)
-  const effort = claudeEffort(vendor.effort)
+  const selected = selectReviewModel('claude', quality, vendor)
+  const model = selected.model
+  const effort = selected.effort ? claudeEffort(selected.effort) : undefined
   const focusLine = quality.focus.length > 0
     ? `Focus areas: ${quality.focus.join(', ')}.`
     : ''
@@ -130,7 +132,7 @@ export async function runClaudeReview(
     '--print',
     '--output-format', 'json',
     '--model', model,
-    '--effort', effort,
+    ...(effort ? ['--effort', effort] : []),
     ...(applyBudgetCap ? ['--max-budget-usd', String(perReviewBudget)] : []),
     '--allowedTools', [
       'Bash(git diff)', 'Bash(git log)',
@@ -142,7 +144,7 @@ export async function runClaudeReview(
     ].join(','),
   ]
 
-  onLog?.(`  running: claude --print --model ${model} --effort ${effort}`)
+  onLog?.(`  running: claude --print --model ${model}${effort ? ` --effort ${effort}` : ''}`)
 
   // timeoutMs: 0 → no cap (crazy/halfcrazy); undefined → tier-based default (300/600/1200s); positive → user-specified
   const resolvedTimeout = timeoutMs === undefined ? tierTimeoutMs(quality.tier) : timeoutMs === 0 ? undefined : timeoutMs
@@ -157,7 +159,7 @@ export async function runClaudeReview(
           cwd: repoDir,
           timeout: t,
           input: prompt,
-          env: { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
+          env: { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_EFFORT_LEVEL: effort },
         }),
         {
           onRetry: (effectiveMs, delayMs) =>
@@ -175,8 +177,10 @@ export async function runClaudeReview(
         // string: `model` may be an alias ("opus") and the CLI resolves or
         // substitutes it. Fall back to the requested value when absent.
         const actualModel = primaryModelFromUsage(parsed.modelUsage)
+        if (actualModel && reviewModelExcluded(actualModel)) throw new Error('claude: provider substituted an excluded flagship model; review discarded')
         return { review, tokensUsed, inputTokens, outputTokens, model: actualModel ?? model, effort, retried }
-      } catch {
+      } catch (err) {
+        if (!(err instanceof SyntaxError)) throw err
         return { review: raw, model, effort, retried }
       }
     } catch (err: unknown) {

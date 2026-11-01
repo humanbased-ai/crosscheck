@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Strategy version** | `1.3.0` — [`src/config/review-strategy.json`](../src/config/review-strategy.json) |
+| **Strategy version** | `1.4.0` — [`src/config/review-strategy.json`](../src/config/review-strategy.json) |
 | **Analysis run** | 2026-08-07T05:00:00Z |
 | **Census window** | 2026-07-30 → 2026-08-07 |
 | **Corpus** | 400 merged PRs · 199 crosscheck-engaged · 597 agent calls · 43 locally-logged runs |
@@ -463,9 +463,13 @@ follows the pattern `review-model-tiers.json` already established: an `updated` 
 `sources` with verifiable `checks` strings, and a `review_interval_days` so age and source drift are
 detectable rather than silent (§6.6).
 
-**Current default tiers (verified 2026-11-01).** Claude uses Haiku 5.5 / Sonnet 5.5 / Opus 5.5. Codex API auth uses GPT-6 Luna / GPT-6.1 Sol / GPT-6 Astra. A global model pin still wins. Codex subscription auth without a configured model or tier map keeps the CLI default; onboarding's separate subscription map is unchanged. The newer Claude defaults and their lower rates come from [Anthropic's model catalog](https://platform.claude.com/docs/en/models/overview) and [pricing](https://platform.claude.com/docs/en/about-claude/pricing). GPT rates come from [OpenAI pricing](https://developers.openai.com/api/docs/pricing).
+**Current review ceiling (user decision, 2026-11-01).** Every provider's flagship is excluded from code review, including free listings. Claude defaults are Haiku 5.5 / Sonnet 5.5 / Sonnet 5.5; Codex API defaults are Luna / Sol / Sol. Thorough means more effort on an eligible model, not permission to select Opus, Fable, Astra, Kimi K3, GLM 5.3, DeepSeek Pro or MiniMax M3. The price table retains those models as excluded cost references.
 
-**OpenCode is active and opt-in.** It is a harness for many providers, not one model family. Its candidate profile is GLM-5.3-Flash / GLM-5.3 / Kimi K3, applied only when an operator supplies `vendors.opencode.model_tiers`; no built-in provider is selected. Alternatives include MiniMax M3 and DeepSeek V4.1 Flash / V4 Pro. Confirm provider-qualified IDs and account access with `opencode models`. A model in the public catalog is not proof of account entitlement. [OpenCode Console catalog](https://opencode.ai/v2/docs/console/models/).
+**User-specific pools.** `ck init` scans installed agents and model configuration, then saves `quality.review_models` and the user's `balanced`, `speed-max` or `cost-min` preference. That review pool outranks legacy authoring/fixing model pins. Balanced chooses a standard eligible model when available for normal/risky work; speed-max chooses a fast class with lower effort; cost-min ranks advertised input/output rates, including free tiers. Unknown rates remain unknown, and unknown custom deployments need explicit non-flagship classification. Current model effort/variant metadata bounds each request. Risk and later rounds can raise effort, capped at high; once the ceiling binds, rechecks retain that judge and narrow the scope rather than escalate beyond policy.
+
+**OpenCode free tiers can change during watch.** With refresh enabled, the watcher performs a bounded metadata scan before the next review after 15 minutes. It adds only advertised-zero-price, known non-flagship models on an already enabled OpenCode agent, honors explicit exclusions, and removes vanished free models or models whose price becomes positive/unknown. Each active review keeps a snapshot. Refresh does not rewrite disk configuration, enable another agent, or silently opt into a new paid route. Exhausted routes cool down for 15 minutes; fallback stays inside the existing permitted pool. A provider listing is not proof of usable quota.
+
+The [discovery procedure and limitations](research/review-models-2026-11-01.md) distinguish CLI catalog evidence, configured preference, custom-provider execution support and account entitlement. No matched defect-detection evaluation or measured speed ranking is claimed. Prices come from [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing), [OpenAI pricing](https://developers.openai.com/api/docs/pricing), and [OpenCode Console](https://opencode.ai/v2/docs/console/models/).
 
 Prices below are standard synchronous USD per million tokens. The last column illustrates **100k uncached input + 48k output** at each provider's listed rates; it is a scenario, not a measured contemporary review bill.
 
@@ -486,11 +490,9 @@ Prices below are standard synchronous USD per million tokens. The last column il
 
 The [pricing sources](research/review-models-2026-11-01.md) also record cache writes, context thresholds and direct-provider differences. Haiku above 100k input costs $0.50/$2.50 per MTok; GPT above 272k input has separate input/output rates. Repeated context, reasoning tokens, retries, fix/recheck calls, provider fees and tokenizer differences affect the full bill. Subscription allowances cannot be priced as API invoices. Do not reuse the old output-only 48k estimate as total cost.
 
-**Variant handling.** Native model effort and OpenCode variants are distinct. The catalog records native effort evidence where known, but `opencode_variants: []` means no verified OpenCode wire ladder: preserve the provider default and omit an effort claim. An operator's explicit `provider/model#variant` is honored exactly once in either CLI syntax. Custom providers retain configured effort for compatibility. When a catalog lane has no verified variant escalation, the strategy promotes its configured tier instead of pretending effort rose. A partial map can fall back to the CLI default, so use a complete map when escalation must change the model.
+**Variant handling.** Live OpenCode discovery records exact variant names. An empty effort list means the provider default is retained; no guessed variant is reported. Native API effort support alone does not establish an OpenCode variant. Explicit legacy variants still use V1 `--variant` or a V2 suffix, subject to the flagship ceiling. Native API prices must not be assigned to a private deployment merely because its underlying family is known.
 
-**Domain choices remain hypotheses.** Neither frontend generation Elo nor SWE-bench issue-resolution scores establish review precision or recall. The old leaderboard evidence is retained as historical context, with current per-model scores unset. `domains.preferred` is an evaluation list; runtime assignment follows routing and `agent_priority`, not that list. An OpenCode call to an OpenAI or Anthropic model does not create an independent model family. Check the underlying author/reviewer family when choosing a review profile; family-aware assignment is not enforced by this change.
-
-Before promoting cheaper candidates, replay the same frontend/backend PRs and seeded defects on each exact provider/model/variant. Compare actionable defect recall, false positives, completion rate, latency, regressions introduced by fixes and total cost through the final recheck. Keep a capable final judge and preserve the existing risk floor, bounded rounds and fix→recheck invariant. No local quality evaluation for this lineup is claimed here.
+**Domain choices remain hypotheses.** Generation Elo and issue-resolution scores are historical context, not evidence of review precision or recall. Domain preferences are evaluation lists, not a separate vendor selector. Different CLIs can run the same underlying model family. Before promoting a candidate, replay matched frontend/backend PRs and seeded defects; compare actionable recall, false positives, completion rate, latency, fixer regressions and whole-loop cost.
 
 **PR classes.** First match wins, so ordering is the routing logic.
 
@@ -541,14 +543,14 @@ carries the strategy version, the PR class that was matched, and the tier that c
 selected — in both the machine annotation and the human-readable line.
 
 ```
-<!-- crosscheck: origin=claude reviewer=claude model=claude-opus-5 type=review
-     round=1 verdict=BLOCK strategy=1.1.0 class=risky tier=thorough
+<!-- crosscheck: origin=claude reviewer=claude model=claude-sonnet-5-5 type=review
+     round=1 verdict=BLOCK strategy=1.4.0 class=risky tier=thorough
      service=crosscheck sha=abc123 -->
 ```
 
 > _Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](https://github.com/humanbased-ai/crosscheck)
-> with Opus 5 (high) — thorough tier · touches a security or data-critical path, where a
-> missed defect is expensive · strategy v1.1.0_
+> with Sonnet 5.5 (high) — thorough tier · touches a security or data-critical path, where a
+> missed defect is expensive · strategy v1.4.0_
 
 The rationale text is not written per review — it is the matched class's `reason` field,
 so the explanation and the routing decision cannot drift apart. `strategy`, `class`, and

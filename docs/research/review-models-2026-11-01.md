@@ -1,79 +1,99 @@
-# Crosscheck model and pricing refresh — 2026-11-01
+# User-specific Crosscheck review models — 2026-11-01
 
-Reviewers need a model that catches actionable defects before merge. A cheaper
-model that misses those defects, or forces another fix/recheck round, can raise
-the cost of shipping. This refresh updates the available choices and makes
-OpenCode tier selection work; it does not claim a new review-quality benchmark.
+A public model catalog does not tell a reviewer which agents a user installed,
+which custom deployment they configured, or which free tier still has quota.
+`ck init` now records that user's model pool and budget preference. `ck watch`
+can update advertised free candidates during its session without changing an
+active review or opting into a new paid route.
 
-## Decision and evidence
+The user confirmed a ceiling on **every provider's flagship**, including free
+listings. Defaults therefore stop at Sonnet 5.5 and GPT-6 Sol. Fable, Opus,
+Astra, Kimi K3, GLM 5.3, DeepSeek Pro and MiniMax M3 remain excluded reference
+models. Unknown custom deployments require explicit non-flagship classification;
+an opaque name alone cannot establish that classification.
 
-Use Claude Haiku 5.5 / Sonnet 5.5 / Opus 5.5 as the built-in Claude tier map.
-The current catalog lists these IDs; Sonnet 5.5 is $2/$10 and Opus 5.5 $4/$20
-per million input/output tokens. Cache reads are $0.10/$0.20 respectively.
-Haiku is $0.10/$0.50 up to 100k input tokens, then $0.50/$2.50.
-[Anthropic catalog](https://platform.claude.com/docs/en/models/overview),
-[pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+## What the scan establishes
 
-Keep the existing Codex API default map: GPT-6 Luna / GPT-6.1 Sol / GPT-6
-Astra, with short-context rates $0.10/$0.50, $2/$10, $10/$50. GPT-6.1 Terra
-($1/$5) is a cheaper evaluation candidate, not a replacement justified by
-review evidence. Above 272k input, the listed GPT rates change. API rates do
-not establish subscription usage costs or account availability.
+| Agent | Source | Interpretation |
+|---|---|---|
+| Codex | `debug models` and user `config.toml`, including active profile | CLI-visible model IDs and efforts; configured custom providers are reported separately |
+| Claude | User settings, model allow/deny lists, alias overrides, picker metadata and allowlisted model variables | User preference and declared model identity; unknown deployments require classification |
+| OpenCode | `models --verbose --pure`, `debug config --pure` in a temporary directory | Runtime-visible provider/model IDs, advertised prices, exact variant names and configured default |
+
+None of these is a paid inference request or proof of account entitlement.
+OpenCode's scanner projects only model IDs/family, price and variant names;
+provider headers, options, endpoint URLs, hooks and credentials are not saved.
+Read failures report a bounded generic diagnostic rather than raw CLI output.
+Zero placeholders on a private route are treated as unknown unless its ID advertises a free variant; built-in OpenCode-provider free prices are retained.
+External plugins are disabled during OpenCode discovery. A CLI that cannot
+provide this metadata leaves the prior strategy intact.
+
+Codex's isolated executor uses `--ignore-user-config`, so it drops custom provider
+definitions. A configured custom Codex provider is therefore not auto-selected;
+use its supported OpenCode route instead. Codex's official app-server
+`model/list` is an alternative future discovery source; it also distinguishes
+catalog capabilities from account-dependent availability.
+[Codex developer commands](https://learn.chatgpt.com/docs/developer-commands),
+[app-server models](https://learn.chatgpt.com/docs/app-server#models).
+
+Claude aliases such as `best` and `opusplan`, model overrides, and custom picker
+`behavesAs` fields can hide a premium identity. The scan resolves known identities
+before filtering. The runner also rejects a reported flagship substitution.
+[Claude model configuration](https://code.claude.com/docs/en/model-config),
+[settings](https://code.claude.com/docs/en/settings-reference).
+
+OpenCode's CLI inventory can differ from its public Console catalog. A read-only
+scan during this session returned a free GLM Flash listing and DeepSeek variants
+but not every paid model on the public page. Derive the pool from the installed
+CLI rather than assuming the public list is usable. Prices and variants are
+route-specific; native provider rates and effort names cannot be copied to an
+arbitrary gateway route.
+[OpenCode CLI](https://opencode.ai/docs/cli/),
+[configuration](https://opencode.ai/docs/config/),
+[models](https://opencode.ai/docs/models/),
+[Console prices](https://opencode.ai/v2/docs/console/models/).
+
+## Preferences and limits
+
+`balanced` favors a standard eligible model for normal/risky work. `speed-max`
+favors a fast class and lower effort; these classes are heuristics, not measured
+latency. `cost-min` favors advertised free and cheaper allowed models while
+raising effort on risk and unresolved findings. Price comparisons use a fixed
+100k-input/48k-output scenario; they are API-equivalent estimates, not subscription
+invoices. Unknown prices are never treated as zero.
+[Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing),
 [OpenAI pricing](https://developers.openai.com/api/docs/pricing).
 
-OpenCode Console lists GLM-5.3-Flash, GLM-5.3, MiniMax M3, DeepSeek V4.1
-Flash, DeepSeek V4 Pro and Kimi K3. The full comparison is maintained in
-[the strategy table](../dynamic-thoroughness.md#65-the-strategy-table) and
-`src/config/review-strategy.json`; all Console rows use `opencode/` IDs and
-Console rates. Kimi cache writes cost $3/MTok. A public catalog entry is not
-proof that a configured account can call that model.
-[OpenCode Console models and prices](https://opencode.ai/v2/docs/console/models/).
+The saved review pool takes precedence over legacy global authoring/fixing pins.
+Reviews and rechecks share the ceiling. Risk does not unlock a flagship or
+unbounded effort. At the allowed ceiling, the judge holds and the scope narrows;
+existing round limits still stop the loop. Free quota is not assumed: an exhausted
+route cools down for 15 minutes, with retries restricted to already permitted
+models. A failed stream cannot produce an approving verdict.
 
-Direct-provider rates are separate. DeepSeek's direct API now serves V4.1 Flash
-under `deepseek-flash`, with peak/off-peak schedules; V4 Flash is retired.
-Those prices cannot be assigned to `opencode/deepseek-v4-pro` or an arbitrary
-Alibaba/OpenRouter route. [DeepSeek pricing and lifecycle](https://api-docs.deepseek.com/quick_start/pricing/).
+## Configure and verify
 
-Native reasoning controls are not proof of an OpenCode variant. DeepSeek
-supports disabled thinking and low/high/max; Kimi K3 supports low/high/max
-with always-on thinking. The OpenCode catalog does not establish the exact
-variant names on every route. Until wire evidence exists, catalog candidates
-have an empty `opencode_variants` ladder, retain provider defaults, and report
-no requested effort. An operator can select a verified `#variant` explicitly.
-[DeepSeek thinking controls](https://api-docs.deepseek.com/guides/thinking_mode/),
-[Kimi K3 guide](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart).
-
-The proposed OpenCode tier profile (GLM Flash / GLM / Kimi) is an **evaluation
-hypothesis** based on current availability and price. It is not auto-enabled.
-No contemporary matched review experiment supports a quality ranking across
-these models. Running the same underlying family through a different CLI does
-not provide model independence. Existing routing and agent priority still own
-assignment; this change does not add a family-aware router.
-
-## Verify a profile before using it
-
-1. Read the exact route's provider catalog and pricing, including cache writes,
-   context tiers and fees. Check IDs with `opencode models`; separately confirm
-   the operator's account can use them. Do not infer access from saved auth.
-2. Set a complete `vendors.opencode.model_tiers` map in operator config, leaving
-   `model` unset. An explicit global pin wins; missing tiers use the operator's
-   CLI default. The schema is in `src/config/schema.ts`; precedence is tested
-   in `src/__tests__/review-models.test.ts`.
-3. Check the installed CLI's variant syntax. An explicit `#variant` is emitted
-   as V1 `--variant` or a V2 suffix. `opencode-process.test.ts` verifies both.
-   Record a wire fixture before populating `opencode_variants` in the policy;
-   native API documentation alone is insufficient.
-4. Replay the same frontend/backend PRs, seeded defects and risk-critical cases
-   on each candidate. Record actionable recall, false positives, completion,
-   latency, fixer regressions and total round cost. Compare author/reviewer
-   model families, not just CLI names. No paid replay was run in this refresh.
-5. Update both policy files, the strategy table and this evidence note when a
-   model is promoted. Bump the strategy version for changed routing, refresh
-   `updated`, then run `npm test`, `npm run typecheck`, `npm run build`,
+1. Run `ck init`. Inspect the detected agents, warnings, model sources and price
+   labels; select a preference and allowed models. Classify a custom deployment
+   only when its underlying non-flagship identity is known. Reruns preserve the
+   selected model IDs, saved preference, disabled agents and unrelated settings.
+2. Inspect `quality.review_models`, `preference`, and `excluded_models` in the
+   saved configuration. Keep private route prices explicit or unknown. No raw
+   provider configuration or credentials belong in this inventory.
+3. Set `refresh_free_models: true` to let `ck watch` refresh metadata before new
+   reviews after `model_refresh_sec` (900 seconds by default). Only enabled agents
+   participate. A removed, newly paid or unknown-price free route is dropped from
+   the session pool; active review snapshots remain unchanged. The watcher does
+   not rewrite the user's configuration.
+4. Replay seeded defects and the same PRs before making quality claims. Measure
+   actionable recall, false positives, completion, latency, fixer regressions and
+   total round cost. No paid replay or quality superiority is claimed here.
+5. Run `npm test`, `npm run lint`, `npm run typecheck`, `npm run build`,
    `npm run verify:strategy`, and `node scripts/verify-model-tier-sources.mjs`.
-   Model source checks detect missing strings, not changed numeric prices;
-   prices still need human/source comparison every 30 days.
+   Source-string checks do not verify numeric price changes; read the actual
+   provider prices each month.
 
-Roll back the opt-in map to restore the operator's default. Reverting the
-policy commit restores prior built-in Claude defaults. No standing daemon,
-operator config, provider credit balance or merge gate is changed by this PR.
+Rollback: disable free refresh or remove the saved review pool to return to the
+bounded built-in review defaults. The flagship ceiling remains enforced. Revert
+the policy commit to restore prior behavior. This change does not deploy or
+restart a standing watcher.

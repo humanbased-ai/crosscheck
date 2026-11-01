@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs'
 import { describe, it, expect } from 'vitest'
 import {
   resolveReviewStrategy,
@@ -186,7 +187,8 @@ describe('effort clamping', () => {
 describe('banned models', () => {
   it('bans claude-fable-5 from review', () => {
     expect(isModelBanned('claude-fable-5')).toBe(true)
-    expect(isModelBanned('claude-opus-5')).toBe(false)
+    expect(isModelBanned('claude-opus-5')).toBe(true)
+    expect(isModelBanned('claude-sonnet-5-5')).toBe(false)
   })
 
   it('never routes a banned model from any vendor tier', () => {
@@ -205,7 +207,7 @@ describe('model resolution honours the strategy', () => {
     ({ tier: 'balanced', mode: 'smart', review_memory: true, focus: [], ...over }) as QualityConfig
 
   it('uses the strategy tier in smart mode', () => {
-    expect(resolveClaudeModel(quality(), undefined, { tier: 'thorough' })).toBe('claude-opus-5-5')
+    expect(resolveClaudeModel(quality(), undefined, { tier: 'thorough' })).toBe('claude-sonnet-5-5')
     expect(resolveClaudeModel(quality(), undefined, { tier: 'fast' })).toBe('claude-haiku-5-5')
   })
 
@@ -219,8 +221,8 @@ describe('model resolution honours the strategy', () => {
     expect(effectiveTier(quality(), { tier: null })).toBe('balanced')
   })
 
-  it('routes thorough to opus-5, not the legacy opus-4-8', () => {
-    expect(resolveClaudeModel(quality(), undefined, { tier: 'thorough' })).toBe('claude-opus-5-5')
+  it('keeps thorough below the flagship ceiling', () => {
+    expect(resolveClaudeModel(quality(), undefined, { tier: 'thorough' })).toBe('claude-sonnet-5-5')
   })
 
   // Regression: the old `auth !== 'api-key' → 'default'` guard discarded a
@@ -232,7 +234,7 @@ describe('model resolution honours the strategy', () => {
 
   it('drives the codex tier model from the strategy under api-key auth', () => {
     const vendor = { enabled: true, model: null, auth: 'api-key', effort: 'medium', timeout_sec: null, quality: 'medium' } as CodexVendorConfig
-    expect(resolveCodexModel(quality(), vendor, { tier: 'thorough' })).toBe('gpt-6-astra')
+    expect(resolveCodexModel(quality(), vendor, { tier: 'thorough' })).toBe('gpt-6.1-sol')
     expect(resolveCodexModel(quality(), vendor, { tier: 'fast' })).toBe('gpt-6-luna')
   })
 
@@ -577,7 +579,17 @@ describe('OpenCode smart-mode execution', () => {
     const nextModel = resolveOpenCodeModel(next.quality, next.opencodeVendor)
     expect(firstModel).toBe('opencode/glm-5.3-flash')
     expect(nextModel).toBe('opencode/glm-5.3')
-    expect(strategyCitation(cfg.vendors.opencode, cls, next.strategy, nextModel!)).toMatchObject({ version: '1.3.0', tier: 'balanced' })
+    expect(strategyCitation(cfg.vendors.opencode, cls, next.strategy, nextModel!)).toMatchObject({ version: '1.4.0', tier: 'balanced' })
     expect(strategyCitation(cfg.vendors.opencode, cls, first.strategy, 'default')).toBeUndefined()
+  })
+})
+
+
+describe('policy source integrity', () => {
+  it('has one definition of each top-level strategy key', () => {
+    const source = readFileSync(new URL('../config/review-strategy.json', import.meta.url), 'utf8')
+    const keys = [...source.matchAll(/^ {2}"([^"\n]+)":/gm)].map(match => match[1])
+    expect(keys.length).toBeGreaterThan(10)
+    expect(new Set(keys).size).toBe(keys.length)
   })
 })

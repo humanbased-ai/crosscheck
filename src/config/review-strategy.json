@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "version": "1.3.0",
-  "_version_note": "1.3.0 — refresh Claude 5.5 tiers and provider-scoped prices; OpenCode is active and supports operator-supplied tier maps. Catalog model defaults are preserved until OpenCode variant support is verified. PR classes, step sets and round limits are unchanged.",
+  "version": "1.4.0",
+  "_version_note": "1.4.0 — ck init discovers user model pools and strategy preferences. Every provider flagship is excluded from review; thoroughness raises effort on eligible models. PR classes and step sets are unchanged.",
   "updated": "2026-11-01",
   "generated_at": "2026-08-07T05:00:00Z",
   "review_interval_days": 30,
   "report": "docs/dynamic-thoroughness.md",
   "runtime_status": "active",
-  "_tier_map_note": "Claude and Codex built-in runtime tier maps live in review-model-tiers.json. OpenCode has no built-in model map: model > configured model_tiers[tier] > operator CLI default.",
+  "_tier_map_note": "Built-in base tier maps live in review-model-tiers.json. Saved quality.review_models pools control reviews ahead of base authoring/fixing pins. OpenCode has no automatic paid-provider map; ck init discovers the user inventory.",
   "_runtime_status_note": "Read at runtime by src/lib/review-strategy.ts. The runner classifies each PR from the cloned working copy and folds the result into the quality config the reviewers receive; the version, class, and tier are stamped into every annotation.",
   "_comment": "Versioned review policy and model evidence. Runtime default maps remain in review-model-tiers.json and are checked for agreement. OpenCode tiers are recommendations, applied only through operator-supplied model_tiers. Re-verify with npm run verify:strategy.",
   "sources": [
@@ -77,8 +77,48 @@
   "banned_models": [
     {
       "model": "claude-fable-5",
-      "reason": "Retained historical default-selection exclusion. The old SWE-bench comparison is not current review-quality evidence; do not promote a $50/MTok-output model into defaults without local evaluation.",
-      "banned_on": "2026-08-07"
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "claude-fable-5-1",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "claude-opus-5",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "claude-opus-5-5",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "gpt-6-astra",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "opencode/kimi-k3",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "opencode/glm-5.3",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "opencode/deepseek-v4-pro",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "opencode/minimax-m3",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
     }
   ],
   "vendors": {
@@ -89,7 +129,7 @@
       "tiers": {
         "fast": "claude-haiku-5-5",
         "balanced": "claude-sonnet-5-5",
-        "thorough": "claude-opus-5-5"
+        "thorough": "claude-sonnet-5-5"
       }
     },
     "codex": {
@@ -100,7 +140,7 @@
       "tiers": {
         "fast": "gpt-6-luna",
         "balanced": "gpt-6.1-sol",
-        "thorough": "gpt-6-astra"
+        "thorough": "gpt-6.1-sol"
       }
     },
     "opencode": {
@@ -110,8 +150,8 @@
       "status": "active_opt_in",
       "tiers": {
         "fast": "opencode/glm-5.3-flash",
-        "balanced": "opencode/glm-5.3",
-        "thorough": "opencode/kimi-k3"
+        "balanced": "opencode/deepseek-v4.1-flash",
+        "thorough": "opencode/deepseek-v4.1-flash"
       },
       "_note": "Candidate profile, not automatic routing. Confirm account access and local defect-detection quality. opencode_variants=[] preserves provider defaults; native API effort support alone is not OpenCode wire evidence."
     }
@@ -122,8 +162,8 @@
       "match_extensions": ["tsx", "jsx", "vue", "svelte", "css", "scss", "less", "html"],
       "threshold": "more frontend files than backend files",
       "preferred": {
-        "thorough": ["claude-opus-5-5", "gpt-6-astra", "opencode/kimi-k3"],
-        "balanced": ["claude-sonnet-5-5", "gpt-6.1-sol", "opencode/glm-5.3"],
+        "thorough": ["claude-sonnet-5-5", "gpt-6.1-sol", "opencode/deepseek-v4.1-flash"],
+        "balanced": ["claude-sonnet-5-5", "gpt-6.1-sol"],
         "fast": ["claude-haiku-5-5", "gpt-6-luna", "opencode/glm-5.3-flash"]
       },
       "basis": "Current catalog and cost candidates; no matched local review-quality evaluation for this lineup.",
@@ -132,8 +172,8 @@
     "backend": {
       "match_extensions": ["py", "go", "rs", "java", "rb", "php", "sql", "ts"],
       "preferred": {
-        "thorough": ["claude-opus-5-5", "gpt-6-astra", "opencode/kimi-k3"],
-        "balanced": ["claude-sonnet-5-5", "gpt-6.1-sol", "opencode/glm-5.3"],
+        "thorough": ["claude-sonnet-5-5", "gpt-6.1-sol", "opencode/deepseek-v4.1-flash"],
+        "balanced": ["claude-sonnet-5-5", "gpt-6.1-sol"],
         "fast": ["claude-haiku-5-5", "gpt-6-luna", "opencode/glm-5.3-flash"]
       },
       "basis": "Current catalog and cost candidates; no matched local review-quality evaluation for this lineup.",
@@ -148,7 +188,6 @@
     "formula": "uncached_input_mtok * input_rate + cache_read_mtok * cache_read_rate + cache_write_mtok * cache_write_rate + output_mtok * output_rate + tool/provider fees",
     "caveat": "API-equivalent estimates are not subscription invoices. Tokenizers, repeated context, reasoning output, long-context tiers, cache writes, provider markups and retries change total cost. OpenCode Console prices do not apply to direct providers."
   },
-
   "_pr_classes_note": "ORDER IS THE ROUTING LOGIC - first match wins. `risky` sits second, immediately after `generated`, so consequence-based promotion dominates every cheapening rule below it: a deletion-only PR that removes auth code, or a 2-file change to a migration, must not fall through to `fast`.",
   "pr_classes": [
     {

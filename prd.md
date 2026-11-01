@@ -2963,3 +2963,22 @@ Phase 3: `--build` — full autonomous contribution. Requires careful scoping of
 - [x] CI (typecheck + build) + CD (staging @beta, production @latest) workflows
 - [x] get-started.md — full documentation
 - [x] `crosscheck init` gh CLI check accepts `GITHUB_TOKEN` env var as valid auth (no false failure when token is set but `gh auth login` was never run)
+
+### User-specific review model strategy (2026-11-01)
+
+`ck init` scans installed agent metadata and user model configuration, then saves
+an allowed review model pool and `balanced`, `speed-max` or `cost-min` preference.
+This pool controls review/recheck model and effort selection ahead of legacy
+authoring/fixing pins. Origin detection and the cross-vendor attribution chain
+remain unchanged. Initialization derives the review agent preference order from
+the selected profile; existing authoring/fixing priorities are retained.
+
+Every provider flagship is excluded from reviews, including free listings and
+known aliases. Unknown custom deployments require explicit non-flagship
+classification. High-risk work raises supported effort within the ceiling rather
+than selecting a flagship. Watch-session metadata refresh may add eligible
+advertised-free models to enabled agents, honors explicit exclusions, removes
+vanished/newly paid free routes, and freezes each active review's snapshot.
+Quota failure may fall back only within the permitted pool; it never establishes
+a verdict. See `docs/research/review-models-2026-11-01.md` for evidence, limitations
+and verification.

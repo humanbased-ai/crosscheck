@@ -1,3 +1,4 @@
+import { eligibleReviewConfig } from './review-selection.js'
 import { execSync, execFileSync } from 'child_process'
 import { randomUUID } from 'crypto'
 import { readFileSync } from 'fs'
@@ -615,7 +616,7 @@ export function resolveReviewVendor(
   config: Config,
   fallback?: Vendor,
 ): Vendor | null {
-  return resolveReviewer(stepReviewer, origin, config, fallback, 'review')
+  return resolveReviewer(stepReviewer, origin, eligibleReviewConfig(config), fallback, 'review')
 }
 
 function supportsStep(vendor: Vendor, stepType: string): boolean {
@@ -1347,18 +1348,16 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // Logged once per run, not per step: nothing here depends on `step`, and
   // recomputing inside the loop printed the same line for review and recheck.
   if (strategy && roundStrategy) {
-    // Report the effort each vendor was actually GIVEN, not the level the round
-    // asked for. The two CLI vocabularies differ, so one round can send codex
-    // `xhigh` and claude `high`; printing the request names a level nobody ran.
+    // This is the round request; the reviewer reports its selected wire effort.
     const appliedEffort = [...new Set([
       ...(config.vendors.claude.enabled ? [claudeVendor.effort] : []),
       ...(config.vendors.codex.enabled ? [codexVendor.effort] : []),
       ...(config.vendors.opencode.enabled ? [opencodeVendor.effort] : []),
     ])].join('/')
     const escalatedNote = escalated ? ` · round ${ctx.round} escalated` : ''
-    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${roundStrategy.tier ?? 'skip'} tier${appliedEffort ? ` (${appliedEffort})` : ''}${escalatedNote}`))
+    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${roundStrategy.tier ?? 'skip'} tier${appliedEffort ? ` (requested ${appliedEffort})` : ''}${escalatedNote}`))
     if (escalatedNote) {
-      fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, applied_effort_claude: config.vendors.claude.enabled ? claudeVendor.effort : null, applied_effort_codex: config.vendors.codex.enabled ? codexVendor.effort : null, applied_effort_opencode: config.vendors.opencode.enabled ? opencodeVendor.effort : null, strategy_version: strategy.version })
+      fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, requested_effort_claude: config.vendors.claude.enabled ? claudeVendor.effort : null, requested_effort_codex: config.vendors.codex.enabled ? codexVendor.effort : null, requested_effort_opencode: config.vendors.opencode.enabled ? opencodeVendor.effort : null, strategy_version: strategy.version })
     }
   }
 
@@ -1398,7 +1397,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     if (effectiveType === 'review' || effectiveType === 'recheck') {
       const isRecheck = effectiveType === 'recheck'
-      let reviewer = resolveReviewVendor(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      let reviewer = resolveReviewVendor(step.reviewer, origin, roundConfig, ctx.smartSwitchFallback)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
         results[step.name] = { skipped: true, skipReason: 'no_reviewer' }
