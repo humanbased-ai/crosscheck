@@ -98,7 +98,8 @@ export function openCodeModelEffort(model: string | undefined, effort: string): 
 
 // V1 exposes --variant; only V2 accepts the #variant model suffix.
 export function openCodeModelArgs(model: string | undefined, effort: string | undefined, v2: boolean): string[] {
-  if (!model) return []
+  // 'default' means the model comes from opencode.json, so pass no --model.
+  if (!model || model === 'default') return []
   const [id, explicitVariant] = model.split('#')
   const variant = explicitVariant || effort
   if (!variant) return ['--model', id]

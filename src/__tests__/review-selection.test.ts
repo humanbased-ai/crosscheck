@@ -32,10 +32,10 @@ describe('review model and effort policy', () => {
     expect(selectReviewModel('opencode', { ...cfg.quality, review_models: { opencode: cfg.quality.review_models!.opencode!.slice(0, 1) } }, cfg.vendors.opencode).model).toBe('private/fast-review')
   })
 
-  it('rejects an excluded pin and an unresolved OpenCode default before invoking a reviewer', () => {
+  it('rejects an excluded pin and keeps the OpenCode provider default before invoking a reviewer', () => {
     const cfg = ConfigSchema.parse({})
     expect(() => selectReviewModel('claude', cfg.quality, { ...cfg.vendors.claude, model: 'opus' })).toThrow(/excluded.*ck init/i)
-    expect(() => selectReviewModel('opencode', cfg.quality, cfg.vendors.opencode)).toThrow(/ck init/i)
+    expect(selectReviewModel('opencode', cfg.quality, cfg.vendors.opencode)).toMatchObject({ model: 'default' })
     expect(selectReviewModel('codex', cfg.quality, cfg.vendors.codex).model).not.toBe('default')
   })
 

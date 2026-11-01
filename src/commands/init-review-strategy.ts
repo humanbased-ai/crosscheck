@@ -76,18 +76,27 @@ export async function initializeReviewStrategy(
     if (!fresh && !current.vendors[scan.vendor].enabled) return prepare(index + 1)
     // Keep existing allowlists on rerun. Newly discovered paid models are never auto-selected.
     const previous = current.quality.review_models?.[scan.vendor]
+    // A logged-out scan only exposes free models. Keep previously selected paid
+    // entries it cannot see instead of silently dropping them from the pool.
+    const preserved = !fresh && !scan.authenticated
+      ? (previous ?? []).filter(model => !scan.models.some(entry => entry.id === model.id))
+      : []
     const selected = previous?.map(model => model.id) ?? scan.models.filter(model => !model.excluded && model.model_class).map(model => model.id)
     const requested = await deps.models(scan, selected)
     for (const model of scan.models) {
       if (requested.includes(model.id)) excluded.delete(model.id)
       else excluded.add(model.id)
     }
-    const allowed: ReviewModel[] = []
+    const allowed: ReviewModel[] = [...preserved]
     async function classifyNext(position: number): Promise<void> {
       const name = requested[position]
       if (name === undefined) return
       const entry = scan.models.find(model => model.id === name && !model.excluded)
-      if (!entry) throw new Error('Invalid model selection; configuration unchanged')
+      if (!entry) {
+        // Previously saved entries hidden by an unauthenticated scan are preserved above.
+        if (preserved.some(model => model.id === name)) return classifyNext(position + 1)
+        throw new Error('Invalid model selection; configuration unchanged')
+      }
       const modelClass = entry.model_class ?? previous?.find(model => model.id === name)?.model_class ?? await deps.classify(entry)
       if (!modelClass) { excluded.add(name); return classifyNext(position + 1) }
       const { excluded: _excluded, ...fields } = entry

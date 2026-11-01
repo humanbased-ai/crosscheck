@@ -24,7 +24,9 @@ export function refreshFreeModelPool(config: Config, scans: AgentModelScan[]): P
     const { excluded: _excluded, ...metadata } = entry
     updated.push({ ...metadata, model_class: entry.model_class, auto_free: true })
   }
-  pools.opencode = updated
+  // Only materialise an empty pool when one already existed. Writing `[]` for a
+  // vendor that never had a pool would disable a model_tiers-only OpenCode setup.
+  if (pools.opencode !== undefined || updated.length > 0) pools.opencode = updated
   return pools
 }
 

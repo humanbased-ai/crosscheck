@@ -56,7 +56,9 @@ export function selectReviewModel(
     throw new Error(`Review model ${model} is excluded by the flagship ceiling; run ck init.`)
   }
   if (saved === undefined && !reviewModelClass(model) && model !== 'default') throw new Error(`Unknown custom review model ${model}; classify its non-flagship deployment with ck init.`)
-  if (model === 'default') throw new Error(`Select an explicit ${vendor} review model with ck init; the provider default may be a flagship.`)
+  // OpenCode keeps working with no pin: 'default' leaves the model configured in
+  // opencode.json in charge. Claude resolves a tier model and Codex maps its own
+  // default before this point, so only OpenCode reaches it.
   const preference = quality.preference ?? 'balanced'
   let target = quality.tier === 'thorough' ? preference === 'speed-max' ? 'medium' : 'high'
     : quality.tier === 'fast' || preference === 'speed-max' ? 'low' : 'medium'
