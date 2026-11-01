@@ -140,30 +140,6 @@
       "confidence": "hypothesis — not a runtime vendor selector"
     }
   },
-  "modes": {
-    "cross_vendor": {
-      "strength": "An independent second perspective. A vendor switch broke a stalled loop twice in the census (PR #2057, #2060) after same-vendor escalation had failed for 3-6 rounds.",
-      "round_3_lever": "switch vendor AND raise effort",
-      "max_rounds": 3
-    },
-    "single_vendor": {
-      "strength": "One CLI to authenticate, version, and monitor. No routing logic.",
-      "round_3_lever": "raise effort, then promote one tier - no fresh-eyes option exists",
-      "max_rounds": 2
-    }
-  },
-  "conflict_resolve": {
-    "tier": "fast",
-    "effort": "low",
-    "reason": "mechanical text surgery bounded by conflict markers - measured at 37s against ~643s for a review"
-  },
-  "citation": {
-    "_comment": "Every crosscheck comment states the strategy it ran under, so a past review can be explained by the policy in force at the time.",
-    "annotation_fields": ["strategy", "class", "tier"],
-    "annotation_example": "<!-- crosscheck: origin=claude reviewer=claude model=claude-opus-5 type=review round=1 verdict=BLOCK service=crosscheck sha=abc123 strategy=1.1.0 class=risky tier=thorough -->",
-    "body_template": "{tier} tier · {reason} · strategy v{version}",
-    "body_example": "_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](https://github.com/humanbased-ai/crosscheck) with Opus 5 (high) — thorough tier · touches a security or data-critical path, where a missed defect is expensive · strategy v1.1.0_"
-  },
   "pricing_basis": {
     "as_of": "2026-11-01",
     "currency": "USD",
