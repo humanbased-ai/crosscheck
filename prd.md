@@ -2976,7 +2976,10 @@ the selected profile; existing authoring/fixing priorities are retained.
 Every provider flagship is excluded from reviews, including free listings and
 known aliases. Unknown custom deployments require explicit non-flagship
 classification. High-risk work raises supported effort within the ceiling rather
-than selecting a flagship. Watch-session metadata refresh may add eligible
+than selecting a flagship. Escalation uses the same permitted pool and discovered
+effort controls as the reviewer. Later rounds explicitly report the review ceiling
+when the preceding round's model/effort cannot be strengthened within policy;
+fixes, scoped rechecks and existing round limits still apply. Watch-session metadata refresh may add eligible
 advertised-free models to enabled agents, honors explicit exclusions, removes
 vanished/newly paid free routes, and freezes each active review's snapshot.
 Quota failure may fall back only within the permitted pool; it never establishes

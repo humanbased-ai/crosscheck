@@ -45,6 +45,16 @@ describe('ck init model strategy persistence', () => {
     expect((await read()).vendors.claude.enabled).toBe(false)
   })
 
+  it.each(['interactive', 'noninteractive'])('preserves paid selections on a logged-out %s rerun', async mode => {
+    const paid = { id: 'private/paid-review', model_class: 'standard', source: 'configured', efforts: ['high'], input_usd_mtok: 1, output_usd_mtok: 5 }
+    await writeFile(path, yaml.dump({ quality: { review_models: { opencode: [paid, scans[0].models[0]] } }, vendors: { opencode: { enabled: true } } }))
+    await initializeReviewStrategy(path, false, { ...deps(), models: async (_scan, selected) =>
+      mode === 'interactive' ? [scans[0].models[0].id] : selected,
+    })
+    expect((await read()).quality.review_models?.opencode).toContainEqual(paid)
+    expect((await read()).quality.review_models?.opencode).toHaveLength(2)
+  })
+
   it('requires explicit classification for an unknown custom deployment and excludes unchecked free models from watch refresh', async () => {
     await writeFile(path, 'vendors:\n  opencode:\n    enabled: true\n')
     await initializeReviewStrategy(path, false, { ...deps(), scan: async () => scans.map(scan => ({ ...scan, authenticated: true })), models: async () => ['private/reviewer'], classify: async () => 'standard' })

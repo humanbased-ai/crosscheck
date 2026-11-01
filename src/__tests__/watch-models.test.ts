@@ -54,6 +54,19 @@ describe('watch-session free-model discovery', () => {
     expect(await new WatchModelDiscovery(scan).snapshot(disabled)).toBe(disabled)
     expect(scan).not.toHaveBeenCalled()
   })
+
+  it('keeps a legacy tier map usable when no free model is found, while retaining an explicit empty pool', async () => {
+    const cfg = ConfigSchema.parse({ quality: { refresh_free_models: true }, vendors: {
+      opencode: { enabled: true, model_tiers: { balanced: 'opencode/deepseek-v4.1-flash' } },
+    } })
+    const snapshot = await new WatchModelDiscovery(async () => scans([])).snapshot(cfg)
+    expect(snapshot.quality.review_models?.opencode).toBeUndefined()
+    expect(eligibleReviewConfig(snapshot).vendors.opencode.enabled).toBe(true)
+    cfg.quality.review_models = { opencode: [] }
+    const disabled = await new WatchModelDiscovery(async () => scans([])).snapshot(cfg)
+    expect(disabled.quality.review_models?.opencode).toEqual([])
+    expect(eligibleReviewConfig(disabled).vendors.opencode.enabled).toBe(false)
+  })
 })
 
 

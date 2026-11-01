@@ -27,6 +27,18 @@ afterEach(() => { rmSync(repo, { recursive: true, force: true }); vi.restoreAllM
 const approved = { stdout: JSON.stringify({ type: 'text', part: { text: 'No issues found.\n\nVERDICT: APPROVE' } }), stderr: '' }
 
 describe('review policy at the subprocess boundary', () => {
+  it('omits model and variant arguments for an unpinned OpenCode default', async () => {
+    const cfg = ConfigSchema.parse({})
+    vi.mocked(execa).mockResolvedValue({ stdout: 'Options:\n --auto\n --format json\n --standalone', stderr: '' } as never)
+    vi.mocked(runOpenCode).mockResolvedValue(approved)
+    const outcome = await runOpenCodeReview(repo, 'main', 'Review with the configured OpenCode default', cfg.quality, cfg.vendors.opencode)
+    expect(outcome.model).toBe('default')
+    expect(outcome.effort).toBeUndefined()
+    expect(vi.mocked(runOpenCode).mock.calls[0][0]).not.toContain('--model')
+    expect(openCodeModelArgs('default', 'high', false)).toEqual([])
+    expect(openCodeModelArgs('default', 'high', true)).toEqual([])
+  })
+
   it('falls back from exhausted free usage only to an opted-in model and cools down the free route', async () => {
     vi.mocked(execa).mockResolvedValue({ stdout: 'Options:\n --auto\n --format json\n --standalone', stderr: '' } as never)
     vi.mocked(runOpenCode).mockRejectedValueOnce(new Error('Free usage limit reached')).mockResolvedValue(approved)

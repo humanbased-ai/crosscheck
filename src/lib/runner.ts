@@ -1,4 +1,4 @@
-import { eligibleReviewConfig } from './review-selection.js'
+import { eligibleReviewConfig, reviewEffortLevels, selectReviewModel } from './review-selection.js'
 import { execSync, execFileSync } from 'child_process'
 import { randomUUID } from 'crypto'
 import { readFileSync } from 'fs'
@@ -28,7 +28,7 @@ import { log as fileLog, logError, classifyError, type LogEntry } from '../lib/l
 import { buildCommitTrailers, parseAnnotation } from '../lib/annotation.js'
 import { shaCovers } from '../lib/pr-workflow-state.js'
 import { resolveClaudeModel, resolveCodexModel, resolveOpenCodeModel } from '../lib/review-models.js'
-import { resolveReviewStrategy, escalate, clampToLevels, openCodeVariantsFor, isDocOnlyChange, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
+import { resolveReviewStrategy, escalate, clampToLevels, isDocOnlyChange, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS, OPENCODE_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { planAutoFixDelivery, forceWithLeaseArgs, parseLsRemoteOid, isLeaseRejection, assessFixBranchOwnership, isInvalidBaseError } from '../lib/auto-fix-branch.js'
@@ -965,6 +965,8 @@ export interface RoundExecution {
   /** `config` with the above folded in, for callees that take the whole config. */
   roundConfig: Config
   escalated: boolean
+  /** A later round has no stronger permitted model/effort than its predecessor. */
+  atCeiling: boolean
 }
 
 /**
@@ -977,8 +979,9 @@ export interface RoundExecution {
  *
  * Rounds beyond the first escalate: the class tier was already tried and did not
  * resolve the PR, so difficulty is now measured rather than predicted. escalate()
- * raises effort where the model supports it and promotes a tier where it does
- * not, and never weakens the model.
+ * uses the same model pool and effort ceiling as the reviewer. When neither
+ * effort nor a tier promotion changes the wire request, it reports the ceiling
+ * instead of claiming another escalation. Fix/recheck and round limits still run.
  */
 export function resolveRoundExecution(
   config: Config,
@@ -994,33 +997,43 @@ export function resolveRoundExecution(
       opencodeVendor: config.vendors.opencode,
       roundConfig: config,
       escalated: false,
+      atCeiling: false,
     }
   }
 
-  // The vendors that may actually run this round, each with the model it would
-  // use and the vocabulary its CLI accepts. Keyed to the enabled vendors rather
-  // than to claude alone: on a codex-only install the claude tier model is never
-  // called, so judging escalation by its effort ladder promoted a tier every
-  // round while codex sat at the effort it started on.
-  const baseQuality = strategyQuality(config.quality, strategy)
-  const lanes: EscalationLane[] = []
-  if (config.vendors.claude.enabled) {
-    lanes.push({ model: resolveClaudeModel(baseQuality, config.vendors.claude), accepted: CLAUDE_EFFORT_LEVELS })
+  const selections = (current: ResolvedStrategy): { vendor: Vendor; model: string; effort?: string; efforts: string[] }[] => {
+    const quality = strategyQuality(config.quality, current)
+    const eligible = eligibleReviewConfig({ ...config, quality })
+    return (['claude', 'codex', 'opencode'] as const).flatMap(vendor => {
+      if (!eligible.vendors[vendor].enabled) return []
+      try {
+        const selection = selectReviewModel(vendor, quality, strategyVendor(config.vendors[vendor], current,
+          vendor === 'claude' ? CLAUDE_EFFORT_LEVELS : vendor === 'codex' ? CODEX_EFFORT_LEVELS : OPENCODE_EFFORT_LEVELS))
+        return [{ vendor, ...selection, efforts: reviewEffortLevels(vendor, quality, selection.model) }]
+      } catch {
+        // This is planning, not execution: a legacy pin may be valid for a
+        // fix-only workflow but excluded from review. The reviewer still throws
+        // the original selection error if that vendor is actually dispatched.
+        return []
+      }
+    })
   }
-  if (config.vendors.codex.enabled) {
-    lanes.push({ model: resolveCodexModel(baseQuality, config.vendors.codex), accepted: CODEX_EFFORT_LEVELS })
+  const plan = (throughRound: number): ResolvedStrategy => {
+    let current = { ...strategy, tier: strategy.tier ?? config.quality.tier }
+    // Two escalation steps; later rounds hold the ceiling and keep their bounds.
+    for (let step = 2; step <= Math.min(throughRound, 3); step++) {
+      const next = escalate({ tier: current.tier, effort: current.effort }, step, selections(current))
+      current = { ...current, ...next }
+    }
+    return current
   }
-  if (config.vendors.opencode.enabled) {
-    const model = resolveOpenCodeModel(baseQuality, config.vendors.opencode) ?? 'default'
-    lanes.push({ model, accepted: model.includes('#') ? [] : openCodeVariantsFor(model) ?? OPENCODE_EFFORT_LEVELS })
-  }
-
-  const escalated = escalate(
-    { tier: strategy.tier ?? config.quality.tier, effort: strategy.effort },
-    round,
-    lanes,
-  )
-  const roundStrategy = { ...strategy, tier: escalated.tier, effort: escalated.effort }
+  const roundStrategy = plan(round)
+  const previous = selections(plan(Math.max(1, round - 1)))
+  const current = selections(roundStrategy)
+  const escalated = round > 1 && current.some(selection => {
+    const prior = previous.find(entry => entry.vendor === selection.vendor)
+    return prior !== undefined && (prior.model !== selection.model || prior.effort !== selection.effort)
+  })
   const quality = strategyQuality(config.quality, roundStrategy)
   const claudeVendor = strategyVendor(config.vendors.claude, roundStrategy, CLAUDE_EFFORT_LEVELS)
   const codexVendor = strategyVendor(config.vendors.codex, roundStrategy, CODEX_EFFORT_LEVELS)
@@ -1033,7 +1046,8 @@ export function resolveRoundExecution(
     codexVendor,
     opencodeVendor,
     roundConfig: { ...config, quality, vendors: { ...config.vendors, claude: claudeVendor, codex: codexVendor, opencode: opencodeVendor } },
-    escalated: escalated.tier !== strategy.tier || escalated.effort !== strategy.effort,
+    escalated,
+    atCeiling: round > 1 && current.length > 0 && !escalated,
   }
 }
 
@@ -1328,7 +1342,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // Above the try, and above emitPRComplexity, because both the complexity event
   // and workflow_complete report the tier that ran: an escalated round reporting
   // the base class tier is the same defect as a comment citing one.
-  const { strategy: roundStrategy, quality, claudeVendor, codexVendor, opencodeVendor, roundConfig, escalated } =
+  const { strategy: roundStrategy, quality, claudeVendor, codexVendor, opencodeVendor, roundConfig, escalated, atCeiling } =
     resolveRoundExecution(config, strategy, ctx.round ?? 1)
 
   emitPRComplexity(ctx, triggerField, quality.tier)
@@ -1354,10 +1368,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       ...(config.vendors.codex.enabled ? [codexVendor.effort] : []),
       ...(config.vendors.opencode.enabled ? [opencodeVendor.effort] : []),
     ])].join('/')
-    const escalatedNote = escalated ? ` · round ${ctx.round} escalated` : ''
+    const escalatedNote = escalated ? ` · round ${ctx.round} escalated`
+      : atCeiling ? ` · round ${ctx.round} at review ceiling; holding permitted model/effort` : ''
     log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${roundStrategy.tier ?? 'skip'} tier${appliedEffort ? ` (requested ${appliedEffort})` : ''}${escalatedNote}`))
-    if (escalatedNote) {
+    if (escalated) {
       fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, requested_effort_claude: config.vendors.claude.enabled ? claudeVendor.effort : null, requested_effort_codex: config.vendors.codex.enabled ? codexVendor.effort : null, requested_effort_opencode: config.vendors.opencode.enabled ? opencodeVendor.effort : null, strategy_version: strategy.version })
+    } else if (atCeiling) {
+      fileLog({ level: 'info', event: 'strategy_ceiling_reached', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, tier: roundStrategy.tier, strategy_version: strategy.version })
     }
   }
 

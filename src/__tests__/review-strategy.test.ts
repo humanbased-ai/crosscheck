@@ -11,7 +11,7 @@ import {
   strategyVersion,
   ladderLimits,
 } from '../lib/review-strategy.js'
-import { resolveClaudeModel, resolveCodexModel, resolveOpenCodeModel, effectiveTier } from '../lib/review-models.js'
+import { resolveClaudeModel, resolveCodexModel, effectiveTier } from '../lib/review-models.js'
 import type { CodexVendorConfig, QualityConfig } from '../config/schema.js'
 import { ConfigSchema, CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
 import { buildReviewCommentBody } from '../github/client.js'
@@ -21,6 +21,7 @@ import { strategyDeterminedModel, strategyVendor, resolveRoundExecution, strateg
 import { claudeEffort } from '../reviewers/claude.js'
 import { codexReasoningEffort } from '../reviewers/codex.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
+import { selectReviewModel } from '../lib/review-selection.js'
 
 const pr = (files: string[], over: Partial<Parameters<typeof resolveReviewStrategy>[0]> = {}) =>
   resolveReviewStrategy({ files, additions: 100, deletions: 50, ...over })
@@ -570,15 +571,17 @@ describe('OpenCode smart-mode execution', () => {
   it('promotes the mapped model when the current provider has no verified variant ladder', () => {
     const cfg = ConfigSchema.parse({ vendors: {
       claude: { enabled: false }, codex: { enabled: false },
-      opencode: { enabled: true, model_tiers: { fast: 'opencode/glm-5.3-flash', balanced: 'opencode/glm-5.3', thorough: 'opencode/kimi-k3' } },
+      opencode: { enabled: true, model_tiers: { fast: 'opencode/glm-5.3-flash', balanced: 'opencode/deepseek-v4.1-flash', thorough: 'opencode/deepseek-v4.1-flash' } },
     } })
     const cls = pr(['src/view.ts'], { additions: 1, deletions: 1 })
     const first = resolveRoundExecution(cfg, cls, 1)
     const next = resolveRoundExecution(cfg, cls, 2)
-    const firstModel = resolveOpenCodeModel(first.quality, first.opencodeVendor)
-    const nextModel = resolveOpenCodeModel(next.quality, next.opencodeVendor)
+    const firstModel = selectReviewModel('opencode', first.quality, first.opencodeVendor).model
+    const nextModel = selectReviewModel('opencode', next.quality, next.opencodeVendor).model
     expect(firstModel).toBe('opencode/glm-5.3-flash')
-    expect(nextModel).toBe('opencode/glm-5.3')
+    expect(nextModel).toBe('opencode/deepseek-v4.1-flash')
+    expect(next.escalated).toBe(true)
+    expect(resolveRoundExecution(cfg, cls, 3)).toMatchObject({ escalated: false, atCeiling: true })
     expect(strategyCitation(cfg.vendors.opencode, cls, next.strategy, nextModel!)).toMatchObject({ version: '1.4.0', tier: 'balanced' })
     expect(strategyCitation(cfg.vendors.opencode, cls, first.strategy, 'default')).toBeUndefined()
   })

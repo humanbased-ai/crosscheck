@@ -467,6 +467,16 @@ detectable rather than silent (§6.6).
 
 **User-specific pools.** `ck init` scans installed agents and model configuration, then saves `quality.review_models` and the user's `balanced`, `speed-max` or `cost-min` preference. That review pool outranks legacy authoring/fixing model pins. Balanced chooses a standard eligible model when available for normal/risky work; speed-max chooses a fast class with lower effort; cost-min ranks advertised input/output rates, including free tiers. Unknown rates remain unknown, and unknown custom deployments need explicit non-flagship classification. Current model effort/variant metadata bounds each request. Risk and later rounds can raise effort, capped at high; once the ceiling binds, rechecks retain that judge and narrow the scope rather than escalate beyond policy.
 
+Escalation uses that same selected pool and exact discovered variant list, rather
+than the legacy authoring tier map or an empty bundled OpenCode ladder. Each
+round compares its permitted model/effort with the preceding round. A
+thorough-class OpenCode model with no verified variants has no remaining model
+or effort step: the runner explicitly logs `strategy_ceiling_reached` and
+“at review ceiling,” while fixes and rechecks continue under their existing
+round and budget limits. This is also the result when speed-max's medium ceiling
+binds, a pin collapses tier choices, or the pool already runs at high. An empty
+variant list never authorizes guessed controls or promotion to a flagship.
+
 **OpenCode free tiers can change during watch.** With refresh enabled, the watcher performs a bounded metadata scan before the next review after 15 minutes. It adds only advertised-zero-price, known non-flagship models on an already enabled OpenCode agent, honors explicit exclusions, and removes vanished free models or models whose price becomes positive/unknown. Each active review keeps a snapshot. Refresh does not rewrite disk configuration, enable another agent, or silently opt into a new paid route. Exhausted routes cool down for 15 minutes; fallback stays inside the existing permitted pool. A provider listing is not proof of usable quota.
 
 The [discovery procedure and limitations](research/review-models-2026-11-01.md) distinguish CLI catalog evidence, configured preference, custom-provider execution support and account entitlement. No matched defect-detection evaluation or measured speed ranking is claimed. Prices come from [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing), [OpenAI pricing](https://developers.openai.com/api/docs/pricing), and [OpenCode Console](https://opencode.ai/v2/docs/console/models/).

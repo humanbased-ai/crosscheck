@@ -2,7 +2,7 @@ import type { CodexVendorConfig, OpenCodeVendorConfig, QualityConfig, ReviewMode
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS } from '../config/schema.js'
 import type { Vendor } from './vendor.js'
 import { resolveClaudeModel, resolveCodexModel, resolveOpenCodeModel, CODEX_TIER_MODELS_SUBSCRIPTION } from './review-models.js'
-import { clampToLevels, isModelBanned } from './review-strategy.js'
+import { clampToLevels, isModelBanned, openCodeVariantsFor } from './review-strategy.js'
 
 export function reviewModelExcluded(id: string): boolean {
   const name = id.toLowerCase().split('#')[0]
@@ -21,6 +21,16 @@ export function reviewModelClass(id: string): ReviewModel['model_class'] | undef
 export function reviewCost(model: ReviewModel): number {
   if (model.input_usd_mtok === undefined || model.output_usd_mtok === undefined) return Infinity
   return .1 * model.input_usd_mtok + .048 * model.output_usd_mtok
+}
+
+/** The exact effort controls a review may send, including the profile ceiling. */
+export function reviewEffortLevels(vendor: Vendor, quality: QualityConfig, model: string): string[] {
+  if (model.includes('#')) return [] // An explicit OpenCode variant is already fixed.
+  const discovered = quality.review_models?.[vendor]?.find(entry => entry.id === model)?.efforts
+  const accepted = discovered ?? (vendor === 'claude' ? CLAUDE_EFFORT_LEVELS
+    : vendor === 'codex' ? CODEX_EFFORT_LEVELS : openCodeVariantsFor(model) ?? [])
+  const ceiling = quality.preference === 'speed-max' ? ['none', 'low', 'medium'] : ['none', 'low', 'medium', 'high']
+  return accepted.filter(level => ceiling.includes(level))
 }
 
 export function selectReviewModel(
@@ -63,8 +73,7 @@ export function selectReviewModel(
   let target = quality.tier === 'thorough' ? preference === 'speed-max' ? 'medium' : 'high'
     : quality.tier === 'fast' || preference === 'speed-max' ? 'low' : 'medium'
   if (['high', 'xhigh', 'max', 'ultra'].includes(config.effort)) target = preference === 'speed-max' ? 'medium' : 'high'
-  const accepted = candidate?.efforts ?? (vendor === 'claude' ? [...CLAUDE_EFFORT_LEVELS] : vendor === 'codex' ? [...CODEX_EFFORT_LEVELS] : [])
-  const effort = clampToLevels(target, accepted.filter(level => ['none', 'low', 'medium', 'high'].includes(level))) ?? undefined
+  const effort = clampToLevels(target, reviewEffortLevels(vendor, quality, model)) ?? undefined
   return { model, effort }
 }
 

@@ -289,6 +289,8 @@ export interface EscalationLane {
   model: string
   /** The vendor CLI's effort flags. Omitted = judge on model capability alone. */
   accepted?: readonly string[]
+  /** Live review capabilities, already bounded by profile policy; overrides the catalog. */
+  efforts?: readonly string[]
 }
 
 /**
@@ -323,7 +325,8 @@ export function escalate(
   // Both clamps, in order: what the MODEL can reason at, then what the CLI has a
   // flag for. Only the second reaches the wire.
   const wire = (lane: EscalationLane, effort: string | null): string | null => {
-    const atModel = modelIsKnown(lane.model) ? clampToLevels(effort, effortLevelsFor(lane.model)) : effort
+    const atModel = lane.efforts !== undefined ? clampToLevels(effort, lane.efforts)
+      : modelIsKnown(lane.model) ? clampToLevels(effort, effortLevelsFor(lane.model)) : effort
     return lane.accepted ? clampToLevels(atModel, lane.accepted) : atModel
   }
 
