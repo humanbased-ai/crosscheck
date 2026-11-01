@@ -74,6 +74,7 @@ const StrategySchema = z.object({
   models: z.record(z.string(), z.object({
     vendor: z.string(),
     effort_levels: z.array(z.string()),
+    opencode_variants: z.array(z.string()).optional(),
   }).passthrough()),
   banned_models: z.array(z.object({ model: z.string(), reason: z.string() })).default([]),
   vendors: z.record(z.string(), z.object({
@@ -242,9 +243,14 @@ export function resolveReviewStrategy(pr: PRContext): ResolvedStrategy {
   }
 }
 
-/** Effort levels a model accepts. Empty array = the model has no effort control. */
+/** Verified native effort ladder; empty means no ladder is established here. */
 export function effortLevelsFor(model: string): string[] {
   return STRATEGY.models[model]?.effort_levels ?? []
+}
+
+/** Undefined = custom provider; [] = leave the provider's variant default intact. */
+export function openCodeVariantsFor(model: string): string[] | undefined {
+  return STRATEGY.models[model]?.opencode_variants
 }
 
 export function isModelBanned(model: string): boolean {

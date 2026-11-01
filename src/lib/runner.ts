@@ -27,7 +27,7 @@ import { log as fileLog, logError, classifyError, type LogEntry } from '../lib/l
 import { buildCommitTrailers, parseAnnotation } from '../lib/annotation.js'
 import { shaCovers } from '../lib/pr-workflow-state.js'
 import { resolveClaudeModel, resolveCodexModel, resolveOpenCodeModel } from '../lib/review-models.js'
-import { resolveReviewStrategy, escalate, clampToLevels, isDocOnlyChange, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
+import { resolveReviewStrategy, escalate, clampToLevels, openCodeVariantsFor, isDocOnlyChange, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS, OPENCODE_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { planAutoFixDelivery, forceWithLeaseArgs, parseLsRemoteOid, isLeaseRejection, assessFixBranchOwnership, isInvalidBaseError } from '../lib/auto-fix-branch.js'
@@ -1010,7 +1010,8 @@ export function resolveRoundExecution(
     lanes.push({ model: resolveCodexModel(baseQuality, config.vendors.codex), accepted: CODEX_EFFORT_LEVELS })
   }
   if (config.vendors.opencode.enabled) {
-    lanes.push({ model: resolveOpenCodeModel(baseQuality, config.vendors.opencode) ?? 'default', accepted: OPENCODE_EFFORT_LEVELS })
+    const model = resolveOpenCodeModel(baseQuality, config.vendors.opencode) ?? 'default'
+    lanes.push({ model, accepted: model.includes('#') ? [] : openCodeVariantsFor(model) ?? OPENCODE_EFFORT_LEVELS })
   }
 
   const escalated = escalate(

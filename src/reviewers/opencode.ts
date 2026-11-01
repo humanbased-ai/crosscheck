@@ -1,4 +1,4 @@
-import { runOpenCode, openCodeModelArgs } from './opencode-process.js'
+import { runOpenCode, openCodeModelArgs, openCodeModelEffort } from './opencode-process.js'
 import { execa } from 'execa'
 import { rmSync, mkdtempSync, renameSync, existsSync, writeFileSync, accessSync, statSync, constants } from 'fs'
 import { join, delimiter } from 'path'
@@ -225,7 +225,7 @@ export async function runOpenCodeReview(
   _skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
   const model = resolveOpenCodeModel(quality, vendor)
-  const effort = opencodeEffort(vendor.effort)
+  const effort = openCodeModelEffort(model, opencodeEffort(vendor.effort))
   const tierTimeout = tierTimeoutMs(quality.tier)
   // timeoutMs: 0 → no cap (crazy/halfcrazy); undefined → tier-based default; positive → user-specified
   const resolvedTimeout = timeoutMs === undefined ? tierTimeout : timeoutMs === 0 ? undefined : timeoutMs
@@ -265,9 +265,7 @@ export async function runOpenCodeReview(
   // up front (see requireOpenCodeRun).
   //
   // OpenCode V1 uses --variant; V2 uses the #variant model suffix.
-  // Effort is honoured only when `vendors.opencode.model` is set; otherwise OpenCode's configured
-  // default model AND its default variant run, and `effort` is reported but
-  // not applied (it is not a claim the CLI was given).
+  // Effort is reported only when an explicit or verified variant reaches the CLI.
   const { baseArgs, policyFormat } = await requireOpenCodeRun()
   const modelArgs = openCodeModelArgs(model, effort, policyFormat === 'v2')
   const args = [...baseArgs, ...modelArgs]

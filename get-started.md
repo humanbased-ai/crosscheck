@@ -72,7 +72,9 @@ npm install -g @opencode/cli
 opencode auth login   # sign in to a provider (e.g. DeepSeek, Anthropic, OpenAI)
 ```
 
-OpenCode is **opt-in**: enable it with `vendors.opencode.enabled: true` (or `crosscheck onboard`). Its model and provider come from your OpenCode config (`opencode auth login` / `opencode.json`) — crosscheck pins no model by default, so reviews run against whichever model OpenCode is configured to use. Reasoning effort is carried as the `#variant` suffix on `--model provider/model#variant`, so `vendors.opencode.effort` (none | high | max) applies only when `vendors.opencode.model` is also set.
+OpenCode is **opt-in**: enable it with `vendors.opencode.enabled: true` (or `crosscheck onboard`). Model selection is `model` → `model_tiers[effective tier]` → your OpenCode default. The optional tier map lets smart-mode risk promotion and rechecks select different provider-qualified models. Missing entries preserve your default; crosscheck does not enable a new provider or purchase credits. See the [current candidate profile and prices](docs/dynamic-thoroughness.md#65-the-strategy-table).
+
+Variants are provider-specific. Put a verified variant in an explicit model ID, such as `provider/model#max`; Crosscheck emits V1 `--variant max` or a V2 suffix. Catalog candidates without verified OpenCode variant evidence use the provider default and report no effort. Custom providers retain `vendors.opencode.effort` (none | high | max), so confirm that vocabulary with your provider. Native API reasoning controls do not prove the same OpenCode variant exists.
 
 ### GitHub CLI
 
@@ -1221,12 +1223,18 @@ vendors:
 
   # Opt-in third harness; disabled by default. Its model/provider come from
   # `opencode auth login` / opencode.json, not from a crosscheck catalog.
-  # Reasoning effort rides the `--model provider/model#variant` suffix, so
-  # `effort` applies only when `model` is also set.
+  # Optional model_tiers selects per effective tier; model is a global override.
   opencode:
     enabled: false
-    # model: provider/model   # e.g. alibaba-cn/deepseek-v4-pro; unset = opencode.json default
-    effort: high              # none | high | max
+    # model: provider/model   # global pin, ahead of model_tiers
+    # model_tiers:            # opt-in example; confirm IDs with opencode models
+    #   fast: opencode/glm-5.3-flash
+    #   balanced: opencode/glm-5.3
+    #   thorough: opencode/kimi-k3
+    # Missing tiers use the OpenCode default. An explicit #variant is honored
+    # (V1: --variant, V2: suffix); catalog models otherwise keep provider defaults.
+    # Console prices and candidate evaluation: docs/dynamic-thoroughness.md §6.5
+    effort: high              # none | high | max; custom providers unless a variant is verified
     # timeout_sec: 1200       # max seconds per CLI call; unset = tier-based (300/600/1200)
 
 # ── Quality ───────────────────────────────────────────────────────────────────

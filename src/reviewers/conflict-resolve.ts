@@ -1,4 +1,4 @@
-import { runOpenCode, openCodeModelArgs } from './opencode-process.js'
+import { runOpenCode, openCodeModelArgs, openCodeModelEffort } from './opencode-process.js'
 import { execSync } from 'child_process'
 import { lstatSync, readFileSync, realpathSync } from 'fs'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
@@ -326,7 +326,7 @@ async function runAgenticConflictResolve(
   configuredEffort: string | undefined,
   codexFullAccess: boolean,
 ): Promise<ConflictResolveResult> {
-  const effort = vendor === 'codex' ? codexReasoningEffort(configuredEffort ?? 'medium') : opencodeEffort(configuredEffort ?? 'high')
+  const effort = vendor === 'codex' ? codexReasoningEffort(configuredEffort ?? 'medium') : openCodeModelEffort(model, opencodeEffort(configuredEffort ?? 'high'))
   const fileList = conflictedFiles.map(file => `- ${file}`).join('\n')
   const skillInstructions = vendor === 'codex' && codexSkillsReachable(skillSession, codexFullAccess)
     ? renderSkillBrokerInstructions(skillSession)
