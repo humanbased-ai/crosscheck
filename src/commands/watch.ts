@@ -29,6 +29,7 @@ import {
   detectGitHubLogin,
   getLinearCredentials,
 } from '../config/loader.js'
+import { resolveReviewerIdentity } from '../lib/reviewer-identity.js'
 import { randomFortune } from '../lib/fortune.js'
 import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
@@ -303,6 +304,7 @@ export async function runWatch(opts: WatchOpts = {}) {
   const board = new PRBoard()
   const workflow = loadWorkflow(process.cwd())
   board.setConfig(config, workflow)
+  board.setReviewerIdentity(await resolveReviewerIdentity(config))
 
   // Thin wrapper: routes important messages to both terminal and file log
   const bLog = (line1: string, line2?: string) => {

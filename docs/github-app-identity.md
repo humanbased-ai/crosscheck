@@ -129,3 +129,17 @@ a regression.
 
 `ck auth` re-runs the same probes against the saved config, so it is the fastest
 way to diagnose a setup that stopped working.
+
+## Where the identity shows up
+
+| Surface | What it reports |
+|---|---|
+| `ck auth` | actor, reviewer, and the full probe table |
+| `ck init` | `reviewer identity` row (fails only when an app is configured but unusable) and a `code-owner` advisory |
+| `ck status` | the same `reviewer` row, bounded to 10s so status stays responsive |
+| watch / kickass board | `reviewing as <identity>` in the config panel |
+
+The advisory fires when a configured repo's default branch sets
+`require_code_owner_reviews: true`, and names the CODEOWNERS handles when the
+file is readable. It is a note, not a failure: an advisory bot review is a valid
+setup, and `ck` never blocks on it.

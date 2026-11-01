@@ -1,6 +1,7 @@
 import chalk from 'chalk'
 import type { Config, DisplayTheme } from '../config/schema.js'
 import type { WorkflowStep } from './workflow.js'
+import type { ReviewerIdentity } from './reviewer-identity.js'
 import { selectTip } from './tips.js'
 import { oneLine } from './vendor-error-summary.js'
 
@@ -421,6 +422,7 @@ export class PRBoard {
 
   private config: Config | null = null
   private steps: WorkflowStep[] = []
+  private reviewerIdentity: ReviewerIdentity | null = null
   private theme: Theme = buildTheme({
     bar_fill: 'blue', bar_empty: 'dim',
     cr_approve: 'green', cr_needs_work: 'yellow', cr_block: 'red',
@@ -433,6 +435,15 @@ export class PRBoard {
     this.config = config
     this.steps = steps
     this.theme = buildTheme(config.display.theme)
+  }
+
+  /**
+   * Who posts the reviews. Resolved by the caller — the board never mints a
+   * token or fetches — so the panel states a fact instead of guessing. Unset
+   * means the line is omitted entirely.
+   */
+  setReviewerIdentity(identity: ReviewerIdentity | null): void {
+    this.reviewerIdentity = identity
   }
 
   setTunnel(type: string, url: string | null, alive: boolean): void {
@@ -966,6 +977,14 @@ export class PRBoard {
     if (cfg.vendors.claude.enabled) vendors.push('claude')
     if (cfg.vendors.codex.enabled) vendors.push('codex')
     lines.push(`  ${t.dim('vendors: ')} ${vendors.join(t.dim(' · '))}`)
+
+    if (this.reviewerIdentity) {
+      const { label, kind, appId } = this.reviewerIdentity
+      const suffix = kind === 'app'
+        ? t.dim(`· app ${appId ?? '—'}`)
+        : t.dim('· comments only on your own PRs')
+      lines.push(`  ${t.dim('reviewing as')} ${chalk.bold(label)} ${suffix}`)
+    }
 
     return lines
   }

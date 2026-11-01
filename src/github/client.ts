@@ -364,6 +364,92 @@ export async function probeGithubApp(opts: AppProbeOptions): Promise<AppProbeRes
   }
 }
 
+// ── Branch protection ────────────────────────────────────────────────────────
+// A GitHub App cannot be a code owner, so a bot approval can never satisfy
+// `require_code_owner_reviews`. Detecting that up front turns a PR that silently
+// sits in REVIEW_REQUIRED into a one-line warning at setup time.
+
+export interface BranchProtectionInfo {
+  branch: string
+  protected: boolean
+  requiresCodeOwnerReview: boolean
+  requiredApprovingReviewCount: number
+}
+
+function httpStatus(err: unknown): number | null {
+  if (typeof err !== 'object' || err === null || !('status' in err)) return null
+  const status = (err as { status?: unknown }).status
+  return typeof status === 'number' ? status : null
+}
+
+/**
+ * null means "cannot tell" (no admin rights, or the API refused) — callers must
+ * skip the advisory rather than reporting a failure. 404 is unambiguous: the
+ * branch exists but carries no protection.
+ */
+export async function getBranchProtection(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  branch: string,
+): Promise<BranchProtectionInfo | null> {
+  try {
+    const { data } = await octokit.rest.repos.getBranchProtection({ owner, repo, branch })
+    const reviews = data.required_pull_request_reviews
+    return {
+      branch,
+      protected: true,
+      requiresCodeOwnerReview: reviews?.require_code_owner_reviews === true,
+      requiredApprovingReviewCount: reviews?.required_approving_review_count ?? 0,
+    }
+  } catch (err) {
+    if (httpStatus(err) === 404) {
+      return { branch, protected: false, requiresCodeOwnerReview: false, requiredApprovingReviewCount: 0 }
+    }
+    return null
+  }
+}
+
+export async function getDefaultBranch(octokit: Octokit, owner: string, repo: string): Promise<string | null> {
+  try {
+    const { data } = await octokit.rest.repos.get({ owner, repo })
+    return data.default_branch
+  } catch {
+    return null
+  }
+}
+
+const CODEOWNERS_PATHS = ['.github/CODEOWNERS', 'CODEOWNERS', 'docs/CODEOWNERS']
+
+/** @handles from the first CODEOWNERS file that exists; [] when unreadable. */
+export async function readCodeowners(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  ref?: string,
+): Promise<string[]> {
+  for (const path of CODEOWNERS_PATHS) {
+    try {
+      const { data } = await octokit.rest.repos.getContent({ owner, repo, path, ...(ref ? { ref } : {}) })
+      if (Array.isArray(data) || !('content' in data)) continue
+      const text = Buffer.from(data.content, 'base64').toString('utf8')
+      const owners = new Set<string>()
+      for (const line of text.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith('#')) continue
+        // `<pattern> @owner @org/team` — the pattern is the first token.
+        for (const token of trimmed.split(/\s+/).slice(1)) {
+          if (token.startsWith('@')) owners.add(token)
+        }
+      }
+      return [...owners]
+    } catch {
+      // Try the next conventional location.
+    }
+  }
+  return []
+}
+
 export function verifyWebhookSignature(payload: string, signature: string, secret: string): boolean {
   const expected = `sha256=${createHmac('sha256', secret).update(payload).digest('hex')}`
   try {
