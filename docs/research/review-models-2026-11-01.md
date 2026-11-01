@@ -89,7 +89,8 @@ models. A failed stream cannot produce an approving verdict.
    actionable recall, false positives, completion, latency, fixer regressions and
    total round cost. No paid replay or quality superiority is claimed here.
 5. Run `npm test`, `npm run lint`, `npm run typecheck`, `npm run build`,
-   `npm run verify:strategy`, and `node scripts/verify-model-tier-sources.mjs`.
+   `npm run verify:strategy`, `node scripts/verify-model-tier-sources.mjs`, and
+   `node scripts/smoke-init.mjs` (POSIX fixture agents; build first).
    Source-string checks do not verify numeric price changes; read the actual
    provider prices each month.
 
