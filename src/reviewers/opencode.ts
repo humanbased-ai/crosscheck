@@ -1,4 +1,4 @@
-import { runOpenCode, openCodeModelArgs } from './opencode-process.js'
+import { runOpenCode, openCodeModelArgs, openCodeModelEffort } from './opencode-process.js'
 import { execa } from 'execa'
 import { rmSync, mkdtempSync, renameSync, existsSync, writeFileSync, accessSync, statSync, constants } from 'fs'
 import { join, delimiter } from 'path'
@@ -6,7 +6,8 @@ import { tmpdir } from 'os'
 import { stripVTControlCharacters } from 'util'
 import type { QualityConfig, OpenCodeVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
-import { resolveOpenCodeModel } from '../lib/review-models.js'
+import { selectReviewModel } from '../lib/review-selection.js'
+import { isVendorFailoverError } from '../lib/smart-switch.js'
 import type { ReviewResult } from './claude.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { vendorFailureSummary } from '../lib/vendor-error-summary.js'
@@ -211,7 +212,7 @@ export function isolateCheckoutOpenCodeConfig(
   }
 }
 
-export async function runOpenCodeReview(
+async function reviewWithOpenCodeModel(
   repoDir: string,
   baseBranch: string,
   prTitle: string,
@@ -224,8 +225,9 @@ export async function runOpenCodeReview(
   issueContext?: string,
   _skillSession?: SkillActivationSession,
 ): Promise<ReviewResult> {
-  const model = resolveOpenCodeModel(quality, vendor)
-  const effort = opencodeEffort(vendor.effort)
+  const selected = selectReviewModel('opencode', quality, vendor)
+  const model = selected.model
+  const effort = model.includes('#') ? openCodeModelEffort(model, vendor.effort) : selected.effort
   const tierTimeout = tierTimeoutMs(quality.tier)
   // timeoutMs: 0 → no cap (crazy/halfcrazy); undefined → tier-based default; positive → user-specified
   const resolvedTimeout = timeoutMs === undefined ? tierTimeout : timeoutMs === 0 ? undefined : timeoutMs
@@ -265,9 +267,7 @@ export async function runOpenCodeReview(
   // up front (see requireOpenCodeRun).
   //
   // OpenCode V1 uses --variant; V2 uses the #variant model suffix.
-  // Effort is honoured only when `vendors.opencode.model` is set; otherwise OpenCode's configured
-  // default model AND its default variant run, and `effort` is reported but
-  // not applied (it is not a claim the CLI was given).
+  // Effort is reported only when an explicit or verified variant reaches the CLI.
   const { baseArgs, policyFormat } = await requireOpenCodeRun()
   const modelArgs = openCodeModelArgs(model, effort, policyFormat === 'v2')
   const args = [...baseArgs, ...modelArgs]
@@ -584,5 +584,31 @@ export async function checkOpenCodeAuth(): Promise<{ ok: boolean; detail: string
   } catch (err: unknown) {
     const error = err as { stderr?: string; message?: string }
     return { ok: false, detail: error.stderr ?? error.message ?? 'not found' }
+  }
+}
+
+
+type OpenCodeReviewArgs = Parameters<typeof reviewWithOpenCodeModel>
+const limitedModels = new Map<string, number>()
+
+export async function runOpenCodeReview(...args: OpenCodeReviewArgs): Promise<ReviewResult> {
+  const quality = args[3]
+  const pool = quality.review_models?.opencode
+  if (!pool) return reviewWithOpenCodeModel(...args)
+  const eligible = pool.filter(model => (limitedModels.get(model.id) ?? 0) <= Date.now())
+  if (eligible.length === 0) throw new Error('opencode: usage limit cooldown leaves no permitted review model')
+  const nextArgs: OpenCodeReviewArgs = [...args]
+  nextArgs[3] = { ...quality, review_models: { ...quality.review_models, opencode: eligible } }
+  const selected = selectReviewModel('opencode', nextArgs[3], args[4])
+  try {
+    return await reviewWithOpenCodeModel(...nextArgs)
+  } catch (err) {
+    if (!isVendorFailoverError(err)) throw err
+    limitedModels.set(selected.model, Date.now() + 15 * 60_000)
+    const remaining = eligible.filter(model => model.id !== selected.model)
+    if (remaining.length === 0) throw err
+    args[6]?.(`  opencode model ${selected.model} unavailable; trying another permitted review model`)
+    nextArgs[3] = { ...quality, review_models: { ...quality.review_models, opencode: remaining } }
+    return runOpenCodeReview(...nextArgs)
   }
 }

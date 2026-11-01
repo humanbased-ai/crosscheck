@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-08",
+  "updated": "2026-11-01",
   "sources": [
     {
       "name": "OpenAI model catalog",
@@ -14,27 +14,27 @@
     {
       "name": "Anthropic model catalog",
       "url": "https://platform.claude.com/docs/en/about-claude/models/overview",
-      "checks": ["claude-haiku-5-5", "claude-sonnet-5", "claude-opus-5"]
+      "checks": ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]
     },
     {
       "name": "Anthropic model selection guide",
       "url": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model",
-      "checks": ["Claude Haiku 5.5", "Claude Sonnet 5", "Claude Opus 5"]
+      "checks": ["Claude Haiku 5.5", "Claude Sonnet 5.5", "Claude Opus 5.5"]
     }
   ],
   "claude": {
     "fast": "claude-haiku-5-5",
-    "balanced": "claude-sonnet-5",
-    "thorough": "claude-opus-5"
+    "balanced": "claude-sonnet-5-5",
+    "thorough": "claude-sonnet-5-5"
   },
   "codex_api": {
     "fast": "gpt-6-luna",
     "balanced": "gpt-6.1-sol",
-    "thorough": "gpt-6-astra"
+    "thorough": "gpt-6.1-sol"
   },
   "codex_subscription": {
     "fast": "gpt-6-luna",
     "balanced": "gpt-6-sol",
-    "thorough": "gpt-6-astra"
+    "thorough": "gpt-6-sol"
   }
 }

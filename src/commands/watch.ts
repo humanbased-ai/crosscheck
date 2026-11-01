@@ -63,6 +63,7 @@ import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
 import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, claimRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
+import { WatchModelDiscovery } from '../lib/watch-models.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
 
 const WEBHOOK_EVENTS = ['pull_request', 'issue_comment']
@@ -358,6 +359,8 @@ export async function runWatch(opts: WatchOpts = {}) {
   let idleIntervalRef: ReturnType<typeof setInterval> | null = null
   let backtraceIntervalRef: ReturnType<typeof setInterval> | null = null
 
+  const modelDiscovery = new WatchModelDiscovery()
+
   async function reviewPR(params: ReviewPRParams): Promise<void> {
     lastActivityAt = Date.now()  // reset idle timer on any PR event
     const { owner, repoName, prNumber } = params
@@ -387,9 +390,10 @@ export async function runWatch(opts: WatchOpts = {}) {
 
       // Smart-switch: when cross-vendor is degraded, override to single-vendor with the healthy vendor
       const ss = getSmartSwitch()
+      const modelSnapshot = await modelDiscovery.snapshot(config)
       const effectiveConfig = (config.mode === 'cross-vendor' && ss.active && ss.fallbackVendor)
-        ? buildFallbackConfig(config, ss.fallbackVendor)
-        : config
+        ? buildFallbackConfig(modelSnapshot, ss.fallbackVendor)
+        : modelSnapshot
 
       const reviewer = await assignReviewer(origin, effectiveConfig)
 

@@ -1,35 +1,49 @@
 {
   "schema_version": 1,
-  "version": "1.2.0",
-  "_version_note": "1.2.0 — trivial and test_only gained `recheck`. They declared `fix` without it, so the fix step pushed a commit that nothing then judged: on crosscheck-proof-fixture#2 the fix restored a dropped ownership filter and left a test asserting the old query shape, CI went red, and the workflow reported `completed`. `fix` is the only step that mutates the PR and `recheck` is the only one that judges the result, so the pair is now a schema invariant in review-strategy.ts rather than a convention. Routing changed, so the version changes with it: a comment citing 1.1.0 has to stay explicable by 1.1.0.",
-  "updated": "2026-09-08",
+  "version": "1.4.0",
+  "_version_note": "1.4.0 — ck init discovers user model pools and strategy preferences. Every provider flagship is excluded from review; thoroughness raises effort on eligible models. PR classes and step sets are unchanged.",
+  "updated": "2026-11-01",
   "generated_at": "2026-08-07T05:00:00Z",
-  "review_interval_days": 60,
+  "review_interval_days": 30,
   "report": "docs/dynamic-thoroughness.md",
   "runtime_status": "active",
-  "_tier_map_note": "resolveClaudeModel/resolveCodexModel read tier->model from review-model-tiers.json, not from `vendors` below. The two agree today and CI verifies both against the same provider docs; `vendors` here is the documented policy and the tier map is the runtime lookup.",
+  "_tier_map_note": "Built-in base tier maps live in review-model-tiers.json. Saved quality.review_models pools control reviews ahead of base authoring/fixing pins. OpenCode has no automatic paid-provider map; ck init discovers the user inventory.",
   "_runtime_status_note": "Read at runtime by src/lib/review-strategy.ts. The runner classifies each PR from the cloned working copy and folds the result into the quality config the reviewers receive; the version, class, and tier are stamped into every annotation.",
-  "_comment": "Single source of truth for how crosscheck picks a model, effort, and step set. Every review comment cites `version` so a past review can be explained by the policy in force when it ran. Supersedes review-model-tiers.json, which is retained for backwards compat. Re-verify every review_interval_days with `npm run verify:strategy`.",
-
+  "_comment": "Versioned review policy and model evidence. Runtime default maps remain in review-model-tiers.json and are checked for agreement. OpenCode tiers are recommendations, applied only through operator-supplied model_tiers. Re-verify with npm run verify:strategy.",
   "sources": [
     {
-      "name": "Anthropic model catalog",
-      "url": "https://platform.claude.com/docs/en/about-claude/models/overview",
-      "checks": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-5-5"]
+      "name": "Anthropic models",
+      "url": "https://platform.claude.com/docs/en/models/overview",
+      "checks": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
     },
     {
-      "name": "Anthropic effort parameter",
+      "name": "Anthropic prices",
+      "url": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "checks": ["Claude Opus 5.5", "Claude Sonnet 5.5", "100,000"]
+    },
+    {
+      "name": "Anthropic effort",
       "url": "https://platform.claude.com/docs/en/build-with-claude/effort",
-      "checks": ["xhigh", "effort"]
+      "checks": ["xhigh", "claude-opus-5-5"]
     },
     {
-      "name": "OpenAI model catalog",
-      "url": "https://developers.openai.com/api/docs/models",
-      "checks": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]
+      "name": "OpenAI prices",
+      "url": "https://developers.openai.com/api/docs/pricing",
+      "checks": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "272K"]
+    },
+    {
+      "name": "OpenCode Console models and prices",
+      "url": "https://opencode.ai/v2/docs/console/models/",
+      "checks": ["glm-5.3-flash", "glm-5.3", "minimax-m3", "deepseek-v4.1-flash", "deepseek-v4-pro", "kimi-k3"]
+    },
+    {
+      "name": "DeepSeek model lifecycle",
+      "url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "checks": ["deepseek-flash", "deepseek-v4-pro"]
     }
   ],
-
   "benchmarks": {
+    "_status": "Historical August generation/issue-resolution evidence only; not used to rank current review models",
     "swe_bench_verified": {
       "measures": "Resolving real GitHub issues in Python repositories. Backend/general proxy only.",
       "source": "https://benchlm.ai/benchmarks/sweVerified",
@@ -43,63 +57,137 @@
       "caveat": "Measures generation, not defect detection. Claude Opus 5 is absent from the retrieved leaderboard - a missing measurement, not a low score."
     }
   },
-
   "models": {
-    "claude-opus-5":             { "vendor": "claude", "license": "closed", "in_usd_mtok": 5,    "out_usd_mtok": 25,   "context": 1000000, "swe_bench_verified": 0.960, "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
-    "claude-sonnet-5":           { "vendor": "claude", "license": "closed", "in_usd_mtok": 3,    "out_usd_mtok": 15,   "context": 1000000, "swe_bench_verified": 0.852, "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
-    "claude-haiku-5-5":          { "vendor": "claude", "license": "closed", "in_usd_mtok": 0.1,  "out_usd_mtok": 0.5,  "context": 1000000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
-    "gpt-6-astra":               { "vendor": "codex",  "license": "closed", "in_usd_mtok": 10,   "out_usd_mtok": 50,   "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
-    "gpt-6.1-sol":               { "vendor": "codex",  "license": "closed", "in_usd_mtok": 2,    "out_usd_mtok": 10,   "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["low","medium","high","xhigh","max"] },
-    "gpt-6-luna":                { "vendor": "codex",  "license": "closed", "in_usd_mtok": 0.1,  "out_usd_mtok": 0.5,  "context": 1050000, "swe_bench_verified": null,  "frontend_elo": null, "effort_levels": ["none","low","medium","high","xhigh","max"] },
-
-    "kimi-k3":            { "vendor": "opencode", "license": "Modified MIT", "in_usd_mtok": 3,     "out_usd_mtok": 15,   "context": 1000000, "swe_bench_verified": null,  "frontend_elo": 1679, "effort_levels": [], "status": "planned" },
-    "glm-5.2":            { "vendor": "opencode", "license": "MIT",          "in_usd_mtok": 1.4,   "out_usd_mtok": 4.4,  "context": 1000000, "swe_bench_verified": null,  "frontend_elo": 1587, "effort_levels": [], "status": "planned" },
-    "deepseek-v4-pro":    { "vendor": "opencode", "license": "MIT",          "in_usd_mtok": 0.435, "out_usd_mtok": 0.87, "context": 1000000, "swe_bench_verified": 0.806, "frontend_elo": null, "effort_levels": ["none","high","max"], "status": "planned" },
-    "deepseek-v4-flash":  { "vendor": "opencode", "license": "MIT",          "in_usd_mtok": 0.14,  "out_usd_mtok": 0.28, "context": 1000000, "swe_bench_verified": 0.790, "frontend_elo": null, "effort_levels": ["none","high","max"], "status": "planned" }
+    "claude-opus-5": {"vendor": "claude", "license": "closed", "in_usd_mtok": 5, "out_usd_mtok": 25, "context": 1000000, "swe_bench_verified": null, "frontend_elo": null, "effort_levels": ["low", "medium", "high", "xhigh", "max"]},
+    "claude-sonnet-5": {"vendor": "claude", "license": "closed", "in_usd_mtok": 2, "out_usd_mtok": 10, "context": 1000000, "swe_bench_verified": null, "frontend_elo": null, "effort_levels": ["low", "medium", "high", "xhigh", "max"]},
+    "claude-haiku-5-5": {"vendor": "claude", "license": "closed", "in_usd_mtok": 0.1, "out_usd_mtok": 0.5, "context": 1000000, "swe_bench_verified": null, "frontend_elo": null, "effort_levels": ["low", "medium", "high", "xhigh", "max"], "cache_read_usd_mtok": 0.01, "long_context": {"input_tokens_gt": 100000, "in_usd_mtok": 0.5, "out_usd_mtok": 2.5, "cache_read_usd_mtok": 0.05}},
+    "gpt-6-astra": {"vendor": "codex", "license": "closed", "in_usd_mtok": 10, "out_usd_mtok": 50, "context": 1050000, "swe_bench_verified": null, "frontend_elo": null, "effort_levels": ["low", "medium", "high", "xhigh", "max"], "cache_read_usd_mtok": 1, "long_context": {"input_tokens_gt": 272000, "in_usd_mtok": 20, "out_usd_mtok": 75.0, "cache_read_usd_mtok": 2}},
+    "gpt-6.1-sol": {"vendor": "codex", "license": "closed", "in_usd_mtok": 2, "out_usd_mtok": 10, "context": 1050000, "swe_bench_verified": null, "frontend_elo": null, "effort_levels": ["low", "medium", "high", "xhigh", "max"], "cache_read_usd_mtok": 0.1, "long_context": {"input_tokens_gt": 272000, "in_usd_mtok": 4, "out_usd_mtok": 15.0, "cache_read_usd_mtok": 0.2}},
+    "gpt-6-luna": {"vendor": "codex", "license": "closed", "in_usd_mtok": 0.1, "out_usd_mtok": 0.5, "context": 1050000, "swe_bench_verified": null, "frontend_elo": null, "effort_levels": ["none", "low", "medium", "high", "xhigh", "max"], "cache_read_usd_mtok": 0.01, "long_context": {"input_tokens_gt": 272000, "in_usd_mtok": 0.2, "out_usd_mtok": 0.75, "cache_read_usd_mtok": 0.02}},
+    "claude-opus-5-5": {"vendor": "claude", "provider": "anthropic", "in_usd_mtok": 4, "out_usd_mtok": 20, "cache_read_usd_mtok": 0.2, "context": 1000000, "effort_levels": ["low", "medium", "high", "xhigh", "max"]},
+    "claude-sonnet-5-5": {"vendor": "claude", "provider": "anthropic", "in_usd_mtok": 2, "out_usd_mtok": 10, "cache_read_usd_mtok": 0.1, "context": 1000000, "effort_levels": ["low", "medium", "high", "xhigh", "max"]},
+    "gpt-6.1-terra": {"vendor": "codex", "provider": "openai", "in_usd_mtok": 1, "out_usd_mtok": 5, "cache_read_usd_mtok": 0.05, "effort_levels": ["low", "medium", "high", "xhigh", "max"], "status": "evaluation_candidate", "long_context": {"input_tokens_gt": 272000, "in_usd_mtok": 2, "out_usd_mtok": 7.5, "cache_read_usd_mtok": 0.1}},
+    "opencode/glm-5.3-flash": {"vendor": "opencode", "provider": "opencode", "in_usd_mtok": 0.15, "out_usd_mtok": 0.5, "cache_read_usd_mtok": 0.03, "effort_levels": [], "opencode_variants": [], "status": "evaluation_candidate"},
+    "opencode/minimax-m3": {"vendor": "opencode", "provider": "opencode", "in_usd_mtok": 0.3, "out_usd_mtok": 1.2, "cache_read_usd_mtok": 0.06, "effort_levels": [], "opencode_variants": [], "status": "evaluation_candidate"},
+    "opencode/deepseek-v4.1-flash": {"vendor": "opencode", "provider": "opencode", "in_usd_mtok": 0.3, "out_usd_mtok": 1.2, "cache_read_usd_mtok": 0.006, "effort_levels": ["none", "low", "high", "max"], "opencode_variants": [], "status": "evaluation_candidate"},
+    "opencode/glm-5.3": {"vendor": "opencode", "provider": "opencode", "in_usd_mtok": 1.4, "out_usd_mtok": 4.4, "cache_read_usd_mtok": 0.26, "effort_levels": [], "opencode_variants": [], "status": "evaluation_candidate"},
+    "opencode/deepseek-v4-pro": {"vendor": "opencode", "provider": "opencode", "in_usd_mtok": 1.74, "out_usd_mtok": 3.48, "cache_read_usd_mtok": 0.145, "effort_levels": ["none", "low", "high", "max"], "opencode_variants": [], "status": "evaluation_candidate"},
+    "opencode/kimi-k3": {"vendor": "opencode", "provider": "opencode", "in_usd_mtok": 3, "out_usd_mtok": 15, "cache_read_usd_mtok": 0.3, "effort_levels": ["low", "high", "max"], "opencode_variants": [], "status": "evaluation_candidate", "cache_write_usd_mtok": 3}
   },
-
   "banned_models": [
     {
       "model": "claude-fable-5",
-      "reason": "Banned from code review on cost. $50/MTok output is 2x claude-opus-5 for a LOWER SWE-bench Verified score (95.0 vs 96.0). At the measured 48k output tokens per review that is $2.40 a call with no capability justification.",
-      "banned_on": "2026-08-07"
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "claude-fable-5-1",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "claude-opus-5",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "claude-opus-5-5",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "gpt-6-astra",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "opencode/kimi-k3",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "opencode/glm-5.3",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "opencode/deepseek-v4-pro",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
+    },
+    {
+      "model": "opencode/minimax-m3",
+      "reason": "Excluded from code review by the user-requested ceiling on every provider flagship.",
+      "banned_on": "2026-11-01"
     }
   ],
-
   "vendors": {
     "claude": {
-      "cli": "claude", "honors_model_under_subscription": true, "min_cli_version": null,
-      "tiers": { "fast": "claude-haiku-5-5", "balanced": "claude-sonnet-5", "thorough": "claude-opus-5" }
+      "cli": "claude",
+      "honors_model_under_subscription": true,
+      "min_cli_version": null,
+      "tiers": {
+        "fast": "claude-haiku-5-5",
+        "balanced": "claude-sonnet-5-5",
+        "thorough": "claude-sonnet-5-5"
+      }
     },
     "codex": {
-      "cli": "codex", "honors_model_under_subscription": true, "min_cli_version": "0.147.0",
+      "cli": "codex",
+      "honors_model_under_subscription": true,
+      "min_cli_version": "0.147.0",
       "_min_cli_version_note": "gpt-5.6-* return HTTP 400 'requires a newer version of Codex' below this. The CLI accepts --model under subscription auth; the old auth!=api-key guard in resolveCodexModel was wrong and dropped the configured model.",
-      "tiers": { "fast": "gpt-6-luna", "balanced": "gpt-6.1-sol", "thorough": "gpt-6-astra" }
+      "tiers": {
+        "fast": "gpt-6-luna",
+        "balanced": "gpt-6.1-sol",
+        "thorough": "gpt-6.1-sol"
+      }
     },
     "opencode": {
-      "cli": "opencode", "honors_model_under_subscription": true, "min_cli_version": null,
-      "status": "planned",
-      "tiers": { "fast": "deepseek-v4-flash", "balanced": "glm-5.2", "thorough": "kimi-k3" }
+      "cli": "opencode",
+      "honors_model_under_subscription": true,
+      "min_cli_version": null,
+      "status": "active_opt_in",
+      "tiers": {
+        "fast": "opencode/glm-5.3-flash",
+        "balanced": "opencode/deepseek-v4.1-flash",
+        "thorough": "opencode/deepseek-v4.1-flash"
+      },
+      "_note": "Candidate profile, not automatic routing. Confirm account access and local defect-detection quality. opencode_variants=[] preserves provider defaults; native API effort support alone is not OpenCode wire evidence."
     }
   },
-
   "domains": {
-    "_comment": "Capability is domain-shaped, not scalar. claude-opus-5 leads backend defect resolution; kimi-k3 leads frontend. A single tier ladder cannot express that. Detected from changed-file extensions; `mixed` and `unknown` both fall back to `backend`, the conservative default.",
+    "_comment": "Domain lists are evaluation hypotheses only; detectDomain records the domain but runtime vendor assignment follows routing and agent_priority, not these lists. Generation scores are not review-quality evidence.",
     "frontend": {
       "match_extensions": ["tsx", "jsx", "vue", "svelte", "css", "scss", "less", "html"],
       "threshold": "more frontend files than backend files",
-      "preferred": { "thorough": ["kimi-k3", "gpt-6-astra", "claude-opus-5"], "balanced": ["glm-5.2", "claude-sonnet-5"], "fast": ["gpt-6-luna", "deepseek-v4-flash"] },
-      "basis": "Frontend Code Arena Elo: kimi-k3 1679 > glm-5.2 1587 (gpt-6-* scores re-verified pending). Falls back to installed vendors when opencode is unavailable.",
-      "confidence": "hypothesis - the benchmark measures generation, not review. Pending local A/B."
+      "preferred": {
+        "thorough": ["claude-sonnet-5-5", "gpt-6.1-sol", "opencode/deepseek-v4.1-flash"],
+        "balanced": ["claude-sonnet-5-5", "gpt-6.1-sol"],
+        "fast": ["claude-haiku-5-5", "gpt-6-luna", "opencode/glm-5.3-flash"]
+      },
+      "basis": "Current catalog and cost candidates; no matched local review-quality evaluation for this lineup.",
+      "confidence": "hypothesis — not a runtime vendor selector"
     },
     "backend": {
       "match_extensions": ["py", "go", "rs", "java", "rb", "php", "sql", "ts"],
-      "preferred": { "thorough": ["claude-opus-5", "gpt-6-astra"], "balanced": ["claude-sonnet-5", "gpt-6.1-sol"], "fast": ["deepseek-v4-flash", "gpt-6-luna", "claude-haiku-5-5"] },
-      "basis": "SWE-bench Verified: claude-opus-5 0.960 > claude-sonnet-5 0.852 > deepseek-v4-pro 0.806 (claude-haiku-5-5 and gpt-6-* re-verified pending).",
-      "confidence": "measured"
+      "preferred": {
+        "thorough": ["claude-sonnet-5-5", "gpt-6.1-sol", "opencode/deepseek-v4.1-flash"],
+        "balanced": ["claude-sonnet-5-5", "gpt-6.1-sol"],
+        "fast": ["claude-haiku-5-5", "gpt-6-luna", "opencode/glm-5.3-flash"]
+      },
+      "basis": "Current catalog and cost candidates; no matched local review-quality evaluation for this lineup.",
+      "confidence": "hypothesis — not a runtime vendor selector"
     }
   },
-
+  "pricing_basis": {
+    "as_of": "2026-11-01",
+    "currency": "USD",
+    "unit": "per million tokens",
+    "mode": "standard, synchronous, uncached input unless stated",
+    "formula": "uncached_input_mtok * input_rate + cache_read_mtok * cache_read_rate + cache_write_mtok * cache_write_rate + output_mtok * output_rate + tool/provider fees",
+    "caveat": "API-equivalent estimates are not subscription invoices. Tokenizers, repeated context, reasoning output, long-context tiers, cache writes, provider markups and retries change total cost. OpenCode Console prices do not apply to direct providers."
+  },
   "_pr_classes_note": "ORDER IS THE ROUTING LOGIC - first match wins. `risky` sits second, immediately after `generated`, so consequence-based promotion dominates every cheapening rule below it: a deletion-only PR that removes auth code, or a 2-file change to a migration, must not fall through to `fast`.",
   "pr_classes": [
     {

@@ -3,6 +3,7 @@ import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import chalk from 'chalk'
+import { initializeReviewStrategy } from './init-review-strategy.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
 import { checkOpenCodeAuth } from '../reviewers/opencode.js'
@@ -165,7 +166,7 @@ export async function runInit(configPath?: string) {
 
   if (aiCliCount === 0) {
     // Neither AI CLI is authenticated — hard failure
-    console.log(chalk.red(`\nAt least one AI CLI (codex or claude) must be authenticated before crosscheck can run.\n`))
+    console.log(chalk.red(`\nNo saved AI CLI authentication found. Model discovery will also check OpenCode free-tier availability.\n`))
     if (nonAiFailures.length > 0) {
       console.log(chalk.yellow(`${nonAiFailures.length} other issue(s) also need attention.\n`))
     }
@@ -189,7 +190,8 @@ export async function runInit(configPath?: string) {
   // the global default, so `crosscheck init` patches the same file that `watch` reads.
   const dest = configPath ?? resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
   mkdirSync(join(homedir(), '.crosscheck'), { recursive: true })
-  if (!existsSync(dest)) {
+  const fresh = !existsSync(dest)
+  if (fresh) {
     const examplePath = new URL('../../crosscheck.config.example.yml', import.meta.url).pathname
     if (existsSync(examplePath)) {
       let content = readFileSync(examplePath, 'utf8')
@@ -229,6 +231,8 @@ export async function runInit(configPath?: string) {
       console.log(chalk.dim(`Config already exists at ${dest}\n`))
     }
   }
+
+  if (existsSync(dest)) await initializeReviewStrategy(dest, fresh)
 
   // Smee-client is optional but improves watch mode reliability.
   // Check if it's installed and show a one-line tip if not.

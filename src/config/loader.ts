@@ -542,3 +542,16 @@ export function patchBrandConfig(
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
   return true
 }
+
+/** User-owned model preferences only; never read auth files during discovery. */
+export function getAgentModelConfigPaths(): { claude: string; codex: string } {
+  return {
+    claude: join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'settings.json'),
+    codex: join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'config.toml'),
+  }
+}
+
+export function getClaudeModelEnvironment(): Record<string, string> {
+  const names = ['ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_CUSTOM_MODEL_OPTION']
+  return Object.fromEntries(names.flatMap(name => process.env[name] ? [[name, process.env[name]!]] : []))
+}

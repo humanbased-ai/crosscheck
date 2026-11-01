@@ -1,4 +1,4 @@
-import { runOpenCode, openCodeModelArgs } from './opencode-process.js'
+import { runOpenCode, openCodeModelArgs, openCodeModelEffort } from './opencode-process.js'
 import { codexModelRejection, codexTurnFailureMessage, withCodexJsonlOutput, withCodexModelFallback } from '../lib/codex-model-fallback.js'
 import { execSync } from 'child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
@@ -357,7 +357,7 @@ export async function runOpenCodeFixStep(
   configuredEffort?: string,
   humanFeedback?: string,
 ): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number; effort?: string }> {
-  const effort = opencodeEffort(configuredEffort ?? 'high')
+  const effort = openCodeModelEffort(model, opencodeEffort(configuredEffort ?? 'high'))
   let diff = ''
   try {
     diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
@@ -374,9 +374,7 @@ export async function runOpenCodeFixStep(
     .replace('{EXTRA_INSTRUCTIONS}', [instructions ? `Additional instructions: ${instructions}` : '', humanFeedback ?? ''].filter(Boolean).join('\n\n'))
 
   const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
-  // Same as the review path: OpenCode V1 uses --variant; V2 uses a #variant
-  // suffix on --model. Without a pinned model the
-  // variant cannot be sent, so `effort` is honoured only when `model` is set.
+  // Use the same provider-specific variant selection as the review path.
   const { baseArgs, policyFormat } = await requireOpenCodeRun()
   const modelArgs = openCodeModelArgs(model, effort, policyFormat === 'v2')
 

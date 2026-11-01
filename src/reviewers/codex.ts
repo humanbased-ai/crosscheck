@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { delimiter, join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
-import { resolveCodexModel } from '../lib/review-models.js'
+import { selectReviewModel, reviewModelExcluded } from '../lib/review-selection.js'
 import { codexTurnFailureMessage, withCodexModelFallback } from '../lib/codex-model-fallback.js'
 import type { ReviewResult } from './claude.js'
 import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
@@ -234,13 +234,15 @@ async function reviewWithCodexModel(
     try {
       const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
       const skillArgs = codexSkillBrokerArgs(skillSession, codexFullAccess)
-      const reasoningEffort = codexReasoningEffort(vendor.effort)
-      const effortArgs = ['-c', `model_reasoning_effort="${reasoningEffort}"`]
+      const pool = quality.review_models?.codex
+      const selectedQuality = pool ? { ...quality, review_models: { ...quality.review_models, codex: pool.filter(entry => entry.id === model) } } : quality
+      const reasoningEffort = selectReviewModel('codex', selectedQuality, { ...vendor, model }).effort
+      const effortArgs = reasoningEffort ? ['-c', `model_reasoning_effort="${reasoningEffort}"`] : []
       // The agent's final message is the review. Reading it from a file rather
       // than stdout keeps session chatter out of the posted comment, and leaves
       // stdout free to carry the usage line quiet mode would suppress.
       const lastMessagePath = join(tmpdir(), `crosscheck-codex-review-${randomUUID()}.md`)
-      onLog?.(`  running: codex exec --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''} -c model_reasoning_effort="${reasoningEffort}"`)
+      onLog?.(`  running: codex exec --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''}${reasoningEffort ? ` -c model_reasoning_effort="${reasoningEffort}"` : ''}`)
 
       try {
         const { result, retried } = await withCredentialFreeOrigin(repoDir, () => withTimeoutRetry(
@@ -339,11 +341,13 @@ type CodexReviewArgs = Parameters<typeof reviewWithCodexModel> extends [string, 
 
 export function runCodexReview(...args: CodexReviewArgs): Promise<ReviewResult> {
   const [, , , quality, vendor, , onLog, , onRetry] = args
+  const selected = selectReviewModel('codex', quality, vendor)
   return withCodexModelFallback(
-    resolveCodexModel(quality, vendor),
+    selected.model,
     'review',
     model => reviewWithCodexModel(model, ...args),
     onRetry ?? onLog,
+    quality.review_models?.codex?.filter(entry => !reviewModelExcluded(entry.id) && !reviewModelExcluded(entry.family ?? '')).map(entry => entry.id) ?? ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna'],
   )
 }
 

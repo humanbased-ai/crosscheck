@@ -27,6 +27,7 @@ For every change:
 ```bash
 npm run typecheck   # zero type errors
 npm run build       # clean compile to dist/
+npm test            # every test passes
 ```
 
 3. Self-review every changed file: unused imports, broken references, incorrect types.
@@ -77,7 +78,8 @@ feature branch → staging → main
 
 - Merging to `staging` triggers CI and publishes `@beta` to npm.
 - `staging` → `main` is promoted automatically every Friday at 18:00 UTC by the "Promote staging → main" workflow (or on demand via `workflow_dispatch`). It opens a PR — `main` is protected and rejects direct pushes — merges it, and dispatches the release.
-- Landing on `main` publishes `@latest` and emails yi@inductive.network. There is no manual approval gate.
+- Landing on `main` starts the `@latest` release, which waits for a reviewer to approve the `production` environment, then publishes and emails yi@inductive.network.
+- The `require-tests` ruleset blocks a merge to `staging` or `main` until CI passes on Node 18, 20 and 22, for admins too. Renaming the CI job or changing its Node versions means changing the ruleset as well.
 
 ### Enforcement
 

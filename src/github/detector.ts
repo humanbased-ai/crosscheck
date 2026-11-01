@@ -1,3 +1,4 @@
+import { eligibleReviewConfig, reviewModelExcluded } from '../lib/review-selection.js'
 import type { Config } from '../config/schema.js'
 import { getPRCommits } from './client.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
@@ -147,13 +148,16 @@ async function resolveFallback(config: Config): Promise<'claude' | 'codex' | 'op
   // OpenCode is opt-in, so its auth check alone is not enough — a configured
   // opt-out must never be overridden by an authenticated CLI.
   const [codexAuth, claudeAuth, opencodeAuth] = await Promise.all([checkCodexAuth(), checkClaudeAuth(), checkOpenCodeAuth()])
-  if (codexAuth.ok) return 'codex'
-  if (claudeAuth.ok) return 'claude'
-  if (opencodeAuth.ok && config.vendors.opencode.enabled) return 'opencode'
-  return null
+  const free = config.quality.review_models?.opencode?.some(model => model.input_usd_mtok === 0 && model.output_usd_mtok === 0 && !reviewModelExcluded(model.id)) ?? false
+  const ready = { codex: codexAuth.ok, claude: claudeAuth.ok, opencode: opencodeAuth.ok || free }
+  const ordered = [...config.agent_priority.review, ...(['codex', 'claude', 'opencode'] as const)]
+  return ordered.find(vendor => config.vendors[vendor].enabled && ready[vendor]) ?? null
 }
 
 export async function assignReviewer(origin: PROrigin, config: Config): Promise<'claude' | 'codex' | 'opencode' | null> {
+  config = eligibleReviewConfig(config)
+  const preferred = config.agent_priority.review.filter(vendor => config.vendors[vendor].enabled && (config.mode === 'single-vendor' || vendor !== origin))
+  if (preferred.length > 0 && (origin !== 'human' || config.mode === 'single-vendor')) return preferred[0]
   if (config.mode === 'single-vendor') {
     if (config.vendors.codex.enabled) return 'codex'
     if (config.vendors.claude.enabled) return 'claude'

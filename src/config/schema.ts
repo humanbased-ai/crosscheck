@@ -46,9 +46,9 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   }).optional(),
 })
 
-// OpenCode vendor config. OpenCode has no `medium` effort (its `--model
-// provider/model#variant` suffix accepts none/low/high/max), so this extends the
-// shared schema and narrows `effort` to that vocabulary. Auth is always via the
+// OpenCode retains its legacy effort vocabulary for custom providers. Catalog
+// routes use verified variants or the provider default; explicit #variants win.
+// Auth is always via the
 // local OpenCode background service (`opencode auth login`), so `auth` from the
 // shared schema is not meaningful here and stays at its default.
 //
@@ -58,9 +58,35 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
 export const OpenCodeVendorConfigSchema = VendorConfigSchema.extend({
   enabled: z.boolean().default(false),
   effort: z.enum(OPENCODE_EFFORT_LEVELS).default('high'),
+  model_tiers: z.object({
+    fast: z.string().optional(),
+    balanced: z.string().optional(),
+    thorough: z.string().optional(),
+  }).optional(),
 })
 
+export const ReviewModelSchema = z.object({
+  id: z.string().min(1),
+  model_class: z.enum(['fast', 'standard']),
+  source: z.enum(['cli', 'configured', 'catalog']),
+  auto_free: z.boolean().optional(),
+  efforts: z.array(z.string()),
+  input_usd_mtok: z.number().nonnegative().optional(),
+  output_usd_mtok: z.number().nonnegative().optional(),
+  family: z.string().optional(),
+})
+export type ReviewModel = z.infer<typeof ReviewModelSchema>
+
 export const QualityConfigSchema = z.object({
+  refresh_free_models: z.boolean().optional(),
+  excluded_models: z.array(z.string()).optional(),
+  model_refresh_sec: z.number().int().min(30).max(86400).optional(),
+  preference: z.enum(['balanced', 'speed-max', 'cost-min']).optional(),
+  review_models: z.object({
+    claude: z.array(ReviewModelSchema).optional(),
+    codex: z.array(ReviewModelSchema).optional(),
+    opencode: z.array(ReviewModelSchema).optional(),
+  }).optional(),
   // The tier when `mode: fixed`, and the fallback under `mode: smart` whenever a
   // PR's file list cannot be read from its clone, or when an explicit request
   // (`crosscheck review`, `run --steps`) overrides a class that would skip the PR.

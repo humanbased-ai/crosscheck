@@ -21,7 +21,7 @@ import {
 } from '../lib/runner.js'
 import { CompromisedCloneError, runGitWithoutHooks } from '../lib/clone.js'
 import type { StepResult } from '../lib/workflow.js'
-import type { Config } from '../config/schema.js'
+import { ConfigSchema, type Config } from '../config/schema.js'
 
 describe('isRetryableFixError', () => {
   it('returns false for auth failure errors', () => {
@@ -596,7 +596,7 @@ describe('agent_priority', () => {
     claudeEnabled = true,
     codexEnabled = true,
     opencodeEnabled = false,
-  ) => ({
+  ) => ConfigSchema.parse({
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
@@ -604,7 +604,7 @@ describe('agent_priority', () => {
     },
     routing: { fallback_reviewer: 'auto' },
     agent_priority: priority,
-  }) as unknown as Config
+  })
 
   it('review follows the configured order among non-origin vendors', () => {
     const config = cfg(
@@ -858,6 +858,10 @@ describe('pushWithNonFastForwardHandling', () => {
     workDir = mkdtempSync(join(tmpdir(), 'crosscheck-nonff-work-'))
     git(workDir, 'init', '-q', '-b', 'work')
     git(workDir, 'remote', 'add', 'origin', originDir)
+    // The recovery's rebase writes commits and ignores global config, so the
+    // identity has to live in this repo for it to pass on a machine with none.
+    git(workDir, 'config', 'user.email', 't@e.co')
+    git(workDir, 'config', 'user.name', 'T')
     // Drop the default fetch refspec so `git fetch origin main` updates only
     // FETCH_HEAD and never creates refs/remotes/origin/main — the exact shallow-
     // clone state in production where `git rebase origin/main` failed.
