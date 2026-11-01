@@ -21,7 +21,7 @@ import {
 } from '../lib/runner.js'
 import { CompromisedCloneError, runGitWithoutHooks } from '../lib/clone.js'
 import type { StepResult } from '../lib/workflow.js'
-import type { Config } from '../config/schema.js'
+import { ConfigSchema, type Config } from '../config/schema.js'
 
 describe('isRetryableFixError', () => {
   it('returns false for auth failure errors', () => {
@@ -596,7 +596,7 @@ describe('agent_priority', () => {
     claudeEnabled = true,
     codexEnabled = true,
     opencodeEnabled = false,
-  ) => ({
+  ) => ConfigSchema.parse({
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
@@ -604,7 +604,7 @@ describe('agent_priority', () => {
     },
     routing: { fallback_reviewer: 'auto' },
     agent_priority: priority,
-  }) as unknown as Config
+  })
 
   it('review follows the configured order among non-origin vendors', () => {
     const config = cfg(

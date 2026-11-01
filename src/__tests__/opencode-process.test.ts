@@ -1,7 +1,7 @@
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 import { execa } from 'execa'
-import { openCodeModelArgs, openCodeStreamError, openCodeProviderLimit, runOpenCode } from '../reviewers/opencode-process.js'
+import { openCodeModelArgs, openCodeModelEffort, openCodeStreamError, openCodeProviderLimit, runOpenCode } from '../reviewers/opencode-process.js'
 
 vi.mock('execa', () => ({ execa: vi.fn() }))
 
@@ -68,5 +68,25 @@ describe('OpenCode model arguments', () => {
     expect(openCodeModelArgs('provider/model', 'high', false)).toEqual(['--model', 'provider/model', '--variant', 'high'])
     expect(openCodeModelArgs('provider/model', 'max', true)).toEqual(['--model', 'provider/model#max'])
     expect(openCodeModelArgs(undefined, 'high', false)).toEqual([])
+  })
+})
+
+
+describe('provider-specific OpenCode variants', () => {
+  it('leaves unverified catalog variants to the provider instead of inventing high', () => {
+    expect(openCodeModelEffort('opencode/glm-5.3', 'high')).toBeUndefined()
+    expect(openCodeModelArgs('opencode/glm-5.3', undefined, true)).toEqual(['--model', 'opencode/glm-5.3'])
+    expect(openCodeModelArgs('opencode/glm-5.3', undefined, false)).toEqual(['--model', 'opencode/glm-5.3'])
+  })
+
+  it('honors an operator-selected variant once with either CLI syntax', () => {
+    expect(openCodeModelEffort('opencode/kimi-k3#max', 'high')).toBe('max')
+    expect(openCodeModelArgs('opencode/kimi-k3#max', 'high', true)).toEqual(['--model', 'opencode/kimi-k3#max'])
+    expect(openCodeModelArgs('opencode/kimi-k3#max', 'high', false)).toEqual(['--model', 'opencode/kimi-k3', '--variant', 'max'])
+  })
+
+  it('preserves configured effort for custom providers and omits it without a model', () => {
+    expect(openCodeModelEffort('private/reviewer', 'max')).toBe('max')
+    expect(openCodeModelEffort(undefined, 'high')).toBeUndefined()
   })
 })

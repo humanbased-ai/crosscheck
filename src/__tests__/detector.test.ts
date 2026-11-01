@@ -254,3 +254,27 @@ describe('assignReviewer', () => {
     expect(await assignReviewer('human', cfg)).toBe('opencode')
   })
 })
+
+describe('discovered review pools and preference', () => {
+  it('uses a configured priority for one-shot cross-vendor reviews without reviewing its own author', async () => {
+    const cfg = buildConfig({ vendors: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } }, agent_priority: { review: ['opencode', 'codex', 'claude'] } })
+    expect(await assignReviewer('claude', cfg)).toBe('opencode')
+    expect(await assignReviewer('opencode', cfg)).toBe('codex')
+  })
+
+  it('can assign an enabled free OpenCode pool without saved credentials', async () => {
+    const { checkOpenCodeAuth } = await import('../reviewers/opencode.js')
+    vi.mocked(checkOpenCodeAuth).mockResolvedValueOnce({ ok: false, detail: 'no credentials' })
+    const cfg = buildConfig({ vendors: { claude: { enabled: false }, codex: { enabled: false }, opencode: { enabled: true } }, quality: { review_models: { opencode: [
+      { id: 'opencode/glm-5.3-flash-free', model_class: 'fast', source: 'cli', efforts: ['high'], input_usd_mtok: 0, output_usd_mtok: 0 },
+    ] } } })
+    expect(await assignReviewer('human', cfg)).toBe('opencode')
+  })
+
+  it('does not assign a disabled native agent or an empty review pool even with successful authentication', async () => {
+    const { checkCodexAuth } = await import('../reviewers/codex.js')
+    vi.mocked(checkCodexAuth).mockResolvedValueOnce({ ok: true, detail: 'ready' })
+    const cfg = buildConfig({ vendors: { codex: { enabled: false }, claude: { enabled: false }, opencode: { enabled: true } }, quality: { review_models: { opencode: [] } } })
+    expect(await assignReviewer('human', cfg)).toBeNull()
+  })
+})

@@ -9,6 +9,7 @@ import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detec
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runOpenCodeReview } from '../reviewers/opencode.js'
+import { selectReviewModel } from '../lib/review-selection.js'
 import { loadConfig, getGithubToken, getLinearCredentials } from '../config/loader.js'
 import { resolveLinearAuth, withWorker, isLinearConfigError, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
@@ -236,10 +237,14 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
     // Round 1: this command has no fix loop, so nothing escalates.
     const { strategy: appliedStrategy, quality, claudeVendor, codexVendor, opencodeVendor } = resolveRoundExecution(config, strategy, 1)
+    if (!normalizedReviewer && quality.review_models) {
+      reviewer = await assignReviewer(origin, { ...config, quality })
+      if (!reviewer) throw new Error('No eligible reviewer for the discovered model pool; run ck init.')
+    }
     if (strategy && appliedStrategy) {
-      // Only the routed reviewer runs, so name the effort it was given.
-      const appliedEffort = reviewer === 'codex' ? codexVendor.effort : reviewer === 'opencode' ? opencodeVendor.effort : claudeVendor.effort
-      console.log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${appliedStrategy.tier ?? 'skip'} tier (${appliedEffort})`))
+      const vendor = reviewer === 'codex' ? codexVendor : reviewer === 'opencode' ? opencodeVendor : claudeVendor
+      const appliedEffort = selectReviewModel(reviewer, quality, vendor).effort
+      console.log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${appliedStrategy.tier ?? 'skip'} tier${appliedEffort ? ` (${appliedEffort})` : ''}`))
     }
 
     const memoryPlan = config.quality.review_memory ? prepareReviewPlan({

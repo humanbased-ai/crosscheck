@@ -67,17 +67,13 @@ export function resolveCodexModel(
   return CODEX_TIER_MODELS_API[tier] || CODEX_TIER_MODELS_API.balanced
 }
 
-// OpenCode's model is user-configured in opencode.json, not a vendor catalog
-// crosscheck ships. So there is no built-in tier mapping: crosscheck only pins
-// a model when `vendors.opencode.model` is set, and otherwise leaves the choice
-// to the OpenCode CLI (which reads the user's configured default). Tier drives
-// effort — the `--model provider/model#variant` suffix — in opencodeEffort.
+// No built-in provider choice: operators opt into tier IDs their account serves.
 export function resolveOpenCodeModel(
-  _quality: QualityConfig,
+  quality: QualityConfig,
   vendor: OpenCodeVendorConfig,
-  _strategy?: { tier: QualityConfig['tier'] | null } | null,
+  strategy?: { tier: QualityConfig['tier'] | null } | null,
 ): string | undefined {
-  return vendor?.model ?? undefined
+  return vendor.model ?? vendor.model_tiers?.[effectiveTier(quality, strategy)]
 }
 
 // Derives a display name from the regular claude model ID shape:

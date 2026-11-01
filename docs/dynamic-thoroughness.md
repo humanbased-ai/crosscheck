@@ -2,12 +2,13 @@
 
 | | |
 |---|---|
-| **Strategy version** | `1.1.0` — [`src/config/review-strategy.json`](../src/config/review-strategy.json) |
+| **Strategy version** | `1.4.0` — [`src/config/review-strategy.json`](../src/config/review-strategy.json) |
 | **Analysis run** | 2026-08-07T05:00:00Z |
 | **Census window** | 2026-07-30 → 2026-08-07 |
 | **Corpus** | 400 merged PRs · 199 crosscheck-engaged · 597 agent calls · 43 locally-logged runs |
 | **Hand-labelled** | 40 BLOCK findings read against cited source |
-| **Next review due** | 2026-10-06 (60-day interval) |
+| **Model/pricing refresh** | 2026-11-01 · [sources and decision](research/review-models-2026-11-01.md) |
+| **Next review due** | 2026-12-01 (30-day interval) |
 | **Re-verify** | `npm run verify:strategy` |
 
 Status: **adopted and active**. This document is the evidence behind
@@ -15,7 +16,7 @@ Status: **adopted and active**. This document is the evidence behind
 crosscheck reads at runtime. The runner and `crosscheck review` classify every PR from its cloned
 working copy, fold the result into the quality config the reviewers receive,
 and stamp the version, class, and tier into each annotation. When they disagree, the JSON wins and this document is
-stale — the weekly `Review Strategy` workflow files an issue when either drifts.
+stale. The weekly `Review Strategy` workflow checks policy consistency, age and source-page strings; it does not semantically verify this prose or numeric prices.
 
 **Enforced today:** the `Tier`, `Effort`, and `Steps` columns below all reach the
 run. A class resolving to a null tier (class 1) skips the workflow outright,
@@ -91,6 +92,8 @@ actively harmful** — it converts "merged past findings in 4 minutes" into "blo
 optimize latency.
 
 ---
+
+The census and findings below describe the August observation window. They are historical evidence, not a claim about today's merge gates, traffic or model quality. Current model policy is §6.5.
 
 ## 1. Methodology
 
@@ -457,55 +460,49 @@ A tier drop is defensible only for mechanical fix steps on trivial PRs.
 
 Encoded in [`src/config/review-strategy.json`](../src/config/review-strategy.json), which
 follows the pattern `review-model-tiers.json` already established: an `updated` date,
-`sources` with verifiable `checks` strings, and a `review_interval_days` so drift is
+`sources` with verifiable `checks` strings, and a `review_interval_days` so age and source drift are
 detectable rather than silent (§6.6).
 
-**Vendor tiers.** Cost is per 48k-output call, the census median.
+**Current review ceiling (user decision, 2026-11-01).** Every provider's flagship is excluded from code review, including free listings. Claude defaults are Haiku 5.5 / Sonnet 5.5 / Sonnet 5.5; Codex API defaults are Luna / Sol / Sol. Thorough means more effort on an eligible model, not permission to select Opus, Fable, Astra, Kimi K3, GLM 5.3, DeepSeek Pro or MiniMax M3. The price table retains those models as excluded cost references.
 
-| Tier | Claude | $/call | SWE-b | Codex | $/call | Effort |
-|---|---|---|---|---|---|---|
-| `fast` | `claude-haiku-4-5` | $0.240 | 73.3% | `gpt-5.6-luna` | **$0.058** | Claude: **none** · Codex: all |
-| `balanced` | `claude-sonnet-5` | $0.720 | 85.2% | `gpt-5.6-terra` | $0.576 | both: all |
-| `thorough` | `claude-opus-5` | $1.200 | 96.0% | `gpt-5.6-sol` | $1.440 | both: all |
+**User-specific pools.** `ck init` scans installed agents and model configuration, then saves `quality.review_models` and the user's `balanced`, `speed-max` or `cost-min` preference. That review pool outranks legacy authoring/fixing model pins. Balanced chooses a standard eligible model when available for normal/risky work; speed-max chooses a fast class with lower effort; cost-min ranks advertised input/output rates, including free tiers. Unknown rates remain unknown, and unknown custom deployments need explicit non-flagship classification. Current model effort/variant metadata bounds each request. Risk and later rounds can raise effort, capped at high; once the ceiling binds, rechecks retain that judge and narrow the scope rather than escalate beyond policy.
 
-*Claude strengths:* highest measured capability at `thorough`, most recent knowledge
-cutoff (May 2026). *Weakness:* the `fast` tier has no effort parameter and only a 200k
-context. *Codex strengths:* `fast` is 4× cheaper than Haiku on output, effort available
-at every tier, 1.05M context throughout. *Weakness:* cross-family benchmarks are not
-comparable — validate locally before assuming tier parity.
+Escalation uses that same selected pool and exact discovered variant list, rather
+than the legacy authoring tier map or an empty bundled OpenCode ladder. Each
+round compares its permitted model/effort with the preceding round. A
+thorough-class OpenCode model with no verified variants has no remaining model
+or effort step: the runner explicitly logs `strategy_ceiling_reached` and
+“at review ceiling,” while fixes and rechecks continue under their existing
+round and budget limits. This is also the result when speed-max's medium ceiling
+binds, a pin collapses tier choices, or the pool already runs at high. An empty
+variant list never authorizes guessed controls or promotion to a flagship.
 
-**`claude-fable-5` is banned from code review** (`banned_models` in the strategy file,
-enforced by `verify:strategy`). At $50/MTok output it is 2× `claude-opus-5` for a
-*lower* SWE-bench Verified score — $2.40 per call at the measured 48k output tokens,
-with no capability justification at any tier.
+**OpenCode free tiers can change during watch.** With refresh enabled, the watcher performs a bounded metadata scan before the next review after 15 minutes. It adds only advertised-zero-price, known non-flagship models on an already enabled OpenCode agent, honors explicit exclusions, and removes vanished free models or models whose price becomes positive/unknown. Each active review keeps a snapshot. Refresh does not rewrite disk configuration, enable another agent, or silently opt into a new paid route. Exhausted routes cool down for 15 minutes; fallback stays inside the existing permitted pool. A provider listing is not proof of usable quota.
 
-### The second axis: domain
+The [discovery procedure and limitations](research/review-models-2026-11-01.md) distinguish CLI catalog evidence, configured preference, custom-provider execution support and account entitlement. No matched defect-detection evaluation or measured speed ranking is claimed. Prices come from [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing), [OpenAI pricing](https://developers.openai.com/api/docs/pricing), and [OpenCode Console](https://opencode.ai/v2/docs/console/models/).
 
-Capability is domain-shaped, not scalar, and a single tier ladder cannot express that.
-SWE-bench Verified resolves issues in *Python* repositories; in this census **42% of
-reviewed PRs are frontend-dominant and 55% touch frontend at all**. On the domain that
-carries most of the workload the ordering inverts:
+Prices below are standard synchronous USD per million tokens. The last column illustrates **100k uncached input + 48k output** at each provider's listed rates; it is a scenario, not a measured contemporary review bill.
 
-| Frontend Code Arena (Elo, blind pairwise) | | SWE-bench Verified | |
-|---|---|---|---|
-| **Kimi K3** *(open)* | **1679** | **Claude Opus 5** | **96.0** |
-| Claude Fable 5 | 1631 | Claude Sonnet 5 | 85.2 |
-| GPT-5.6 Sol | 1618 | DeepSeek V4 Pro *(open)* | 80.6 |
-| GLM-5.2 *(open)* | 1587 | DeepSeek V4 Flash *(open)* | 79.0 |
-| Claude Opus 4.8 | 1562 | GLM-5 *(open)* | 77.8 |
-| Grok-4.5 | 1558 | Claude Haiku 4.5 | 73.3 |
+| Route / model | Input | Output | Cache read | Scenario $ |
+|---|---:|---:|---:|---:|
+| Claude / Haiku 5.5 (≤100k input) | 0.10 | 0.50 | 0.01 | 0.034 |
+| Claude / Sonnet 5.5 | 2.00 | 10.00 | 0.10 | 0.680 |
+| Claude / Opus 5.5 | 4.00 | 20.00 | 0.20 | 1.360 |
+| Codex / GPT-6 Luna | 0.10 | 0.50 | 0.01 | 0.034 |
+| Codex / GPT-6.1 Sol | 2.00 | 10.00 | 0.10 | 0.680 |
+| Codex / GPT-6 Astra | 10.00 | 50.00 | 1.00 | 3.400 |
+| OpenCode Console / `opencode/glm-5.3-flash` | 0.15 | 0.50 | 0.03 | 0.039 |
+| OpenCode Console / `opencode/minimax-m3` | 0.30 | 1.20 | 0.06 | 0.088 |
+| OpenCode Console / `opencode/deepseek-v4.1-flash` | 0.30 | 1.20 | 0.006 | 0.088 |
+| OpenCode Console / `opencode/glm-5.3` | 1.40 | 4.40 | 0.26 | 0.351 |
+| OpenCode Console / `opencode/deepseek-v4-pro` | 1.74 | 3.48 | 0.145 | 0.341 |
+| OpenCode Console / `opencode/kimi-k3` | 3.00 | 15.00 | 0.30 | 1.020 |
 
-The most capable frontend model available is open-weight, and it is a different model
-from the backend leader. Hence `domains` in the strategy file: `frontend` prefers
-`kimi-k3` → `gpt-5.6-sol` → `claude-opus-5` at `thorough`; `backend` prefers
-`claude-opus-5` → `gpt-5.6-sol`. `mixed` and `unknown` fall back to `backend`.
+The [pricing sources](research/review-models-2026-11-01.md) also record cache writes, context thresholds and direct-provider differences. Haiku above 100k input costs $0.50/$2.50 per MTok; GPT above 272k input has separate input/output rates. Repeated context, reasoning tokens, retries, fix/recheck calls, provider fees and tokenizer differences affect the full bill. Subscription allowances cannot be priced as API invoices. Do not reuse the old output-only 48k estimate as total cost.
 
-> **Confidence: hypothesis, marked as such in the JSON.** Arena measures blind human
-> preference on *generated* frontend output — a generation task, where review is
-> detection. The same asymmetry that limits SWE-bench applies. And **Claude Opus 5 is
-> absent from the retrieved frontend leaderboard** (only Opus 4.8 at 1562) — a missing
-> measurement, not a low score. The backend row is `measured`; the frontend row needs a
-> local A/B before it should be trusted over the default.
+**Variant handling.** Live OpenCode discovery records exact variant names. An empty effort list means the provider default is retained; no guessed variant is reported. Native API effort support alone does not establish an OpenCode variant. Explicit legacy variants still use V1 `--variant` or a V2 suffix, subject to the flagship ceiling. Native API prices must not be assigned to a private deployment merely because its underlying family is known.
+
+**Domain choices remain hypotheses.** Generation Elo and issue-resolution scores are historical context, not evidence of review precision or recall. Domain preferences are evaluation lists, not a separate vendor selector. Different CLIs can run the same underlying model family. Before promoting a candidate, replay matched frontend/backend PRs and seeded defects; compare actionable recall, false positives, completion rate, latency, fixer regressions and whole-loop cost.
 
 **PR classes.** First match wins, so ordering is the routing logic.
 
@@ -515,9 +512,9 @@ from the backend leader. Hence `domains` in the strategy file: `frontend` prefer
 | 2 | **Security / data-critical** | risky path, `risk:T3`, or hotfix→default branch | `thorough` | high | review, fix, recheck |
 | 3 | Deletion-only | ≤ 5 additions with ≥ 20 deletions | `fast` | medium | review |
 | 4 | Documentation / specification | ≥ 50% `.md`/`.rst`/`.adoc` | `balanced` | high | review |
-| 5 | Test-only | every file is a test or fixture | `fast` | medium | review, fix |
+| 5 | Test-only | every file is a test or fixture | `fast` | medium | review, fix, recheck |
 | 6 | Config / infrastructure | ≥ 50% config, no source files | `balanced` | high | review, fix, recheck |
-| 7 | Trivial | ≤ 3 files and ≤ 150 source churn | `fast` | medium | review, fix |
+| 7 | Trivial | ≤ 3 files and ≤ 150 source churn | `fast` | medium | review, fix, recheck |
 | 8 | Standard code | fallthrough | `balanced` | medium | review, fix, recheck |
 
 Three classes carry reasoning that is not obvious from the row:
@@ -556,14 +553,14 @@ carries the strategy version, the PR class that was matched, and the tier that c
 selected — in both the machine annotation and the human-readable line.
 
 ```
-<!-- crosscheck: origin=claude reviewer=claude model=claude-opus-5 type=review
-     round=1 verdict=BLOCK strategy=1.1.0 class=risky tier=thorough
+<!-- crosscheck: origin=claude reviewer=claude model=claude-sonnet-5-5 type=review
+     round=1 verdict=BLOCK strategy=1.4.0 class=risky tier=thorough
      service=crosscheck sha=abc123 -->
 ```
 
 > _Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](https://github.com/humanbased-ai/crosscheck)
-> with Opus 5 (high) — thorough tier · touches a security or data-critical path, where a
-> missed defect is expensive · strategy v1.1.0_
+> with Sonnet 5.5 (high) — thorough tier · touches a security or data-critical path, where a
+> missed defect is expensive · strategy v1.4.0_
 
 The rationale text is not written per review — it is the matched class's `reason` field,
 so the explanation and the routing decision cannot drift apart. `strategy`, `class`, and
@@ -736,6 +733,8 @@ quality:
 
 - [Anthropic model catalog](https://platform.claude.com/docs/en/about-claude/models/overview) — pricing, legacy status
 - [Anthropic effort parameter](https://platform.claude.com/docs/en/build-with-claude/effort) — levels, guidance, caching constraint
-- [OpenAI model catalog](https://developers.openai.com/api/docs/models) — GPT-5.6 family
+- [OpenAI pricing](https://developers.openai.com/api/docs/pricing) — current GPT rates and context tiers
+- [OpenCode Console models](https://opencode.ai/v2/docs/console/models/) — provider-qualified candidates and prices
+- [2026-11-01 refresh](research/review-models-2026-11-01.md) — scope, limitations and maintenance procedure
 - [CR-Bench](https://arxiv.org/html/2603.11078v1) — review precision/recall/SNR
 - [SWE-bench Verified leaderboard](https://benchlm.ai/benchmarks/sweVerified) — Claude-family scores
