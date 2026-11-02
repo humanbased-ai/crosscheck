@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { commentToRecord, commitToRecord, decideReviewOnly, hasStaleApproval, identifyNextWorkflowStep, type StepRecord } from '../lib/pr-workflow-state.js'
+import { commentToRecord, commitToRecord, decideReviewOnly, identifyNextWorkflowStep, type StepRecord } from '../lib/pr-workflow-state.js'
 import type { RawPRCommit } from '../github/client.js'
 import type { WorkflowStep } from '../lib/workflow.js'
 
@@ -258,7 +258,9 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.round).toBe(2)
   })
 
-  // An APPROVE ends the automatic workflow for the PR.
+  // An APPROVE ends the workflow for the commit it covers. It does NOT end it for the
+  // PR: a later push materially changes what was approved, so the approval no longer
+  // applies and the new code is reviewed.
   it('stops on the approved SHA', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
@@ -288,16 +290,17 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.stopReason).toBe('approved')
   })
 
-  it('stops automatic review after APPROVE even when HEAD moves', () => {
+  it('reviews a new HEAD pushed after APPROVE — the approval no longer covers it', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
     ], workflow, 'new-head-sha')
 
-    expect(next.step).toBeNull()
-    expect(next.stopReason).toBe('approved')
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(2)
+    expect(next.stopReason).toBeUndefined()
   })
 
-  it('stops on the existing APPROVE footer from monorepo PR 7974 after later pushes', () => {
+  it('reviews the new head after the first APPROVE on monorepo PR 7974', () => {
     const approval = commentToRecord({
       id: 6570384721,
       body: '<!-- crosscheck: origin=codex reviewer=codex model=gpt-6-luna type=review round=1 verdict=APPROVE service=crosscheck sha=75e3037b7d20ff503f7a901894aea22e2f8be5c3 next_step=recheck -->',
@@ -305,47 +308,51 @@ describe('identifyNextWorkflowStep', () => {
     })
 
     expect(approval).not.toBeNull()
-    const next = identifyNextWorkflowStep([approval!], workflow, 'df1585fce92ad51a50acfc8e3e2f517c60c07192')
-    expect(next.step).toBeNull()
-    expect(next.stopReason).toBe('approved')
-    expect(hasStaleApproval([approval!], 'df1585fce92ad51a50acfc8e3e2f517c60c07192')).toBe(true)
-    expect(hasStaleApproval([approval!], '75e3037b7d20ff503f7a901894aea22e2f8be5c3')).toBe(false)
+    expect(identifyNextWorkflowStep([approval!], workflow, '75e3037b7d20ff503f7a901894aea22e2f8be5c3').stopReason).toBe('approved')
+    const next = identifyNextWorkflowStep([approval!], workflow, '793385fb373c47bfec57e867051a2f06b8d25b09')
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(2)
   })
 
-  it('stops automatic review after an APPROVE recheck even when HEAD moves', () => {
+  it('reviews a new HEAD pushed after an APPROVE recheck', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'BLOCK', sha: 'sha-A' }),
       record({ type: 'fix', commentId: 101, pushedSha: 'sha-B' }),
       record({ type: 'recheck', verdict: 'APPROVE', sha: 'sha-B', round: 2, commentId: 102 }),
     ], workflow, 'sha-C')
 
-    expect(next.step).toBeNull()
-    expect(next.stopReason).toBe('approved')
+    expect(next.step?.type).toBe('review')
+    expect(next.stopReason).toBeUndefined()
   })
 
-  // A legacy APPROVE still ends the automatic workflow; it cannot authorize merge.
-  it('stops when a legacy APPROVE carries no SHA', () => {
+  // A legacy APPROVE predates the `sha=` annotation field, so it cannot prove it covers
+  // HEAD. Fail open and review — that review records a SHA and re-establishes the stop.
+  it('reviews when an APPROVE carries no SHA', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'APPROVE' }),
     ], workflow, 'head-sha')
 
-    expect(next.step).toBeNull()
-    expect(next.stopReason).toBe('approved')
+    expect(next.step?.type).toBe('review')
+    expect(next.stopReason).toBeUndefined()
   })
 
-  // Even an ungated fix record after approval cannot restart automatic work.
-  it('does not recheck a fix that landed after an APPROVE', () => {
+  // The stop gate must not swallow work that landed AFTER the approval. A workflow whose
+  // fix step is not gated on the verdict can push a commit past an APPROVE; that commit
+  // still has to be rechecked.
+  it('still rechecks a fix that landed after an APPROVE', () => {
     const ungatedFix: WorkflowStep = { ...fixStep, when: undefined }
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
       record({ type: 'fix', commentId: 101, pushedSha: 'fix-sha' }),
     ], [reviewStep, ungatedFix, recheckStep], 'fix-sha')
 
-    expect(next.step).toBeNull()
-    expect(next.stopReason).toBe('approved')
+    expect(next.step?.type).toBe('recheck')
+    expect(next.stopReason).toBeUndefined()
   })
 
-  // A force-push that drops a fix commit also leaves the approval stop intact.
+  // The post-approval exception is scoped to the pushed commit, not to the record. A
+  // force-push can drop the fix commit and put HEAD back on the approved SHA; the record
+  // then describes content that no longer exists, so the approval stands.
   it('stops when a post-approval fix was force-pushed away', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
@@ -356,7 +363,8 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.stopReason).toBe('approved')
   })
 
-  // A fix that pushed nothing to the PR head also leaves the stop intact.
+  // A fix that pushed nothing to the PR head (pull_request delivery puts it on its own
+  // branch) leaves HEAD as the approved content, so the approval still stands.
   it('stops when a post-approval fix record has no pushed SHA', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
@@ -390,13 +398,13 @@ describe('identifyNextWorkflowStep', () => {
       expect(next.round).toBe(1)
     })
 
-    it('stops an approved PR even when it later conflicts', () => {
+    it('resolves conflicts on an approved PR rather than stopping', () => {
       const next = identifyNextWorkflowStep([
         record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A' }),
       ], workflow, 'sha-A', { mergeable: false })
 
-      expect(next.step).toBeNull()
-      expect(next.stopReason).toBe('approved')
+      expect(next.step?.type).toBe('conflict-resolve')
+      expect(next.stopReason).toBeUndefined()
     })
 
     it('keeps the approval stop when the PR merges cleanly', () => {
@@ -474,15 +482,14 @@ describe('identifyNextWorkflowStep', () => {
       expect(second.round).toBe(2)
     })
 
-    it('does not resolve conflicts after a later approval', () => {
+    it('offers it again after a later review', () => {
       const next = identifyNextWorkflowStep([
         record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
         record({ type: 'conflict-resolve', commentId: 101, pushedSha: 'merge-sha' }),
         record({ type: 'review', verdict: 'APPROVE', sha: 'merge-sha', round: 2, commentId: 102 }),
       ], workflow, 'merge-sha', { mergeable: false })
 
-      expect(next.step).toBeNull()
-      expect(next.stopReason).toBe('approved')
+      expect(next.step?.type).toBe('conflict-resolve')
     })
 
     // A never-reviewed PR already reaches conflict-resolve through the initial-step path,
@@ -518,13 +525,16 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.step).toBeNull()
   })
 
-  it('stops after an APPROVE despite a later push (recheck-no-fix)', () => {
+  // After an APPROVE there are no findings left to re-evaluate, so a push of NEW code
+  // must get a fresh review — a recheck would judge it against a resolved review and
+  // could gloss over defects the new commits introduced.
+  it('routes a post-APPROVE push to a fresh review, not a recheck (recheck-no-fix)', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'APPROVE', sha: 'sha-A' }),
     ], reviewRecheckWorkflow, 'sha-B')
 
-    expect(next.step).toBeNull()
-    expect(next.stopReason).toBe('approved')
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(2)
   })
 
   it('stops on the approved SHA (recheck-no-fix)', () => {
@@ -545,20 +555,19 @@ describe('identifyNextWorkflowStep', () => {
   })
 
   // An APPROVE recorded by a recheck ends the cycle just like an APPROVE review does.
-  it('stops after an APPROVE recheck despite a later push (recheck-no-fix)', () => {
+  it('routes a push after an APPROVE recheck to a fresh review (recheck-no-fix)', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'sha-A' }),
       record({ type: 'recheck', verdict: 'APPROVE', sha: 'sha-B', round: 2, commentId: 102 }),
     ], reviewRecheckWorkflow, 'sha-C')
 
-    expect(next.step).toBeNull()
-    expect(next.stopReason).toBe('approved')
+    expect(next.step?.type).toBe('review')
   })
 })
 
 // A per-repo review-only workflow (crosscheck alter --review-only) uses decideReviewOnly
 // (NOT identifyNextWorkflowStep) so it can never advance to fix/recheck. These cases lock
-// the behaviors that mode depends on: review a fresh PR, stop after approval,
+// the behaviors that mode depends on: review a fresh PR, skip an already-reviewed SHA,
 // re-review a new SHA, and — critically — treat a fix-pushed SHA from another session as
 // new content to review rather than mistaking it for a recheck (the fixedCurrentSha bypass).
 describe('decideReviewOnly (per-repo review-only)', () => {
@@ -566,22 +575,15 @@ describe('decideReviewOnly (per-repo review-only)', () => {
     expect(decideReviewOnly([], 'head-sha')).toEqual({ alreadyReviewed: false, round: 1 })
   })
 
-  it('skips both the approved SHA and later pushes', () => {
+  // Review-only needs no separate approval stop: the approved SHA is by definition an
+  // already-reviewed SHA (skipped), and a SHA pushed after the approval is new content.
+  it('skips the approved SHA and reviews the one pushed after it', () => {
     const history = [
       record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha', round: 1 }),
     ]
 
     expect(decideReviewOnly(history, 'approved-sha').alreadyReviewed).toBe(true)
-    expect(decideReviewOnly(history, 'later-sha')).toEqual({ alreadyReviewed: true, round: 1 })
-  })
-
-  it('uses a newer non-approval verdict instead of an older approval', () => {
-    const history = [
-      record({ type: 'review', verdict: 'APPROVE', sha: 'old-sha', round: 1 }),
-      record({ type: 'review', verdict: 'NEEDS_WORK', sha: 'new-sha', round: 2 }),
-    ]
-
-    expect(decideReviewOnly(history, 'later-sha')).toEqual({ alreadyReviewed: false, round: 3 })
+    expect(decideReviewOnly(history, 'later-sha')).toEqual({ alreadyReviewed: false, round: 2 })
   })
 
   it('skips when the current SHA was already reviewed', () => {
