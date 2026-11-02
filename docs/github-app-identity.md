@@ -75,6 +75,11 @@ ck auth app --check        # probe without writing
 ck auth app --clear        # back to posting as your account
 ```
 
+Unless you pass `--installation-id`, the saved config leaves it null. The
+probe may show one installation, but each review resolves the installation for
+its own repository. A pinned installation is checked against the target repo
+before the review starts.
+
 In CI, skip the file: put the PEM in an environment variable and point the
 config at it (`private_key_env`, default `CROSSCHECK_APP_PRIVATE_KEY`). Literal
 `\n` escapes in a single-line value are normalised.
@@ -104,6 +109,8 @@ run.
   written to disk.**
 - If `installation_id` is not pinned, crosscheck resolves it from the PR's repo
   on first use (`GET /repos/{owner}/{repo}/installation`).
+- Long reviews resolve the installation token again when posting, so an expired
+  token is refreshed before the comment is sent.
 
 ## Branch protection caveat
 
@@ -139,7 +146,7 @@ way to diagnose a setup that stopped working.
 | `ck status` | the same `reviewer` row, bounded to 10s so status stays responsive |
 | watch / kickass board | `reviewing as <identity>` in the config panel |
 
-The advisory fires when a configured repo's default branch sets
-`require_code_owner_reviews: true`, and names the CODEOWNERS handles when the
+The advisory checks classic branch protection and active branch rulesets for
+a code-owner review requirement, and names the CODEOWNERS handles when the
 file is readable. It is a note, not a failure: an advisory bot review is a valid
 setup, and `ck` never blocks on it.

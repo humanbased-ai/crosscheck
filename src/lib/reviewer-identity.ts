@@ -1,5 +1,6 @@
 import type { Config } from '../config/schema.js'
-import { detectGitHubLogin, resolveGithubAppKey } from '../config/loader.js'
+import { withTimeout } from './with-timeout.js'
+import { detectGitHubLogin, resolveGithubAppKey, resolveReviewerToken } from '../config/loader.js'
 import {
   createGithubClient,
   getAppInfo,
@@ -27,6 +28,23 @@ export interface ReviewerIdentityReport {
 
 const MAX_PROTECTION_REPOS = 5
 
+/** Automation markers are trusted only from the actor or configured reviewer bot. */
+export async function isTrustedReviewAuthor(
+  config: Config,
+  repo: { owner: string; repo: string },
+  actorLogin: string | null,
+  authorLogin: string,
+): Promise<boolean> {
+  if (actorLogin?.toLowerCase() === authorLogin.toLowerCase()) return true
+  if (config.github.app.app_id === null) return false
+  try {
+    const reviewer = await resolveReviewerToken(config, repo)
+    return reviewer.login?.toLowerCase() === authorLogin.toLowerCase()
+  } catch {
+    return false
+  }
+}
+
 /**
  * Display identity. Never throws: a broken app still has a name, and a board
  * that cannot resolve its own slug should not take the daemon down.
@@ -40,8 +58,8 @@ export async function resolveReviewerIdentity(config: Config): Promise<ReviewerI
   try {
     const key = resolveGithubAppKey(config)
     if (key) {
-      const info = await getAppInfo({ appId: key.appId, privateKey: key.privateKey })
-      return { label: `${info.slug}[bot]`, kind: 'app', appId: app.app_id }
+      const info = await withTimeout(getAppInfo({ appId: key.appId, privateKey: key.privateKey }), 10_000)
+      if (info) return { label: `${info.slug}[bot]`, kind: 'app', appId: app.app_id }
     }
   } catch {
     // Fall through to the numeric label — the fix lives in ck auth app.

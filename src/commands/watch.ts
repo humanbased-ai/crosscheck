@@ -28,8 +28,9 @@ import {
   patchDeploymentConfig,
   detectGitHubLogin,
   getLinearCredentials,
+  resolveReviewerToken,
 } from '../config/loader.js'
-import { resolveReviewerIdentity } from '../lib/reviewer-identity.js'
+import { resolveReviewerIdentity, isTrustedReviewAuthor } from '../lib/reviewer-identity.js'
 import { randomFortune } from '../lib/fortune.js'
 import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
@@ -708,7 +709,7 @@ export async function runWatch(opts: WatchOpts = {}) {
             `${' '.repeat(FMT_TIME_WIDTH + 2)}prev=${chalk.dim(prevShort)} → ${chalk.dim(nowShort)}  ${chalk.dim('(skipped)')}`,
           )
           try {
-            await lockOctokit.rest.issues.createComment({
+            await createGithubClient((await resolveReviewerToken(config, { owner, repo: repoName })).token).rest.issues.createComment({
               owner, repo: repoName, issue_number: prNumber,
               body: `✓ No diff change since the last review (was \`${prevShort}\`, now \`${nowShort}\`). Skipping re-review.\n\n<!-- crosscheck: no_diff_change prev_sha=${prev.sha} sha=${params.headSha} -->`,
             })
@@ -863,7 +864,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         const classified = classifyReviewerError(err)
         if (classified) {
           try {
-            await lockOctokit.rest.issues.createComment({
+            await createGithubClient((await resolveReviewerToken(config, { owner, repo: repoName })).token).rest.issues.createComment({
               owner, repo: repoName, issue_number: prNumber,
               body: buildReviewFailedCommentBody({
                 prUrl: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
@@ -1043,15 +1044,14 @@ export async function runWatch(opts: WatchOpts = {}) {
       // <!-- crosscheck: ... type=review --> automation marker). The concern is
       // specifically annotation injection: someone deliberately embedding that
       // marker to drive automated fix work. Guard against it by verifying the
-      // comment was posted by the account that owns the crosscheck token — the
-      // only entity that legitimately writes these automation markers.
-      // Fail closed: if we couldn't determine the token owner at startup, disable
-      // the bridge entirely rather than allowing any commenter to trigger fixes.
-      if (authenticatedLogin === null) {
+      // comment was posted by the actor or configured reviewer App — the only
+      // identities that legitimately write these automation markers.
+      // Fail closed when neither identity can be verified.
+      if (authenticatedLogin === null && config.github.app.app_id === null) {
         fileLog({ level: 'warn', event: 'comment_trigger_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'authenticated_login_unavailable' })
         return
       }
-      if (event.comment.user.login !== authenticatedLogin) {
+      if (!await isTrustedReviewAuthor(config, { owner, repo: repoName }, authenticatedLogin, event.comment.user.login)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'annotation_injection_blocked', author: event.comment.user.login })
         return
       }

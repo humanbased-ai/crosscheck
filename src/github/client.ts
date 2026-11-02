@@ -183,6 +183,11 @@ export async function getInstallationToken(
   return minted.token
 }
 
+/** Verify that a selected installation token can read the review's actual repo. */
+export async function assertInstallationRepoAccess(token: string, owner: string, repo: string): Promise<void> {
+  await appApi(`/repos/${repoPath(owner, repo)}`, token)
+}
+
 /** Test hook — also called when `ck auth app` rewrites the key or installation. */
 export function clearGithubAppCache(): void {
   installationTokens.clear()
@@ -383,9 +388,8 @@ function httpStatus(err: unknown): number | null {
 }
 
 /**
- * null means "cannot tell" (no admin rights, or the API refused) — callers must
- * skip the advisory rather than reporting a failure. 404 is unambiguous: the
- * branch exists but carries no protection.
+ * null means neither classic protection nor active rulesets could be read.
+ * Callers skip the advisory when protection cannot be determined.
  */
 export async function getBranchProtection(
   octokit: Octokit,
@@ -393,20 +397,32 @@ export async function getBranchProtection(
   repo: string,
   branch: string,
 ): Promise<BranchProtectionInfo | null> {
+  let classic: BranchProtectionInfo | null = null
   try {
     const { data } = await octokit.rest.repos.getBranchProtection({ owner, repo, branch })
     const reviews = data.required_pull_request_reviews
-    return {
+    classic = {
       branch,
       protected: true,
       requiresCodeOwnerReview: reviews?.require_code_owner_reviews === true,
       requiredApprovingReviewCount: reviews?.required_approving_review_count ?? 0,
     }
   } catch (err) {
-    if (httpStatus(err) === 404) {
-      return { branch, protected: false, requiresCodeOwnerReview: false, requiredApprovingReviewCount: 0 }
+    if (httpStatus(err) === 404) classic = { branch, protected: false, requiresCodeOwnerReview: false, requiredApprovingReviewCount: 0 }
+  }
+  if (classic?.requiresCodeOwnerReview) return classic
+  try {
+    const { data } = await octokit.request('GET /repos/{owner}/{repo}/rules/branches/{branch}', { owner, repo, branch })
+    const rules = data as Array<{ type: string; parameters?: { require_code_owner_review?: boolean; required_approving_review_count?: number } }>
+    const pullRules = rules.filter(rule => rule.type === 'pull_request')
+    return {
+      branch,
+      protected: classic?.protected === true || rules.length > 0,
+      requiresCodeOwnerReview: pullRules.some(rule => rule.parameters?.require_code_owner_review === true),
+      requiredApprovingReviewCount: Math.max(classic?.requiredApprovingReviewCount ?? 0, ...pullRules.map(rule => rule.parameters?.required_approving_review_count ?? 0)),
     }
-    return null
+  } catch {
+    return classic
   }
 }
 

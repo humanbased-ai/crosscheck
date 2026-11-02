@@ -79,7 +79,6 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       process.exit(1)
     }
   }
-  const reviewerOctokit = createGithubClient(reviewerToken)
 
   const spinner = ora(`Fetching PR #${number}...`).start()
   const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
@@ -384,8 +383,11 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       const { data: current } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
       assertReviewFresh(memoryPlan, current, pr.head.sha, pr.head.sha, pr.state)
     }
+    const postingToken = config.github.app.app_id === null
+      ? reviewerToken
+      : (await resolveReviewerToken(config, { owner, repo })).token
     await postReviewComment(
-      reviewerOctokit, owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort,
+      createGithubClient(postingToken), owner, repo, number, reviewBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha, undefined, undefined, activatedSkills, effort,
       strategyCitation(reviewer === 'codex' ? config.vendors.codex : reviewer === 'opencode' ? config.vendors.opencode : config.vendors.claude, strategy, appliedStrategy, model),
       parseAuthorAttribution(pr.body ?? '') ?? undefined,
     )

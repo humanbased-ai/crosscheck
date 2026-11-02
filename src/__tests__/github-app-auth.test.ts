@@ -17,6 +17,7 @@ import {
   writeGithubAppConfig,
 } from '../config/loader.js'
 import { ConfigSchema } from '../config/schema.js'
+import { runAuthApp } from '../commands/auth.js'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
   modulusLength: 2048,
@@ -247,6 +248,18 @@ describe('resolveReviewerToken', () => {
     await expect(resolveReviewerToken(configWithApp(), { owner: 'acme', repo: 'widgets' }))
       .rejects.toThrow(/configured but unusable[\s\S]*ck auth app --check/)
   })
+
+  it('rejects a pinned installation that cannot access the target repo before reviewing', async () => {
+    process.env.CK_TEST_APP_KEY = privateKey
+    const fetchMock = stubFetch([
+      ...happyRoutes.filter(r => !r.match('https://api.github.com/repos/acme/widgets', 'GET')),
+      { match: (url, method) => url.endsWith('/repos/acme/widgets') && method === 'GET', respond: () => json({ message: 'Not Found' }, 404) },
+    ])
+
+    await expect(resolveReviewerToken(configWithApp({ installation_id: 9 }), { owner: 'acme', repo: 'widgets' }))
+      .rejects.toThrow(/configured but unusable[\s\S]*acme\/widgets/)
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/repos/acme/widgets'))).toBe(true)
+  })
 })
 
 describe('config write helpers', () => {
@@ -277,5 +290,23 @@ describe('config write helpers', () => {
     expect(raw).not.toContain('app_id')
     expect(raw).toContain('mode: cross-vendor')
     expect(clearGithubAppConfig(configPath)).toBe(false)
+  })
+
+  it('does not rewrite a malformed config when clearing the app identity', () => {
+    writeFileSync(configPath, 'github: [\n')
+    expect(() => clearGithubAppConfig(configPath)).toThrow(/cannot clear GitHub App config/i)
+    expect(readFileSync(configPath, 'utf8')).toBe('github: [\n')
+  })
+
+  it('keeps installation resolution dynamic when auth did not specify an installation', async () => {
+    process.env.CK_TEST_APP_KEY = privateKey
+    writeFileSync(configPath, 'github:\n  app:\n    app_id: 1234567\n    private_key_env: CK_TEST_APP_KEY\n')
+    stubFetch([
+      happyRoutes[0],
+      { match: url => url.includes('/app/installations?'), respond: () => json([{ id: 9, account: { login: 'acme' }, permissions: { pull_requests: 'write', issues: 'write' } }]) },
+    ])
+
+    await runAuthApp({ config: configPath })
+    expect(readFileSync(configPath, 'utf8')).toContain('installation_id: null')
   })
 })

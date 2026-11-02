@@ -6,7 +6,7 @@ import { homedir } from 'os'
 import { randomBytes } from 'crypto'
 import yaml from 'js-yaml'
 import { ConfigSchema, type Config, type LinearAuthConfig } from './schema.js'
-import { listUserOrgs, getAppInfo, getInstallationForRepo, getInstallationToken, type GithubAppKey } from '../github/client.js'
+import { listUserOrgs, getAppInfo, getInstallationForRepo, getInstallationToken, assertInstallationRepoAccess, type GithubAppKey } from '../github/client.js'
 import type { LinearCredentials } from '../linear/identity.js'
 
 const CONFIG_FILENAME = 'crosscheck.config.yml'
@@ -153,6 +153,13 @@ export async function resolveReviewerToken(
       getInstallationToken(key, installationId),
       getAppInfo(key),
     ])
+    if (repo) {
+      try {
+        await assertInstallationRepoAccess(token, repo.owner, repo.repo)
+      } catch (err) {
+        throw new Error(`installation ${installationId} cannot access ${repo.owner}/${repo.repo}: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
     return { token, source: 'app', appId: app.appId, installationId, login: `${info.slug}[bot]` }
   } catch (err) {
     throw new Error(
@@ -176,7 +183,7 @@ export function writeGithubAppConfig(
   github.app = {
     ...current,
     app_id: app.appId,
-    ...(app.installationId !== null ? { installation_id: app.installationId } : {}),
+    installation_id: app.installationId,
     ...(app.privateKeyPath !== null ? { private_key_path: app.privateKeyPath } : {}),
   }
   raw.github = github
@@ -186,7 +193,12 @@ export function writeGithubAppConfig(
 
 export function clearGithubAppConfig(configPath: string): boolean {
   if (!existsSync(configPath)) return false
-  const raw = (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>
+  let raw: Record<string, unknown>
+  try {
+    raw = (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>
+  } catch (err) {
+    throw new Error(`Cannot clear GitHub App config in ${configPath}: ${err instanceof Error ? err.message : String(err)}`)
+  }
   if (typeof raw.github !== 'object' || raw.github === null) return false
   const github = raw.github as Record<string, unknown>
   if (!('app' in github)) return false

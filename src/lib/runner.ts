@@ -1209,7 +1209,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // credential when an app is actually configured.
   const reviewerToken = ctx.reviewerToken
     ?? (config.github.app.app_id === null || ctx.dryRun ? token : (await resolveReviewerToken(config, { owner, repo: repoName })).token)
-  const reviewOctokit = (): Octokit => createGithubClient(reviewerToken)
+  const reviewOctokit = async (): Promise<Octokit> => createGithubClient(
+    config.github.app.app_id === null || ctx.dryRun
+      ? reviewerToken
+      : (await resolveReviewerToken(config, { owner, repo: repoName })).token,
+  )
   // The author's declaration lives in the PR body. Parsing it once here means
   // every card this run posts names the same author, model and effort.
   const authorAttribution = parseAuthorAttribution(pr.body ?? '')
@@ -1682,7 +1686,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           assertReviewFresh(memoryPlan, current, annotationSha, shaVerification.headSha)
         }
         const commentId = await postReviewComment(
-          reviewOctokit(), owner, repoName, prNumber, commentBody, reviewer, config.brand,
+          await reviewOctokit(), owner, repoName, prNumber, commentBody, reviewer, config.brand,
           origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, annotationSha,
           nextStepAnnotation,
           ctx.trigger === 'kickass' ? 'kickass' : undefined,
@@ -1962,7 +1966,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         // Only notify for transient failures — auth errors are operator issues, not PR author issues
         if (isRetryableFixError(fixErr)) {
           try {
-            const octokit = reviewOctokit()
+            const octokit = await reviewOctokit()
             await octokit.rest.issues.createComment({
               owner, repo: repoName, issue_number: prNumber,
               body: buildFixFailedCommentBody({
@@ -2048,7 +2052,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         // Post a summary comment so the silent commit push is visible on the timeline
         // as a comment card. Best-effort — a failure here must not fail the run.
         try {
-          const octokit = reviewOctokit()
+          const octokit = await reviewOctokit()
           const body = buildFixAppliedCommentBody({
             owner, repo: repoName, sha: newSha, appliedCount,
             reviewCommentId,
@@ -2122,7 +2126,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
           fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
           try {
-            const octokit = reviewOctokit()
+            const octokit = await reviewOctokit()
             const body = buildFixAppliedCommentBody({
               owner, repo: repoName, sha: newSha, appliedCount,
               reviewCommentId,
@@ -2165,7 +2169,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             let patch = ''
             try { patch = execSync('git diff HEAD~1', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* fall through to the empty check */ }
             if (patch) {
-              await octokit.rest.issues.createComment({
+              await (await reviewOctokit()).rest.issues.createComment({
                 owner, repo: repoName, issue_number: prNumber,
                 body: [
                   '### Suggested fixes (crosscheck auto-fix)',
@@ -2369,7 +2373,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         let patch = ''
         try { patch = execSync('git diff', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* ignore */ }
         if (patch) {
-          const octokit = createGithubClient(token)
+          const octokit = await reviewOctokit()
           const body = `### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\`\n\n${fixAttributionFooter()}`
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
@@ -2580,7 +2584,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // Prefer the resolver's actual rewrite set; fall back to the originally-conflicted
       // list if the resolver didn't surface paths.
       try {
-        const octokit = createGithubClient(token)
+        const octokit = await reviewOctokit()
         const body = buildConflictResolvedCommentBody({
           owner, repo: repoName, sha: newSha,
           conflictCount: conflictedFiles.length,

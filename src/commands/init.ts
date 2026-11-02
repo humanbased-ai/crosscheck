@@ -9,6 +9,7 @@ import { checkClaudeAuth } from '../reviewers/claude.js'
 import { checkOpenCodeAuth } from '../reviewers/opencode.js'
 import { getWebhookSecret, getWebhookSecretPath, detectGitHubLogin, patchAllowedAuthors, loadConfig, resolveConfigPath, getGithubTokenSource } from '../config/loader.js'
 import { inspectReviewerIdentity } from '../lib/reviewer-identity.js'
+import { withTimeout } from '../lib/with-timeout.js'
 import { ConfigSchema, type Config } from '../config/schema.js'
 
 export interface CheckResult {
@@ -111,7 +112,8 @@ export async function runChecks(config: Config | null = null): Promise<{ results
   if (config) {
     try {
       const token = getGithubTokenSource()?.token ?? null
-      const identity = await inspectReviewerIdentity(config, { token })
+      const identity = await withTimeout(inspectReviewerIdentity(config, { token }), 10_000)
+      if (!identity) throw new Error('GitHub App identity probe timed out after 10 seconds')
       results.push({
         label: 'reviewer identity',
         ok: identity.ok,

@@ -5,6 +5,7 @@ import { clearGithubAppCache } from '../github/client.js'
 import {
   branchProtectionAdvisory,
   inspectReviewerIdentity,
+  isTrustedReviewAuthor,
   resolveReviewerIdentity,
 } from '../lib/reviewer-identity.js'
 
@@ -52,6 +53,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   clearGithubAppCache()
   delete process.env[APP_ENV]
@@ -72,6 +74,20 @@ describe('reviewer identity without an app', () => {
 })
 
 describe('reviewer identity with an app', () => {
+  it('trusts the configured reviewer bot and actor, but rejects other commenters', async () => {
+    stubFetch((url, method) => {
+      if (url.endsWith('/app') && method === 'GET') return json({ id: 1234567, slug: 'crosscheck-bot' })
+      if (url.includes('/repos/acme/widgets/installation')) return json({ id: 9 })
+      if (url.includes('/app/installations/9/access_tokens') && method === 'POST') return json({ token: 'ghs_test', expires_at: new Date(Date.now() + 3_600_000).toISOString() })
+      if (url.endsWith('/repos/acme/widgets')) return json({ id: 1 })
+      return undefined
+    })
+    const repo = { owner: 'acme', repo: 'widgets' }
+    expect(await isTrustedReviewAuthor(appConfig(), repo, 'beingzy', 'beingzy')).toBe(true)
+    expect(await isTrustedReviewAuthor(appConfig(), repo, 'beingzy', 'crosscheck-bot[bot]')).toBe(true)
+    expect(await isTrustedReviewAuthor(appConfig(), repo, 'beingzy', 'attacker')).toBe(false)
+  })
+
   it('reports the bot login when every probe passes', async () => {
     stubFetch((url, method) => {
       if (url.endsWith('/app') && method === 'GET') return json({ id: 1234567, slug: 'crosscheck-bot', name: 'crosscheck-bot' })
@@ -112,6 +128,14 @@ describe('reviewer identity with an app', () => {
       kind: 'app',
       appId: 1234567,
     })
+  })
+
+  it('bounds a stalled board identity lookup', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})))
+    vi.useFakeTimers()
+    const identity = resolveReviewerIdentity(appConfig())
+    await vi.advanceTimersByTimeAsync(10_000)
+    await expect(identity).resolves.toEqual({ label: 'app 1234567', kind: 'app', appId: 1234567 })
   })
 })
 
@@ -168,6 +192,17 @@ describe('branchProtectionAdvisory', () => {
     expect(advisory).toContain('acme/widgets@main')
     expect(advisory).toContain('@beingzy @Trump-One')
     expect(advisory).toContain('human must approve')
+  })
+
+  it('warns when an active ruleset requires code-owner review', async () => {
+    stubFetch((url, method) => {
+      if (url.endsWith('/repos/acme/widgets') && method === 'GET') return json({ default_branch: 'main' })
+      if (url.includes('/branches/main/protection')) return json({ message: 'Not Found' }, 404)
+      if (url.includes('/rules/branches/main')) return json([{ type: 'pull_request', parameters: { require_code_owner_review: true, required_approving_review_count: 1 } }])
+      if (url.includes('/contents/.github/CODEOWNERS')) return json({ content: Buffer.from('* @beingzy\n').toString('base64') })
+      return undefined
+    })
+    await expect(branchProtectionAdvisory(cfg(), 'ghp_token')).resolves.toContain('acme/widgets@main needs a code-owner approval')
   })
 
   it('is attached to the identity report when a token is available', async () => {

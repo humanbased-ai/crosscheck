@@ -447,6 +447,9 @@ By default reviews are posted with your GitHub token, so a comment on your own P
 | `--check` | Probe the configured identity without writing config |
 | `--clear` | Remove the GitHub App identity |
 
+Without `--installation-id`, `ck auth app` keeps installation selection dynamic
+for each review repository, even if its setup probe found an installation.
+
 ---
 
 ### `crosscheck onboard`

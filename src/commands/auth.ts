@@ -13,6 +13,7 @@ import {
 } from '../config/loader.js'
 import { clearGithubAppCache, probeGithubApp, type AppProbeResult } from '../github/client.js'
 import { ConfigSchema, type Config } from '../config/schema.js'
+import { withTimeout } from '../lib/with-timeout.js'
 
 export interface AuthAppOptions {
   config?: string
@@ -97,10 +98,14 @@ export async function runAuthStatus(configPath?: string): Promise<void> {
     return
   }
   if (key === null) return
-  const result = await probeGithubApp({
+  const result = await withTimeout(probeGithubApp({
     key: { appId: key.appId, privateKey: key.privateKey },
     installationId: app.installation_id,
-  })
+  }), 10_000)
+  if (!result) {
+    row('reviewer', chalk.red('GitHub App identity probe timed out after 10 seconds'), false)
+    return
+  }
   row('reviewer', `${result.login ?? `app ${key.appId}`} ${chalk.dim(`(app ${key.appId})`)}`, result.ok)
   printProbe(result)
   if (!result.ok) console.log(chalk.dim('\n  fix the checks above, then run: ck auth app --check'))
@@ -113,7 +118,13 @@ export async function runAuthApp(opts: AuthAppOptions): Promise<void> {
   const configPath = defaultConfigPath(opts.config)
 
   if (opts.clear) {
-    const removed = clearGithubAppConfig(configPath)
+    let removed: boolean
+    try {
+      removed = clearGithubAppConfig(configPath)
+    } catch (err) {
+      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+      process.exit(1)
+    }
     clearGithubAppCache()
     if (removed) {
       console.log(chalk.green(`✓ GitHub App identity removed from ${configPath}`))
@@ -158,11 +169,15 @@ export async function runAuthApp(opts: AuthAppOptions): Promise<void> {
   }
   if (key === null) process.exit(1)
   console.log(chalk.bold('\ncrosscheck auth — GitHub App\n'))
-  const result = await probeGithubApp({
+  const result = await withTimeout(probeGithubApp({
     key: { appId, privateKey: key.privateKey },
     installationId,
     ...(repo ?? {}),
-  })
+  }), 10_000)
+  if (!result) {
+    console.error(chalk.red('✗ GitHub App identity probe timed out after 10 seconds'))
+    process.exit(1)
+  }
   printProbe(result)
 
   if (!result.ok) {
@@ -177,7 +192,7 @@ export async function runAuthApp(opts: AuthAppOptions): Promise<void> {
 
   writeGithubAppConfig(configPath, {
     appId,
-    installationId: result.installation?.id ?? installationId,
+    installationId,
     privateKeyPath: opts.key ?? null,
   })
   clearGithubAppCache()
