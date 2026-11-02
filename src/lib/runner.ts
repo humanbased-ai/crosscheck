@@ -1631,7 +1631,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         const nextWorkflowStep = steps.slice(currentStepIdx + 1).find(s =>
           !s.when || evaluateWhen(s.when, syntheticResultsForNext),
         )
-        const nextStepAnnotation = nextWorkflowStep?.type ?? 'none'
+        const nextStepAnnotation = verdict === 'APPROVE' ? 'none' : nextWorkflowStep?.type ?? 'none'
 
         // Read the actual HEAD from the checkout: after an in-run fix step pushes a
         // new commit, pr.head.sha is still the pre-fix SHA and would make the recheck
@@ -1736,6 +1736,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
         results[step.name] = { verdict, commentBody, commentUrl, commentId, tokens_used: tokensUsed, input_tokens: inputTokens, output_tokens: outputTokens, vendor: reviewer, model }
       }
+      if (verdict === 'APPROVE') break
 
     } else if (effectiveType === 'fix') {
       const skipFix = (reason: string) => {

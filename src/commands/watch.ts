@@ -37,7 +37,7 @@ import { runWorkflow } from '../lib/runner.js'
 import type { Vendor } from '../lib/vendor.js'
 import { loadWorkflow, linearWritePossible, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { filterStepsByTypes, formatRepoWorkflowSteps, isReviewOnlyWorkflow, readRepoWorkflowStepTypes, resolveRepoWorkflowSteps, workflowHasStep } from '../lib/repo-workflow.js'
-import { fetchStepHistoryWithRetry, identifyNextWorkflowStep, decideReviewOnly } from '../lib/pr-workflow-state.js'
+import { fetchStepHistoryWithRetry, identifyNextWorkflowStep, decideReviewOnly, hasStaleApproval } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH, isNoticeLine } from '../lib/board.js'
 import { clonePRForReview, BaseRefUnavailableError } from '../lib/clone.js'
@@ -496,9 +496,8 @@ export async function runWatch(opts: WatchOpts = {}) {
 
       if (reviewOnlyForRepo) {
         // Review-only comes from a per-repo override (crosscheck alter --review-only).
-        // Restrict the workflow to review step(s) and dedup on the exact head sha so
-        // restarts/synchronize events don't post duplicate reviews for content
-        // already covered.
+        // Restrict the workflow to review step(s). History skips reviewed SHAs and
+        // stops the loop entirely after APPROVE.
         const reviewSteps = initialRepoSteps.filter(s => s.type === 'review')
         if (reviewSteps.length === 0) {
           await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
@@ -513,7 +512,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           const history = await fetchStepHistoryWithRetry(owner, repoName, prNumber, token)
           const decision = decideReviewOnly(history, params.headSha)
           if (decision.alreadyReviewed) {
-            await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+            await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, hasStaleApproval(history, params.headSha) ? 'failure' : 'success')
             releasePRLock(owner, repoName, prNumber, params.headSha)
             fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'already_reviewed', sha: params.headSha })
             return
@@ -553,9 +552,8 @@ export async function runWatch(opts: WatchOpts = {}) {
           }
           const nextResult = identifyNextWorkflowStep(history, allSteps, params.headSha, { mergeable })
           if (nextResult.step === null) {
-            // Workflow already complete for this HEAD sha — release lock and skip.
-            // Happens when a synchronize event fires after all steps are done.
-            await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+            // An old APPROVE stops automation, but cannot make an unreviewed HEAD green.
+            await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, nextResult.stopReason === 'approved' && hasStaleApproval(history, params.headSha) ? 'failure' : 'success')
             releasePRLock(owner, repoName, prNumber, params.headSha)
             fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: nextResult.stopReason ?? 'workflow_complete', sha: params.headSha })
             return

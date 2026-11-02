@@ -126,10 +126,9 @@ describe('derivePRStatus', () => {
     expect(status.freshness).toBe('stale')
   })
 
-  // An approval covers a commit, not a PR. Reporting `merge` for an approval that
-  // predates the current HEAD would put never-reviewed code in kickass's read-only
-  // "needs merge (manual)" list instead of dispatching the review it is owed.
-  it('needs review again when the APPROVE covers an older SHA', () => {
+  // An approval stops automatic review for the PR, but only the reviewed commit
+  // can be offered for merge.
+  it('stops review without offering merge when the APPROVE covers an older SHA', () => {
     const status = derivePRStatus(input({
       headSha: 'def456',
       comments: [{
@@ -139,16 +138,14 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_REVIEW')
-    expect(status.nextAction).toBe('review')
-    // The verdict field still reports the last verdict on record — it is the review
-    // state, not the history, that HEAD invalidates.
+    expect(status.reviewState).toBe('APPROVED')
+    expect(status.nextAction).toBeNull()
+    // The verdict still reports the last decision, while merge readiness lapses.
     expect(status.verdict).toBe('APPROVE')
   })
 
-  // A legacy annotation predates the `sha=` field, so it cannot prove which commit it
-  // describes. Fail open: one review re-establishes the SHA and the approval sticks.
-  it('needs review again when the APPROVE carries no SHA', () => {
+  // A legacy annotation predates `sha=` and cannot establish merge readiness.
+  it('stops review without offering merge when the APPROVE carries no SHA', () => {
     const status = derivePRStatus(input({
       comments: [{
         body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
@@ -157,8 +154,8 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_REVIEW')
-    expect(status.nextAction).toBe('review')
+    expect(status.reviewState).toBe('APPROVED')
+    expect(status.nextAction).toBeNull()
   })
 
   it('matches the approved SHA in short and long form', () => {
@@ -215,8 +212,8 @@ describe('derivePRStatus', () => {
     expect(status.nextAction).toBe('merge')
   })
 
-  // The SHA still has to cover HEAD — the log entry must not paper over a later push.
-  it('needs review when a workflow_complete log follows an approval of an older SHA', () => {
+  // A newer log entry must not make the old approval merge-ready after a push.
+  it('does not dispatch review when a workflow_complete log follows an older approval', () => {
     const status = derivePRStatus(input({
       headSha: 'def456',
       comments: [{
@@ -233,8 +230,8 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_REVIEW')
-    expect(status.nextAction).toBe('review')
+    expect(status.reviewState).toBe('APPROVED')
+    expect(status.nextAction).toBeNull()
   })
 
   // A newer annotation disagreeing with an older APPROVE must win: the approval SHA is
@@ -282,9 +279,8 @@ describe('derivePRStatus', () => {
     expect(status.nextAction).toBe('merge')
   })
 
-  // The self-correcting half: a fix that really did change HEAD moves HEAD off the
-  // approved SHA, so the approval stops covering it and the recheck is owed again.
-  it('needs a recheck when the post-approval fix moved HEAD', () => {
+  // A fix that moves HEAD ends merge readiness without restarting recheck.
+  it('does not recheck when the post-approval fix moved HEAD', () => {
     const status = derivePRStatus(input({
       headSha: 'def456',
       comments: [{
@@ -301,12 +297,11 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_RECHECK')
-    expect(status.nextAction).toBe('recheck')
+    expect(status.reviewState).toBe('APPROVED')
+    expect(status.nextAction).toBeNull()
   })
 
-  // A conflicted PR is actionable no matter where it sits in the review ladder — the base
-  // branch moved, and nothing else will notice, because that fires no webhook (#282).
+  // A conflicted PR is actionable until approval. A base move fires no webhook (#282).
   describe('conflicted PRs', () => {
     const conflicted = { mergeable: false, mergeStateStatus: 'dirty', protectedBase: false }
 
@@ -317,7 +312,7 @@ describe('derivePRStatus', () => {
       expect(status.reviewState).toBe('NEEDS_REVIEW')
     })
 
-    it('routes an approved conflicted PR to resolve rather than merge', () => {
+    it('does not restart an approved PR to resolve conflicts', () => {
       const status = derivePRStatus(input({
         merge: conflicted,
         comments: [{
@@ -327,7 +322,7 @@ describe('derivePRStatus', () => {
         }],
       }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-      expect(status.nextAction).toBe('resolve')
+      expect(status.nextAction).toBeNull()
       // The review verdict is untouched — the conflict says nothing about code quality.
       expect(status.reviewState).toBe('APPROVED')
       expect(status.verdict).toBe('APPROVE')
