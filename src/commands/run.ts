@@ -452,8 +452,9 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       standingVerdict = selectStandingVerdict(history)
       if (nextResult.step === null) {
         if (nextResult.stopReason === 'approved') {
-          // --steps skips detection entirely and explicitly forces another pass.
-          console.log(chalk.dim('  this PR already has an APPROVE — automatic review is complete (use --steps review to force another pass)'))
+          // This commit is approved; a push moves HEAD and re-opens the workflow.
+          // --steps skips detection entirely, so it forces a pass on the same commit.
+          console.log(chalk.dim('  this commit is already approved — nothing to do until new commits land (use --steps review to force another pass)'))
           return
         }
         // Workflow already complete for this SHA

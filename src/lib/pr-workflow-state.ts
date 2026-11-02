@@ -49,7 +49,7 @@ export interface StepRecord {
   source?: 'comment' | 'commit'
 }
 
-/** Why `step` is null. `approved` ends automatic work on this PR. */
+/** Why `step` is null. `approved` means HEAD carries an APPROVE verdict — nothing runs until it moves. */
 export type WorkflowStopReason = 'approved'
 
 export interface NextStepOptions {
@@ -86,19 +86,12 @@ const VALID_STEP_TYPES = new Set<StepRecordType>(['review', 'recheck', 'fix', 'c
 // SHA proves nothing and never matches — a record that cannot say which commit it
 // describes cannot be used to claim that commit is covered.
 //
-// The single implementation of this comparison: `decideReviewOnly`, the scan's merge
-// readiness check, and kickass's current-head review check all route through it, so they cannot
+// The single implementation of this comparison: `decideReviewOnly`, the scan's approval
+// check, and kickass's current-head review check all route through it, so they cannot
 // drift apart on what "the same commit" means.
 export function shaCovers(recordSha: string | undefined, currentSha: string): boolean {
   if (!recordSha || !currentSha) return false
   return recordSha.startsWith(currentSha) || currentSha.startsWith(recordSha)
-}
-
-// A stopped PR may have moved past its approval. The watcher must leave the new
-// commit's review status failing rather than mark unreviewed code green.
-export function hasStaleApproval(history: StepRecord[], currentSha: string): boolean {
-  const latestReview = history.filter(r => r.type === 'review' || r.type === 'recheck').at(-1)
-  return latestReview?.verdict === 'APPROVE' && !shaCovers(latestReview.sha, currentSha)
 }
 
 // Exported for human-feedback.ts: the single classifier for "is this comment one
@@ -379,9 +372,6 @@ export function identifyNextWorkflowStep(
   const lastReview = reviewHistory[reviewHistory.length - 1]
   const lastReviewIdx = history.lastIndexOf(lastReview)
   const historyAfterReview = history.slice(lastReviewIdx + 1)
-  if (lastReview.verdict === 'APPROVE') {
-    return { step: null, stopReason: 'approved', hasExistingReview: true, round: lastReview.round, history }
-  }
   // Only check for explicit fix/conflict-resolve markers after the last review.
   // Do NOT short-circuit based on lastReview.type === 'recheck': after a BLOCK or
   // NEEDS_WORK recheck, fix still needs to run. The fix step's `when` condition
@@ -389,12 +379,25 @@ export function identifyNextWorkflowStep(
   const lastFixAfterReview = historyAfterReview.filter(r => r.type === 'fix').at(-1)
   const conflictAfterReview = historyAfterReview.some(r => r.type === 'conflict-resolve')
   const fixAfterReview = lastFixAfterReview !== undefined || conflictAfterReview
+  // A fix/conflict-resolve recorded after the approval only invalidates it while that
+  // commit is still HEAD. Comment history is permanent, but a force-push can drop the
+  // commit and put HEAD back on the approved SHA — the record then describes content
+  // that no longer exists, and treating it as live work would schedule another pass
+  // over the already-approved commit.
+  const postApprovalPushCoversHead = historyAfterReview.some(
+    r => (r.type === 'fix' || r.type === 'conflict-resolve') && shaCovers(r.pushedSha, currentSha),
+  )
+
   // Conflict-resolve is orthogonal to the review ladder — it answers "can this merge?",
   // not "is this code good?" — so a PR that conflicts because the BASE branch moved must
   // reach it again. Nothing else can offer it once a review exists:
   // `firstIncompleteInitialStep` is gated on there being no review, and the tail loop
   // below only walks steps that FOLLOW review, so a conflict-resolve configured ahead of
   // review (the onboard default ordering) would never run a second time (#282).
+  //
+  // Checked before the approval stop: an approved PR that can no longer merge is exactly
+  // the case where the resolve matters most. The merge commit it pushes moves HEAD off
+  // the approved SHA, so the approval lapses and the merged code is reviewed fresh.
   //
   // Only an explicit `false` qualifies — `null` means GitHub is still computing, and
   // acting on unknown would churn. One attempt per review round (`!conflictAfterReview`):
@@ -426,6 +429,23 @@ export function identifyNextWorkflowStep(
     return { step: conflictResolveStep, hasExistingReview: true, round: attempts + 1, history }
   }
 
+  // Terminal state: the newest verdict is APPROVE and it covers the current HEAD. No
+  // further step runs — not a recheck, not a re-review — for as long as HEAD stays there.
+  //
+  // The approval covers a specific commit, not the PR forever. Commits pushed after it
+  // materially change what was approved, so they invalidate it and fall through to a
+  // fresh review below. A legacy APPROVE carrying no `sha=` cannot prove it covers HEAD,
+  // so it falls through too; that one review re-establishes the SHA and the stop.
+  //
+  // Gated on `postApprovalPushCoversHead` so work that landed AFTER the approval still
+  // finishes: a workflow whose fix step isn't gated on the verdict can push a commit past
+  // an APPROVE, and that commit still needs its recheck. The gate requires that commit to
+  // be the current HEAD, so a stale fix record left behind by a force-push doesn't keep
+  // re-opening an approval that still covers HEAD.
+  if (lastReview.verdict === 'APPROVE' && !postApprovalPushCoversHead && shaCovers(lastReview.sha, currentSha)) {
+    return { step: null, stopReason: 'approved', hasExistingReview: true, round: lastReview.round, history }
+  }
+
   // Build synthetic results so evaluateWhen works correctly for downstream steps.
   // Always populate under the literal key 'review' so conditions like
   // "review.verdict != 'APPROVE'" work regardless of the step's name in the workflow.
@@ -444,7 +464,10 @@ export function identifyNextWorkflowStep(
 
   const reviewComment = { id: lastReview.commentId, body: lastReview.commentBody }
 
-  // shaCovers, not `===`: annotations carry the short or long form.
+  // shaCovers, not `===`: annotations carry the short or the long form, and the
+  // approval stop above already asks this question that way. Two definitions of
+  // "the same commit" in one function is exactly the drift shaCovers exists to
+  // prevent.
   const reviewedCurrentSha = shaCovers(lastReview.sha, currentSha)
   const fixedCurrentSha = lastFixAfterReview?.pushedSha !== undefined && lastFixAfterReview.pushedSha === currentSha
 
@@ -565,18 +588,21 @@ export function identifyNextWorkflowStep(
 }
 
 export interface ReviewOnlyDecision {
-  /** True when this SHA was reviewed or the latest verdict approved the PR. */
+  /** True when `sha` already has a review/recheck record — the run should be skipped. */
   alreadyReviewed: boolean
   /** Round number to stamp on the review: highest prior round + 1, or 1 for a never-reviewed PR. */
   round: number
 }
 
 // Decision logic for a per-repo review-only workflow (crosscheck alter --review-only),
-// which posts reviews but never fixes/rechecks. An APPROVE stops automatic review;
-// otherwise a new SHA is reviewed, including one pushed by a fix from another session.
+// which posts reviews but never fixes/rechecks. Unlike identifyNextWorkflowStep, this
+// only asks "has this exact SHA already been reviewed?" — it deliberately ignores fix/recheck state,
+// so a fix-pushed SHA from another session is treated as new content to review
+// (not a recheck) and a SHA already reviewed is skipped. Short/long SHA forms are
+// matched by prefix, the same tolerance the issue_comment bridge uses.
 export function decideReviewOnly(history: StepRecord[], sha: string): ReviewOnlyDecision {
   const reviews = history.filter(r => r.type === 'review' || r.type === 'recheck')
-  const alreadyReviewed = reviews.at(-1)?.verdict === 'APPROVE' || reviews.some(r => shaCovers(r.sha, sha))
+  const alreadyReviewed = reviews.some(r => shaCovers(r.sha, sha))
   const maxRound = reviews.reduce((max, r) => Math.max(max, r.round), 0)
   return { alreadyReviewed, round: alreadyReviewed ? maxRound : maxRound + 1 }
 }

@@ -76,7 +76,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: pr.head.sha })
 
   // `review` posts to the same PR as `run` and `watch`, so it answers to the same two
-  // questions they do — is this PR already settled, and is anyone else on it.
+  // questions they do — is this commit already settled, and is anyone else on it.
   // Skipping both is how this command re-reviewed commits another instance had already
   // APPROVEd, and how it posted a second, contradicting verdict on a commit a watcher
   // was reviewing at that moment (measured on humanbased-ai/monorepo#4507).
@@ -89,7 +89,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       const next = identifyNextWorkflowStep(history, allSteps, pr.head.sha, { mergeable: pr.mergeable })
       if (next.stopReason === 'approved') {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'approved', sha: pr.head.sha })
-        console.log(chalk.dim('  this PR already has an APPROVE — automatic review is complete (use --force to review it anyway)'))
+        console.log(chalk.dim('  this commit is already approved — nothing to do until new commits land (use --force to review it anyway)'))
         return
       }
     } catch (err: unknown) {
