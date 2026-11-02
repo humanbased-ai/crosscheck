@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import chalk from 'chalk'
+import { isTrustedReviewAuthor } from '../lib/reviewer-identity.js'
 import { execa } from 'execa'
 import { parseDuration } from '../lib/durations.js'
 import ora from 'ora'
@@ -404,9 +405,8 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       process.exit(1)
     }
     // The annotation tag is plain HTML in a comment body — any PR commenter can post
-    // one. It only proves provenance when the comment also comes from the token's own
-    // account, the same check watch.ts's onComment handler makes against
-    // authenticatedLogin. Fail closed if the authenticated user can't be determined.
+    // one. It only proves provenance when the comment comes from the actor or
+    // configured reviewer App. An unresolved identity fails closed.
     let authenticatedLogin: string | null = null
     try {
       const { data: me } = await createGithubClient(token).rest.users.getAuthenticated()
@@ -414,7 +414,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     } catch {
       authenticatedLogin = null
     }
-    if (authenticatedLogin === null || anchored.user.login !== authenticatedLogin) {
+    if (!await isTrustedReviewAuthor(config, { owner, repo }, authenticatedLogin, anchored.user.login)) {
       console.error(chalk.red(`✗ Comment ${opts.reviewCommentId} was not posted by crosscheck — nothing to act on`))
       process.exit(1)
     }
