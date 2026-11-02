@@ -155,7 +155,7 @@ post_review:
 
 **Secrets are never written to config.** `crosscheck.config.yml` stores environment variable *names* (`api_key_env: LINEAR_API_KEY`), never values. The GitHub token comes from `gh`'s keyring or your environment at call time. The webhook HMAC secret is read from your environment.
 
-**The one place a token is embedded is the clone URL** (`https://x-access-token:<token>@github.com/...`), which is how git authenticates over HTTPS. Every log and error path that could carry that URL runs it through a redactor first, so it appears as `x-access-token:[REDACTED]`. Use `clone_protocol: ssh` if you would rather it never be constructed.
+**The token is never written into a git URL.** Git hands a remote's URL to `git-remote-https` on its command line, so a token in the URL, or in the `origin` stored in `.git/config`, would be readable by anyone on the machine who can run `ps`. Over HTTPS, crosscheck instead gives each git process a credential helper that reads the token from that process's environment, answers only for `github.com`, and is never in the environment vendor agents inherit. This needs git 2.31 or newer. A log or error path that did carry a URL with a token in it would still run through a redactor first, so it appears as `x-access-token:[REDACTED]`. Use `clone_protocol: ssh` if you would rather git use your SSH keys.
 
 **Logs are local files, and that is the only place they go.** `~/.crosscheck/logs/<date>.ndjson`, one JSON object per line, enabled by default (`logs.enabled`), pruned by age (`logs.retention_days`, default 30). They power `crosscheck diagnose`, `optimize`, and `impact` — all of which read these files and make no network calls.
 

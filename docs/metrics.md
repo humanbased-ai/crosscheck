@@ -86,7 +86,7 @@ Standard logs never contain:
 - **review text** — the verdict is recorded; the prose is not
 - **PR titles or bodies**
 - **PR author logins**
-- **tokens, keys, or secrets** — the one place a token could appear is the clone URL, which is redacted to `x-access-token:[REDACTED]` on every path that could log it
+- **tokens, keys, or secrets** — git gets the token from a credential helper rather than a URL, and any URL that did carry one is redacted to `x-access-token:[REDACTED]` on every path that could log it
 
 Error events are the one place free text lands, because a failure you cannot read is a failure you cannot fix. `message`, `stack`, and `stderr` come from the failing subprocess or API call and are truncated. They can quote a file path or a git ref. They are local files, like everything else here.
 
