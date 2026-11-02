@@ -128,9 +128,9 @@ describe('applyOnboardConfig — first run', () => {
     expect(quality.mode).toBe('fixed')
     const vendors = cfg.vendors as Record<string, Record<string, unknown>>
     expect(vendors.claude.model).toBeUndefined()
-    expect(vendors.claude.effort).toBe('max')
+    expect(vendors.claude.effort).toBe('high')
     // One model on every PR is exactly what `fixed` means.
-    expect(vendors.codex.model).toBe('gpt-6-astra')
+    expect(vendors.codex.model).toBe('gpt-6-sol')
   })
 
   it('pins no vendor model under smart mode', () => {
@@ -156,7 +156,7 @@ describe('applyOnboardConfig — first run', () => {
     // and smart mode is a no-op for codex.
     const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
     expect(vendors.codex.model_tiers).toEqual({
-      fast: 'gpt-6-luna', balanced: 'gpt-6-sol', thorough: 'gpt-6-astra',
+      fast: 'gpt-6-luna', balanced: 'gpt-6-sol', thorough: 'gpt-6-sol',
     })
   })
 
@@ -166,7 +166,7 @@ describe('applyOnboardConfig — first run', () => {
 
     const vendors = readConfig().vendors as Record<string, Record<string, unknown>>
     expect(vendors.codex.model_tiers).toEqual({
-      fast: 'gpt-6-luna', balanced: 'gpt-6.1-sol', thorough: 'gpt-6-astra',
+      fast: 'gpt-6-luna', balanced: 'gpt-6.1-sol', thorough: 'gpt-6.1-sol',
     })
   })
 

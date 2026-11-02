@@ -1,3 +1,4 @@
+import { eligibleReviewConfig, reviewEffortLevels, selectReviewModel } from './review-selection.js'
 import { execSync, execFileSync } from 'child_process'
 import { randomUUID } from 'crypto'
 import { readFileSync } from 'fs'
@@ -15,19 +16,20 @@ import { runFixStep, runCodexFixStep, runOpenCodeFixStep } from '../reviewers/fi
 import { runConflictResolveForVendor, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE, DOC_ONLY_GATE_NOTE, detectInconclusiveReview, reviewHasNoFindings } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
+import type { Octokit } from 'octokit'
 import { fetchCommentsAfter, selectHumanFeedback, formatHumanFeedback } from '../lib/human-feedback.js'
 import { autoFixBranchName, autoFixPRIntro, sourcePRHasMerged } from '../github/superseded-fix-pr.js'
 import { verifyReviewedSha, isVerifiedReviewedSha, reviewedShaRejection } from '../github/reviewed-sha.js'
 import { resolveLinearAuth, withWorker, type ResolvedLinearAuth } from '../linear/identity.js'
 import { notifyLinear } from '../linear/notify.js'
 import { shouldPostToLinear } from '../linear/comment.js'
-import { getLinearCredentials } from '../config/loader.js'
+import { getLinearCredentials, resolveReviewerToken } from '../config/loader.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError, classifyError, type LogEntry } from '../lib/logger.js'
 import { buildCommitTrailers, parseAnnotation } from '../lib/annotation.js'
 import { shaCovers } from '../lib/pr-workflow-state.js'
 import { resolveClaudeModel, resolveCodexModel, resolveOpenCodeModel } from '../lib/review-models.js'
-import { resolveReviewStrategy, escalate, clampToLevels, isDocOnlyChange, type EscalationLane, type PRContext, type ResolvedStrategy } from './review-strategy.js'
+import { resolveReviewStrategy, escalate, clampToLevels, isDocOnlyChange, type PRContext, type ResolvedStrategy } from './review-strategy.js'
 import { CLAUDE_EFFORT_LEVELS, CODEX_EFFORT_LEVELS, OPENCODE_EFFORT_LEVELS } from '../config/schema.js'
 import { buildStepIdentityFields, type StepIdentityFields } from '../lib/event-fields.js'
 import { planAutoFixDelivery, forceWithLeaseArgs, parseLsRemoteOid, isLeaseRejection, assessFixBranchOwnership, isInvalidBaseError } from '../lib/auto-fix-branch.js'
@@ -344,6 +346,10 @@ export interface WorkflowContext {
   // Backward-compatible alias for integrations compiled against the earlier
   // quota-only callback name.
   onVendorLimit?: (failedVendor: Vendor, fallbackVendor: Vendor | null, reason: string, stepName: string) => void
+  // Token used to post review output. Resolved from github.app when configured
+  // (a bot identity), otherwise identical to `token`. Callers that already
+  // resolved it can pass it in; runWorkflow resolves it per PR otherwise.
+  reviewerToken?: string
 }
 
 export interface WorkflowResult {
@@ -615,7 +621,7 @@ export function resolveReviewVendor(
   config: Config,
   fallback?: Vendor,
 ): Vendor | null {
-  return resolveReviewer(stepReviewer, origin, config, fallback, 'review')
+  return resolveReviewer(stepReviewer, origin, eligibleReviewConfig(config), fallback, 'review')
 }
 
 function supportsStep(vendor: Vendor, stepType: string): boolean {
@@ -964,6 +970,8 @@ export interface RoundExecution {
   /** `config` with the above folded in, for callees that take the whole config. */
   roundConfig: Config
   escalated: boolean
+  /** A later round has no stronger permitted model/effort than its predecessor. */
+  atCeiling: boolean
 }
 
 /**
@@ -976,8 +984,9 @@ export interface RoundExecution {
  *
  * Rounds beyond the first escalate: the class tier was already tried and did not
  * resolve the PR, so difficulty is now measured rather than predicted. escalate()
- * raises effort where the model supports it and promotes a tier where it does
- * not, and never weakens the model.
+ * uses the same model pool and effort ceiling as the reviewer. When neither
+ * effort nor a tier promotion changes the wire request, it reports the ceiling
+ * instead of claiming another escalation. Fix/recheck and round limits still run.
  */
 export function resolveRoundExecution(
   config: Config,
@@ -993,32 +1002,43 @@ export function resolveRoundExecution(
       opencodeVendor: config.vendors.opencode,
       roundConfig: config,
       escalated: false,
+      atCeiling: false,
     }
   }
 
-  // The vendors that may actually run this round, each with the model it would
-  // use and the vocabulary its CLI accepts. Keyed to the enabled vendors rather
-  // than to claude alone: on a codex-only install the claude tier model is never
-  // called, so judging escalation by its effort ladder promoted a tier every
-  // round while codex sat at the effort it started on.
-  const baseQuality = strategyQuality(config.quality, strategy)
-  const lanes: EscalationLane[] = []
-  if (config.vendors.claude.enabled) {
-    lanes.push({ model: resolveClaudeModel(baseQuality, config.vendors.claude), accepted: CLAUDE_EFFORT_LEVELS })
+  const selections = (current: ResolvedStrategy): { vendor: Vendor; model: string; effort?: string; efforts: string[] }[] => {
+    const quality = strategyQuality(config.quality, current)
+    const eligible = eligibleReviewConfig({ ...config, quality })
+    return (['claude', 'codex', 'opencode'] as const).flatMap(vendor => {
+      if (!eligible.vendors[vendor].enabled) return []
+      try {
+        const selection = selectReviewModel(vendor, quality, strategyVendor(config.vendors[vendor], current,
+          vendor === 'claude' ? CLAUDE_EFFORT_LEVELS : vendor === 'codex' ? CODEX_EFFORT_LEVELS : OPENCODE_EFFORT_LEVELS))
+        return [{ vendor, ...selection, efforts: reviewEffortLevels(vendor, quality, selection.model) }]
+      } catch {
+        // This is planning, not execution: a legacy pin may be valid for a
+        // fix-only workflow but excluded from review. The reviewer still throws
+        // the original selection error if that vendor is actually dispatched.
+        return []
+      }
+    })
   }
-  if (config.vendors.codex.enabled) {
-    lanes.push({ model: resolveCodexModel(baseQuality, config.vendors.codex), accepted: CODEX_EFFORT_LEVELS })
+  const plan = (throughRound: number): ResolvedStrategy => {
+    let current = { ...strategy, tier: strategy.tier ?? config.quality.tier }
+    // Two escalation steps; later rounds hold the ceiling and keep their bounds.
+    for (let step = 2; step <= Math.min(throughRound, 3); step++) {
+      const next = escalate({ tier: current.tier, effort: current.effort }, step, selections(current))
+      current = { ...current, ...next }
+    }
+    return current
   }
-  if (config.vendors.opencode.enabled) {
-    lanes.push({ model: resolveOpenCodeModel(baseQuality, config.vendors.opencode) ?? 'default', accepted: OPENCODE_EFFORT_LEVELS })
-  }
-
-  const escalated = escalate(
-    { tier: strategy.tier ?? config.quality.tier, effort: strategy.effort },
-    round,
-    lanes,
-  )
-  const roundStrategy = { ...strategy, tier: escalated.tier, effort: escalated.effort }
+  const roundStrategy = plan(round)
+  const previous = selections(plan(Math.max(1, round - 1)))
+  const current = selections(roundStrategy)
+  const escalated = round > 1 && current.some(selection => {
+    const prior = previous.find(entry => entry.vendor === selection.vendor)
+    return prior !== undefined && (prior.model !== selection.model || prior.effort !== selection.effort)
+  })
   const quality = strategyQuality(config.quality, roundStrategy)
   const claudeVendor = strategyVendor(config.vendors.claude, roundStrategy, CLAUDE_EFFORT_LEVELS)
   const codexVendor = strategyVendor(config.vendors.codex, roundStrategy, CODEX_EFFORT_LEVELS)
@@ -1031,7 +1051,8 @@ export function resolveRoundExecution(
     codexVendor,
     opencodeVendor,
     roundConfig: { ...config, quality, vendors: { ...config.vendors, claude: claudeVendor, codex: codexVendor, opencode: opencodeVendor } },
-    escalated: escalated.tier !== strategy.tier || escalated.effort !== strategy.effort,
+    escalated,
+    atCeiling: round > 1 && current.length > 0 && !escalated,
   }
 }
 
@@ -1181,6 +1202,18 @@ export async function pushWithNonFastForwardHandling(params: {
 export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult> {
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange, trigger } = ctx
   const triggerField = trigger !== undefined ? { trigger } : {}
+  // Review output is posted by the reviewer identity — the app installation when
+  // github.app is configured, the user token otherwise. Everything that acts on
+  // the repo (clone, push, locks, statuses) keeps the actor token, so a bot can
+  // never mutate a branch just because it can comment. Only resolve a second
+  // credential when an app is actually configured.
+  const reviewerToken = ctx.reviewerToken
+    ?? (config.github.app.app_id === null || ctx.dryRun ? token : (await resolveReviewerToken(config, { owner, repo: repoName })).token)
+  const reviewOctokit = async (): Promise<Octokit> => createGithubClient(
+    config.github.app.app_id === null || ctx.dryRun
+      ? reviewerToken
+      : (await resolveReviewerToken(config, { owner, repo: repoName })).token,
+  )
   // The author's declaration lives in the PR body. Parsing it once here means
   // every card this run posts names the same author, model and effort.
   const authorAttribution = parseAuthorAttribution(pr.body ?? '')
@@ -1326,7 +1359,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // Above the try, and above emitPRComplexity, because both the complexity event
   // and workflow_complete report the tier that ran: an escalated round reporting
   // the base class tier is the same defect as a comment citing one.
-  const { strategy: roundStrategy, quality, claudeVendor, codexVendor, opencodeVendor, roundConfig, escalated } =
+  const { strategy: roundStrategy, quality, claudeVendor, codexVendor, opencodeVendor, roundConfig, escalated, atCeiling } =
     resolveRoundExecution(config, strategy, ctx.round ?? 1)
 
   emitPRComplexity(ctx, triggerField, quality.tier)
@@ -1346,18 +1379,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // Logged once per run, not per step: nothing here depends on `step`, and
   // recomputing inside the loop printed the same line for review and recheck.
   if (strategy && roundStrategy) {
-    // Report the effort each vendor was actually GIVEN, not the level the round
-    // asked for. The two CLI vocabularies differ, so one round can send codex
-    // `xhigh` and claude `high`; printing the request names a level nobody ran.
+    // This is the round request; the reviewer reports its selected wire effort.
     const appliedEffort = [...new Set([
       ...(config.vendors.claude.enabled ? [claudeVendor.effort] : []),
       ...(config.vendors.codex.enabled ? [codexVendor.effort] : []),
       ...(config.vendors.opencode.enabled ? [opencodeVendor.effort] : []),
     ])].join('/')
-    const escalatedNote = escalated ? ` · round ${ctx.round} escalated` : ''
-    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${roundStrategy.tier ?? 'skip'} tier${appliedEffort ? ` (${appliedEffort})` : ''}${escalatedNote}`))
-    if (escalatedNote) {
-      fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, applied_effort_claude: config.vendors.claude.enabled ? claudeVendor.effort : null, applied_effort_codex: config.vendors.codex.enabled ? codexVendor.effort : null, applied_effort_opencode: config.vendors.opencode.enabled ? opencodeVendor.effort : null, strategy_version: strategy.version })
+    const escalatedNote = escalated ? ` · round ${ctx.round} escalated`
+      : atCeiling ? ` · round ${ctx.round} at review ceiling; holding permitted model/effort` : ''
+    log(chalk.dim(`  strategy v${strategy.version}: ${strategy.classId} → ${roundStrategy.tier ?? 'skip'} tier${appliedEffort ? ` (requested ${appliedEffort})` : ''}${escalatedNote}`))
+    if (escalated) {
+      fileLog({ level: 'info', event: 'strategy_escalated', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, from_tier: strategy.tier, to_tier: roundStrategy.tier, from_effort: strategy.effort, to_effort: roundStrategy.effort, requested_effort_claude: config.vendors.claude.enabled ? claudeVendor.effort : null, requested_effort_codex: config.vendors.codex.enabled ? codexVendor.effort : null, requested_effort_opencode: config.vendors.opencode.enabled ? opencodeVendor.effort : null, strategy_version: strategy.version })
+    } else if (atCeiling) {
+      fileLog({ level: 'info', event: 'strategy_ceiling_reached', repo: `${owner}/${repoName}`, pr: prNumber, round: ctx.round, tier: roundStrategy.tier, strategy_version: strategy.version })
     }
   }
 
@@ -1397,7 +1431,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     if (effectiveType === 'review' || effectiveType === 'recheck') {
       const isRecheck = effectiveType === 'recheck'
-      let reviewer = resolveReviewVendor(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      let reviewer = resolveReviewVendor(step.reviewer, origin, roundConfig, ctx.smartSwitchFallback)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
         results[step.name] = { skipped: true, skipReason: 'no_reviewer' }
@@ -1614,7 +1648,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         const nextWorkflowStep = steps.slice(currentStepIdx + 1).find(s =>
           !s.when || evaluateWhen(s.when, syntheticResultsForNext),
         )
-        const nextStepAnnotation = nextWorkflowStep?.type ?? 'none'
+        const nextStepAnnotation = verdict === 'APPROVE' ? 'none' : nextWorkflowStep?.type ?? 'none'
 
         // Read the actual HEAD from the checkout: after an in-run fix step pushes a
         // new commit, pr.head.sha is still the pre-fix SHA and would make the recheck
@@ -1652,7 +1686,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           assertReviewFresh(memoryPlan, current, annotationSha, shaVerification.headSha)
         }
         const commentId = await postReviewComment(
-          octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
+          await reviewOctokit(), owner, repoName, prNumber, commentBody, reviewer, config.brand,
           origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, annotationSha,
           nextStepAnnotation,
           ctx.trigger === 'kickass' ? 'kickass' : undefined,
@@ -1719,6 +1753,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
         results[step.name] = { verdict, commentBody, commentUrl, commentId, tokens_used: tokensUsed, input_tokens: inputTokens, output_tokens: outputTokens, vendor: reviewer, model }
       }
+      if (verdict === 'APPROVE') break
 
     } else if (effectiveType === 'fix') {
       const skipFix = (reason: string) => {
@@ -1932,7 +1967,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         // Only notify for transient failures — auth errors are operator issues, not PR author issues
         if (isRetryableFixError(fixErr)) {
           try {
-            const octokit = createGithubClient(token)
+            const octokit = await reviewOctokit()
             await octokit.rest.issues.createComment({
               owner, repo: repoName, issue_number: prNumber,
               body: buildFixFailedCommentBody({
@@ -2018,7 +2053,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         // Post a summary comment so the silent commit push is visible on the timeline
         // as a comment card. Best-effort — a failure here must not fail the run.
         try {
-          const octokit = createGithubClient(token)
+          const octokit = await reviewOctokit()
           const body = buildFixAppliedCommentBody({
             owner, repo: repoName, sha: newSha, appliedCount,
             reviewCommentId,
@@ -2092,7 +2127,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
           fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, skills_activated: activatedSkills.map(skill => skill.name), duration_ms: Date.now() - fixStepStart, ...triggerField })
           try {
-            const octokit = createGithubClient(token)
+            const octokit = await reviewOctokit()
             const body = buildFixAppliedCommentBody({
               owner, repo: repoName, sha: newSha, appliedCount,
               reviewCommentId,
@@ -2135,7 +2170,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             let patch = ''
             try { patch = execSync('git diff HEAD~1', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* fall through to the empty check */ }
             if (patch) {
-              await octokit.rest.issues.createComment({
+              await (await reviewOctokit()).rest.issues.createComment({
                 owner, repo: repoName, issue_number: prNumber,
                 body: [
                   '### Suggested fixes (crosscheck auto-fix)',
@@ -2339,7 +2374,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         let patch = ''
         try { patch = execSync('git diff', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* ignore */ }
         if (patch) {
-          const octokit = createGithubClient(token)
+          const octokit = await reviewOctokit()
           const body = `### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\`\n\n${fixAttributionFooter()}`
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
@@ -2550,7 +2585,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // Prefer the resolver's actual rewrite set; fall back to the originally-conflicted
       // list if the resolver didn't surface paths.
       try {
-        const octokit = createGithubClient(token)
+        const octokit = await reviewOctokit()
         const body = buildConflictResolvedCommentBody({
           owner, repo: repoName, sha: newSha,
           conflictCount: conflictedFiles.length,

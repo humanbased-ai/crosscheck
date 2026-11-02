@@ -71,7 +71,7 @@ describe('resolveBaseRef', () => {
 
   it("recovers via the PR's merge ref when the base commit is not fetchable by name", async () => {
     // GitHub keeps refs/pull/<n>/merge for an open PR; its first parent is the base.
-    const mergeSha = git(originDir, 'commit-tree', `${baseSha}^{tree}`,
+    const mergeSha = git(originDir, '-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit-tree', `${baseSha}^{tree}`,
       '-p', baseSha, '-p', git(originDir, 'rev-parse', 'pr-head'), '-m', 'merge')
     git(originDir, 'update-ref', 'refs/pull/1/merge', mergeSha)
     git(originDir, 'branch', '-D', 'feature-base')

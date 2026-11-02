@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs'
 import { describe, it, expect } from 'vitest'
 import {
   resolveReviewStrategy,
@@ -20,6 +21,7 @@ import { strategyDeterminedModel, strategyVendor, resolveRoundExecution, strateg
 import { claudeEffort } from '../reviewers/claude.js'
 import { codexReasoningEffort } from '../reviewers/codex.js'
 import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
+import { selectReviewModel } from '../lib/review-selection.js'
 
 const pr = (files: string[], over: Partial<Parameters<typeof resolveReviewStrategy>[0]> = {}) =>
   resolveReviewStrategy({ files, additions: 100, deletions: 50, ...over })
@@ -157,13 +159,13 @@ describe('escalation ladder', () => {
   // The OpenCode case: most open-weight models expose no effort ladder, so the
   // effort step has to degrade to a model step or escalation silently no-ops.
   it('promotes a tier when the model has no effort control', () => {
-    expect(effortLevelsFor('kimi-k3')).toEqual([])
-    expect(escalate({ tier: 'fast', effort: null }, 2, 'kimi-k3'))
+    expect(effortLevelsFor('opencode/glm-5.3')).toEqual([])
+    expect(escalate({ tier: 'fast', effort: null }, 2, 'opencode/glm-5.3'))
       .toEqual({ tier: 'balanced', effort: null })
   })
 
   it('caps tier promotion at thorough', () => {
-    expect(escalate({ tier: 'thorough', effort: null }, 3, 'kimi-k3').tier)
+    expect(escalate({ tier: 'thorough', effort: null }, 3, 'opencode/glm-5.3').tier)
       .toBe('thorough')
   })
 })
@@ -174,19 +176,20 @@ describe('effort clamping', () => {
   })
 
   it('returns null for a model with no effort parameter', () => {
-    expect(clampEffort('kimi-k3', 'high')).toBeNull()
+    expect(clampEffort('opencode/glm-5.3', 'high')).toBeNull()
   })
 
   it('snaps down to the nearest supported level', () => {
     // deepseek exposes none/high/max — xhigh must snap down to high, not fail.
-    expect(clampEffort('deepseek-v4-pro', 'xhigh')).toBe('high')
+    expect(clampEffort('opencode/deepseek-v4-pro', 'xhigh')).toBe('high')
   })
 })
 
 describe('banned models', () => {
   it('bans claude-fable-5 from review', () => {
     expect(isModelBanned('claude-fable-5')).toBe(true)
-    expect(isModelBanned('claude-opus-5')).toBe(false)
+    expect(isModelBanned('claude-opus-5')).toBe(true)
+    expect(isModelBanned('claude-sonnet-5-5')).toBe(false)
   })
 
   it('never routes a banned model from any vendor tier', () => {
@@ -205,13 +208,13 @@ describe('model resolution honours the strategy', () => {
     ({ tier: 'balanced', mode: 'smart', review_memory: true, focus: [], ...over }) as QualityConfig
 
   it('uses the strategy tier in smart mode', () => {
-    expect(resolveClaudeModel(quality(), undefined, { tier: 'thorough' })).toBe('claude-opus-5')
+    expect(resolveClaudeModel(quality(), undefined, { tier: 'thorough' })).toBe('claude-sonnet-5-5')
     expect(resolveClaudeModel(quality(), undefined, { tier: 'fast' })).toBe('claude-haiku-5-5')
   })
 
   it('ignores the strategy tier in fixed mode', () => {
     expect(resolveClaudeModel(quality({ mode: 'fixed' }), undefined, { tier: 'thorough' }))
-      .toBe('claude-sonnet-5')
+      .toBe('claude-sonnet-5-5')
   })
 
   it('falls back to the configured tier when no strategy resolved', () => {
@@ -219,8 +222,8 @@ describe('model resolution honours the strategy', () => {
     expect(effectiveTier(quality(), { tier: null })).toBe('balanced')
   })
 
-  it('routes thorough to opus-5, not the legacy opus-4-8', () => {
-    expect(resolveClaudeModel(quality(), undefined, { tier: 'thorough' })).toBe('claude-opus-5')
+  it('keeps thorough below the flagship ceiling', () => {
+    expect(resolveClaudeModel(quality(), undefined, { tier: 'thorough' })).toBe('claude-sonnet-5-5')
   })
 
   // Regression: the old `auth !== 'api-key' → 'default'` guard discarded a
@@ -232,7 +235,7 @@ describe('model resolution honours the strategy', () => {
 
   it('drives the codex tier model from the strategy under api-key auth', () => {
     const vendor = { enabled: true, model: null, auth: 'api-key', effort: 'medium', timeout_sec: null, quality: 'medium' } as CodexVendorConfig
-    expect(resolveCodexModel(quality(), vendor, { tier: 'thorough' })).toBe('gpt-6-astra')
+    expect(resolveCodexModel(quality(), vendor, { tier: 'thorough' })).toBe('gpt-6.1-sol')
     expect(resolveCodexModel(quality(), vendor, { tier: 'fast' })).toBe('gpt-6-luna')
   })
 
@@ -531,7 +534,7 @@ describe('rounds escalate on measured non-convergence', () => {
   })
 
   it('promotes the tier instead when the model has no effort ladder', () => {
-    expect(escalate({ tier: 'fast', effort: null }, 2, 'kimi-k3'))
+    expect(escalate({ tier: 'fast', effort: null }, 2, 'opencode/glm-5.3'))
       .toEqual({ tier: 'balanced', effort: null })
   })
 })
@@ -560,5 +563,36 @@ describe('codex under subscription auth', () => {
     const v = codex({ model_tiers: { fast: 'gpt-5.6-luna', balanced: 'gpt-5.6-terra', thorough: 'gpt-5.6-sol' } })
     expect(resolveCodexModel(q('fast'), v)).toBe('gpt-5.6-luna')
     expect(resolveCodexModel(q('thorough'), v)).toBe('gpt-5.6-sol')
+  })
+})
+
+
+describe('OpenCode smart-mode execution', () => {
+  it('promotes the mapped model when the current provider has no verified variant ladder', () => {
+    const cfg = ConfigSchema.parse({ vendors: {
+      claude: { enabled: false }, codex: { enabled: false },
+      opencode: { enabled: true, model_tiers: { fast: 'opencode/glm-5.3-flash', balanced: 'opencode/deepseek-v4.1-flash', thorough: 'opencode/deepseek-v4.1-flash' } },
+    } })
+    const cls = pr(['src/view.ts'], { additions: 1, deletions: 1 })
+    const first = resolveRoundExecution(cfg, cls, 1)
+    const next = resolveRoundExecution(cfg, cls, 2)
+    const firstModel = selectReviewModel('opencode', first.quality, first.opencodeVendor).model
+    const nextModel = selectReviewModel('opencode', next.quality, next.opencodeVendor).model
+    expect(firstModel).toBe('opencode/glm-5.3-flash')
+    expect(nextModel).toBe('opencode/deepseek-v4.1-flash')
+    expect(next.escalated).toBe(true)
+    expect(resolveRoundExecution(cfg, cls, 3)).toMatchObject({ escalated: false, atCeiling: true })
+    expect(strategyCitation(cfg.vendors.opencode, cls, next.strategy, nextModel!)).toMatchObject({ version: '1.4.0', tier: 'balanced' })
+    expect(strategyCitation(cfg.vendors.opencode, cls, first.strategy, 'default')).toBeUndefined()
+  })
+})
+
+
+describe('policy source integrity', () => {
+  it('has one definition of each top-level strategy key', () => {
+    const source = readFileSync(new URL('../config/review-strategy.json', import.meta.url), 'utf8')
+    const keys = [...source.matchAll(/^ {2}"([^"\n]+)":/gm)].map(match => match[1])
+    expect(keys.length).toBeGreaterThan(10)
+    expect(new Set(keys).size).toBe(keys.length)
   })
 })

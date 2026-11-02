@@ -2,6 +2,7 @@ import { execSync } from 'child_process'
 import { existsSync, statSync } from 'fs'
 import chalk from 'chalk'
 import { loadConfig, getGithubTokenSource, getWebhookSecretPath, resolveConfigPath, getLinearCredentials } from '../config/loader.js'
+import { inspectReviewerIdentity } from '../lib/reviewer-identity.js'
 import { verifyLinearIdentity, type LinearIdentityReport } from '../linear/verify.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
@@ -16,6 +17,22 @@ function row(label: string, value: string, ok?: boolean) {
 }
 
 const LINEAR_PROBE_TIMEOUT_MS = 10_000
+const IDENTITY_PROBE_TIMEOUT_MS = 10_000
+
+/**
+ * Resolves to null on timeout or rejection. status reports facts; a probe that
+ * cannot answer must not take the whole command down.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(null), ms)
+    timer.unref?.()
+    promise.then(
+      value => { clearTimeout(timer); resolve(value) },
+      () => { clearTimeout(timer); resolve(null) },
+    )
+  })
+}
 
 export async function runStatus(configPath?: string) {
   const config = loadConfig(configPath)
@@ -52,6 +69,18 @@ export async function runStatus(configPath?: string) {
     ? `set (${tokenResult.source === 'gh-keyring' ? 'gh auth login' : 'env'})`
     : 'missing'
   row('GITHUB_TOKEN', ghTokenDetail, tokenResult !== null)
+
+  // Reviewer identity. Best-effort and bounded: status must stay responsive even
+  // when the app probe or the branch-protection read is slow.
+  const identity = await withTimeout(
+    inspectReviewerIdentity(config, { token: tokenResult?.token ?? null }),
+    IDENTITY_PROBE_TIMEOUT_MS,
+  )
+  if (identity) {
+    row('reviewer', identity.detail, identity.ok)
+    if (identity.fix) console.log(`      ${chalk.dim('→')} ${chalk.yellow(identity.fix)}`)
+    for (const note of identity.notes) console.log(`      ${chalk.dim('→')} ${chalk.yellow(note)}`)
+  }
 
   const webhookSecret = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET
   const webhookSecretPath = getWebhookSecretPath()

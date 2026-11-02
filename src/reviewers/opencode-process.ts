@@ -1,4 +1,5 @@
 import { execa, type Options } from 'execa'
+import { openCodeVariantsFor, clampToLevels } from '../lib/review-strategy.js'
 import { oneLine } from '../lib/vendor-error-summary.js'
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -86,8 +87,21 @@ export async function runOpenCode(args: string[], options: Options): Promise<{ s
   }
 }
 
+// Explicit suffixes are operator choices; catalog variants require wire evidence.
+export function openCodeModelEffort(model: string | undefined, effort: string): string | undefined {
+  if (!model) return undefined
+  const variant = model.split('#')[1]
+  if (variant) return variant
+  const accepted = openCodeVariantsFor(model)
+  return accepted === undefined ? effort : clampToLevels(effort, accepted) ?? undefined
+}
+
 // V1 exposes --variant; only V2 accepts the #variant model suffix.
-export function openCodeModelArgs(model: string | undefined, effort: string, v2: boolean): string[] {
-  if (!model) return []
-  return v2 ? ['--model', `${model}#${effort}`] : ['--model', model, '--variant', effort]
+export function openCodeModelArgs(model: string | undefined, effort: string | undefined, v2: boolean): string[] {
+  // 'default' means the model comes from opencode.json, so pass no --model.
+  if (!model || model === 'default') return []
+  const [id, explicitVariant] = model.split('#')
+  const variant = explicitVariant || effort
+  if (!variant) return ['--model', id]
+  return v2 ? ['--model', `${id}#${variant}`] : ['--model', id, '--variant', variant]
 }

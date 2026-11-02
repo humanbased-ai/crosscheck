@@ -31,7 +31,12 @@ function startServer(server: ReturnType<typeof createServer>): Promise<void> {
 }
 
 function stopServer(server: ReturnType<typeof createServer>): Promise<void> {
-  return new Promise(resolve => server.close(() => resolve()))
+  return new Promise(resolve => {
+    server.close(() => resolve())
+    // On Node 18, close() waits out the idle keep-alive connection `fetch` leaves
+    // open, which takes about the whole 5s test timeout. Node 19+ drops it.
+    server.closeAllConnections()
+  })
 }
 
 // Bypass signature verification for unit tests

@@ -27,6 +27,7 @@ For every change:
 ```bash
 npm run typecheck   # zero type errors
 npm run build       # clean compile to dist/
+npm test            # every test passes
 ```
 
 3. Self-review every changed file: unused imports, broken references, incorrect types.
@@ -77,7 +78,8 @@ feature branch → staging → main
 
 - Merging to `staging` triggers CI and publishes `@beta` to npm.
 - `staging` → `main` is promoted automatically every Friday at 18:00 UTC by the "Promote staging → main" workflow (or on demand via `workflow_dispatch`). It opens a PR — `main` is protected and rejects direct pushes — merges it, and dispatches the release.
-- Landing on `main` publishes `@latest` and emails yi@inductive.network. There is no manual approval gate.
+- Landing on `main` starts the `@latest` release, which waits for a reviewer to approve the `production` environment, then publishes and emails yi@inductive.network.
+- The `require-tests` ruleset blocks a merge to `staging` or `main` until CI passes on Node 18, 20 and 22, for admins too. Renaming the CI job or changing its Node versions means changing the ruleset as well.
 
 ### Enforcement
 
@@ -237,6 +239,8 @@ Never remove a config field or change its type — that is a breaking change.
 | `GITHUB_WEBHOOK_SECRET` | Alias for above | `loader.ts` |
 
 Never read env vars outside `config/loader.ts`.
+
+`RELEASE_TOKEN` is a CI secret, not a CLI variable. `promote-staging.yml` and `release.yml` use it to open and merge PRs, because Actions may not create PRs in this repo and a merge made with `GITHUB_TOKEN` raises no `push` event for `release.yml`. It is a fine-grained PAT scoped to this repo with Contents, Pull requests and Workflows write; Workflows because a promotion can carry workflow changes. Both workflows check out with it, so an expired token stops promotions and `@latest` releases alike. Rotate it with `gh secret set RELEASE_TOKEN -R humanbased-ai/crosscheck`.
 
 ---
 

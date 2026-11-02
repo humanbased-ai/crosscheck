@@ -71,10 +71,16 @@ export async function withCodexModelFallback<T>(
   step: string,
   run: (model: string) => Promise<T>,
   onFallback?: (msg: string) => void,
+  allowedModels?: readonly string[],
 ): Promise<T> {
+  const nextModel = (current: string): string | null => {
+    if (!allowedModels) return codexFallbackModel(current)
+    const twin = subscriptionTwin(current)
+    return [twin, ...allowedModels].find(candidate => candidate !== undefined && candidate !== current && allowedModels.includes(candidate) && !rejectedModels.has(candidate)) ?? null
+  }
   let current = model
   while (rejectedModels.has(current)) {
-    const next = codexFallbackModel(current)
+    const next = nextModel(current)
     if (!next) break
     current = next
   }
@@ -83,7 +89,7 @@ export async function withCodexModelFallback<T>(
       return await run(current)
     } catch (err) {
       const rejection = codexModelRejection(err)
-      const next = rejection ? codexFallbackModel(current) : null
+      const next = rejection ? nextModel(current) : null
       if (!rejection || !next) throw err
       rejectedModels.add(current)
       onFallback?.(`  codex rejected model ${current} — retrying ${step} with ${next}`)

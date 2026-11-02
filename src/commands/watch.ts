@@ -28,7 +28,9 @@ import {
   patchDeploymentConfig,
   detectGitHubLogin,
   getLinearCredentials,
+  resolveReviewerToken,
 } from '../config/loader.js'
+import { resolveReviewerIdentity, isTrustedReviewAuthor } from '../lib/reviewer-identity.js'
 import { randomFortune } from '../lib/fortune.js'
 import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
@@ -62,6 +64,7 @@ import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
 import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, claimRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
+import { WatchModelDiscovery } from '../lib/watch-models.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
 import { configFingerprint, watchConfigDrift } from '../lib/config-drift.js'
 import { webhookFailureHint, webhookFailureReason, type WebhookFailureReason } from '../lib/webhook-failure.js'
@@ -306,6 +309,7 @@ export async function runWatch(opts: WatchOpts = {}) {
   const board = new PRBoard()
   const workflow = loadWorkflow(process.cwd())
   board.setConfig(config, workflow)
+  board.setReviewerIdentity(await resolveReviewerIdentity(config))
 
   // Thin wrapper: routes important messages to both terminal and file log
   const bLog = (line1: string, line2?: string) => {
@@ -360,6 +364,8 @@ export async function runWatch(opts: WatchOpts = {}) {
   let backtraceIntervalRef: ReturnType<typeof setInterval> | null = null
   let stopConfigDriftWatch = () => {}
 
+  const modelDiscovery = new WatchModelDiscovery()
+
   async function reviewPR(params: ReviewPRParams): Promise<void> {
     lastActivityAt = Date.now()  // reset idle timer on any PR event
     const { owner, repoName, prNumber } = params
@@ -389,9 +395,10 @@ export async function runWatch(opts: WatchOpts = {}) {
 
       // Smart-switch: when cross-vendor is degraded, override to single-vendor with the healthy vendor
       const ss = getSmartSwitch()
+      const modelSnapshot = await modelDiscovery.snapshot(config)
       const effectiveConfig = (config.mode === 'cross-vendor' && ss.active && ss.fallbackVendor)
-        ? buildFallbackConfig(config, ss.fallbackVendor)
-        : config
+        ? buildFallbackConfig(modelSnapshot, ss.fallbackVendor)
+        : modelSnapshot
 
       const reviewer = await assignReviewer(origin, effectiveConfig)
 
@@ -712,7 +719,7 @@ export async function runWatch(opts: WatchOpts = {}) {
             `${' '.repeat(FMT_TIME_WIDTH + 2)}prev=${chalk.dim(prevShort)} → ${chalk.dim(nowShort)}  ${chalk.dim('(skipped)')}`,
           )
           try {
-            await lockOctokit.rest.issues.createComment({
+            await createGithubClient((await resolveReviewerToken(config, { owner, repo: repoName })).token).rest.issues.createComment({
               owner, repo: repoName, issue_number: prNumber,
               body: `✓ No diff change since the last review (was \`${prevShort}\`, now \`${nowShort}\`). Skipping re-review.\n\n<!-- crosscheck: no_diff_change prev_sha=${prev.sha} sha=${params.headSha} -->`,
             })
@@ -867,7 +874,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         const classified = classifyReviewerError(err)
         if (classified) {
           try {
-            await lockOctokit.rest.issues.createComment({
+            await createGithubClient((await resolveReviewerToken(config, { owner, repo: repoName })).token).rest.issues.createComment({
               owner, repo: repoName, issue_number: prNumber,
               body: buildReviewFailedCommentBody({
                 prUrl: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
@@ -1047,15 +1054,14 @@ export async function runWatch(opts: WatchOpts = {}) {
       // <!-- crosscheck: ... type=review --> automation marker). The concern is
       // specifically annotation injection: someone deliberately embedding that
       // marker to drive automated fix work. Guard against it by verifying the
-      // comment was posted by the account that owns the crosscheck token — the
-      // only entity that legitimately writes these automation markers.
-      // Fail closed: if we couldn't determine the token owner at startup, disable
-      // the bridge entirely rather than allowing any commenter to trigger fixes.
-      if (authenticatedLogin === null) {
+      // comment was posted by the actor or configured reviewer App — the only
+      // identities that legitimately write these automation markers.
+      // Fail closed when neither identity can be verified.
+      if (authenticatedLogin === null && config.github.app.app_id === null) {
         fileLog({ level: 'warn', event: 'comment_trigger_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'authenticated_login_unavailable' })
         return
       }
-      if (event.comment.user.login !== authenticatedLogin) {
+      if (!await isTrustedReviewAuthor(config, { owner, repo: repoName }, authenticatedLogin, event.comment.user.login)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'annotation_injection_blocked', author: event.comment.user.login })
         return
       }

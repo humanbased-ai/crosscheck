@@ -46,9 +46,9 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   }).optional(),
 })
 
-// OpenCode vendor config. OpenCode has no `medium` effort (its `--model
-// provider/model#variant` suffix accepts none/low/high/max), so this extends the
-// shared schema and narrows `effort` to that vocabulary. Auth is always via the
+// OpenCode retains its legacy effort vocabulary for custom providers. Catalog
+// routes use verified variants or the provider default; explicit #variants win.
+// Auth is always via the
 // local OpenCode background service (`opencode auth login`), so `auth` from the
 // shared schema is not meaningful here and stays at its default.
 //
@@ -58,9 +58,35 @@ export const CodexVendorConfigSchema = VendorConfigSchema.extend({
 export const OpenCodeVendorConfigSchema = VendorConfigSchema.extend({
   enabled: z.boolean().default(false),
   effort: z.enum(OPENCODE_EFFORT_LEVELS).default('high'),
+  model_tiers: z.object({
+    fast: z.string().optional(),
+    balanced: z.string().optional(),
+    thorough: z.string().optional(),
+  }).optional(),
 })
 
+export const ReviewModelSchema = z.object({
+  id: z.string().min(1),
+  model_class: z.enum(['fast', 'standard']),
+  source: z.enum(['cli', 'configured', 'catalog']),
+  auto_free: z.boolean().optional(),
+  efforts: z.array(z.string()),
+  input_usd_mtok: z.number().nonnegative().optional(),
+  output_usd_mtok: z.number().nonnegative().optional(),
+  family: z.string().optional(),
+})
+export type ReviewModel = z.infer<typeof ReviewModelSchema>
+
 export const QualityConfigSchema = z.object({
+  refresh_free_models: z.boolean().optional(),
+  excluded_models: z.array(z.string()).optional(),
+  model_refresh_sec: z.number().int().min(30).max(86400).optional(),
+  preference: z.enum(['balanced', 'speed-max', 'cost-min']).optional(),
+  review_models: z.object({
+    claude: z.array(ReviewModelSchema).optional(),
+    codex: z.array(ReviewModelSchema).optional(),
+    opencode: z.array(ReviewModelSchema).optional(),
+  }).optional(),
   // The tier when `mode: fixed`, and the fallback under `mode: smart` whenever a
   // PR's file list cannot be read from its clone, or when an explicit request
   // (`crosscheck review`, `run --steps`) overrides a class that would skip the PR.
@@ -333,6 +359,30 @@ export const BrandConfigSchema = z.object({
   reviewer_attribution: z.string().default(''),
 })
 
+// ── GitHub App review identity ───────────────────────────────────────────────
+// Crosscheck has two roles that used to share one credential: the ACTOR (the
+// human whose token clones, pushes, and merges) and the REVIEWER (who posts the
+// review comments). Setting `app_id` splits them: review output is posted by the
+// app's installation, so the comment author is the bot rather than the operator.
+// Everything else keeps using the user token.
+export const GithubAppConfigSchema = z.object({
+  // The switch. null = post reviews with the operator's token, as before.
+  app_id: z.number().int().positive().nullable().default(null),
+  // Optional: resolved from the target repo at mint time when null
+  // (GET /repos/{owner}/{repo}/installation). Set it to pin one installation
+  // when the app is installed on several accounts.
+  installation_id: z.number().int().positive().nullable().default(null),
+  // PEM path, `~` expanded. Read in config/loader.ts — never the key itself.
+  private_key_path: z.string().default('~/.crosscheck/app.pem'),
+  // Env var holding the PEM. Takes precedence over private_key_path, so CI can
+  // inject the key without writing it to disk. `\n` escapes are normalised.
+  private_key_env: z.string().default('CROSSCHECK_APP_PRIVATE_KEY'),
+})
+
+export const GithubConfigSchema = z.object({
+  app: GithubAppConfigSchema.prefault({}),
+})
+
 // Tiered Linear identity — see src/linear/identity.ts for the tier semantics.
 // Disabled by default, so existing configs are unaffected.
 export const LinearAuthConfigSchema = z.object({
@@ -422,12 +472,15 @@ export const ConfigSchema = z.object({
   post_review: PostReviewConfigSchema.prefault({}),
   display: DisplayConfigSchema.prefault({}),
   brand: BrandConfigSchema.prefault({}),
+  github: GithubConfigSchema.prefault({}),
   linear: LinearConfigSchema.prefault({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
 export type AgentPriorityConfig = z.infer<typeof AgentPriorityConfigSchema>
 export type BrandConfig = z.infer<typeof BrandConfigSchema>
+export type GithubAppConfig = z.infer<typeof GithubAppConfigSchema>
+export type GithubConfig = z.infer<typeof GithubConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
 export type CodexVendorConfig = z.infer<typeof CodexVendorConfigSchema>
 export type OpenCodeVendorConfig = z.infer<typeof OpenCodeVendorConfigSchema>

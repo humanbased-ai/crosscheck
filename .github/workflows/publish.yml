@@ -43,6 +43,10 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      # Not in prepublishOnly: `npm publish` runs that with the npm token in its
+      # environment, and the tests have no use for it.
+      - run: npm test
+
       - name: Compute next stable version (dry run)
         id: next_ver
         uses: mathieudutour/github-tag-action@v6.2
@@ -121,6 +125,10 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+      # Not in prepublishOnly: `npm publish` runs that with the npm token in its
+      # environment, and the tests have no use for it.
+      - run: npm test
 
       - name: Compute next stable version (dry run)
         id: next_ver

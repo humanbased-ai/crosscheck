@@ -3,19 +3,25 @@ import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import chalk from 'chalk'
+import { initializeReviewStrategy } from './init-review-strategy.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
 import { checkOpenCodeAuth } from '../reviewers/opencode.js'
-import { getWebhookSecret, getWebhookSecretPath, detectGitHubLogin, patchAllowedAuthors, loadConfig, resolveConfigPath } from '../config/loader.js'
+import { getWebhookSecret, getWebhookSecretPath, detectGitHubLogin, patchAllowedAuthors, loadConfig, resolveConfigPath, getGithubTokenSource } from '../config/loader.js'
+import { inspectReviewerIdentity } from '../lib/reviewer-identity.js'
+import { withTimeout } from '../lib/with-timeout.js'
+import { ConfigSchema, type Config } from '../config/schema.js'
 
 export interface CheckResult {
   label: string
   ok: boolean
   detail: string
   fix?: string
+  /** Non-failing remark rendered under the row (e.g. an advisory limitation). */
+  note?: string
 }
 
-export async function runChecks(): Promise<{ results: CheckResult[]; aiCliCount: number }> {
+export async function runChecks(config: Config | null = null): Promise<{ results: CheckResult[]; aiCliCount: number }> {
   const results: CheckResult[] = []
   let aiCliCount = 0
 
@@ -100,20 +106,60 @@ export async function runChecks(): Promise<{ results: CheckResult[]; aiCliCount:
   getWebhookSecret() // ensure it's generated/persisted
   results.push({ label: 'WEBHOOK_SECRET', ok: true, detail: secretDetail })
 
+  // Review identity. With no app configured this is informational; a configured
+  // app that cannot post is a real failure (the first symptom would otherwise be
+  // a dead review run), and the code-owner advisory is a note, not a failure.
+  if (config) {
+    try {
+      const token = getGithubTokenSource()?.token ?? null
+      const identity = await withTimeout(inspectReviewerIdentity(config, { token }), 10_000)
+      if (!identity) throw new Error('GitHub App identity probe timed out after 10 seconds')
+      results.push({
+        label: 'reviewer identity',
+        ok: identity.ok,
+        detail: identity.detail,
+        fix: identity.fix,
+        ...(identity.notes.length > 0 ? { note: identity.notes.join('\n') } : {}),
+      })
+    } catch (err) {
+      results.push({
+        label: 'reviewer identity',
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+        fix: 'Diagnose with: ck auth',
+      })
+    }
+  }
+
   return { results, aiCliCount }
 }
 
-function printCheck({ label, ok, detail, fix }: CheckResult) {
+function printCheck({ label, ok, detail, fix, note }: CheckResult) {
   const icon = ok ? chalk.green('✓') : chalk.red('✗')
   const labelStr = chalk.bold(label.padEnd(20))
   console.log(`  ${icon} ${labelStr} ${detail}`)
   if (!ok && fix) console.log(`      ${chalk.dim('→')} ${chalk.yellow(fix)}`)
+  if (note) {
+    for (const line of note.split('\n')) {
+      console.log(`      ${chalk.dim('→')} ${chalk.dim(line)}`)
+    }
+  }
 }
 
 export async function runInit(configPath?: string) {
   console.log(chalk.bold('\ncrosscheck — environment check\n'))
 
-  const { results: checks, aiCliCount } = await runChecks()
+  // Checks can learn from an existing config (reviewer identity, protection
+  // advisory). A missing or unreadable config is not an init failure — init is
+  // also how the first config gets written, and the default identity is still
+  // worth reporting.
+  let existingConfig: Config = ConfigSchema.parse({})
+  const checksConfigPath = resolveConfigPath(configPath)
+  if (checksConfigPath && existsSync(checksConfigPath)) {
+    try { existingConfig = loadConfig(checksConfigPath) } catch { /* fall back to defaults */ }
+  }
+
+  const { results: checks, aiCliCount } = await runChecks(existingConfig)
   for (const check of checks) printCheck(check)
 
   // AI CLI checks: only BOTH missing is a hard blocker. One CLI = single-vendor mode (still usable).
@@ -122,7 +168,7 @@ export async function runInit(configPath?: string) {
 
   if (aiCliCount === 0) {
     // Neither AI CLI is authenticated — hard failure
-    console.log(chalk.red(`\nAt least one AI CLI (codex or claude) must be authenticated before crosscheck can run.\n`))
+    console.log(chalk.red(`\nNo saved AI CLI authentication found. Model discovery will also check OpenCode free-tier availability.\n`))
     if (nonAiFailures.length > 0) {
       console.log(chalk.yellow(`${nonAiFailures.length} other issue(s) also need attention.\n`))
     }
@@ -146,7 +192,8 @@ export async function runInit(configPath?: string) {
   // the global default, so `crosscheck init` patches the same file that `watch` reads.
   const dest = configPath ?? resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
   mkdirSync(join(homedir(), '.crosscheck'), { recursive: true })
-  if (!existsSync(dest)) {
+  const fresh = !existsSync(dest)
+  if (fresh) {
     const examplePath = new URL('../../crosscheck.config.example.yml', import.meta.url).pathname
     if (existsSync(examplePath)) {
       let content = readFileSync(examplePath, 'utf8')
@@ -186,6 +233,8 @@ export async function runInit(configPath?: string) {
       console.log(chalk.dim(`Config already exists at ${dest}\n`))
     }
   }
+
+  if (existsSync(dest)) await initializeReviewStrategy(dest, fresh)
 
   // Smee-client is optional but improves watch mode reliability.
   // Check if it's installed and show a one-line tip if not.

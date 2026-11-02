@@ -153,27 +153,22 @@ async function promptAgentPriority(
   return result
 }
 
-// Effort settings and display hints per quality tier.
-//
-// Cost is output-token cost at 48k output tokens, the measured median for one
-// review. A review is an agentic session, so it takes 10-16 minutes of wall
-// clock (median 643s over 43 logged runs) — the tier changes depth and the
-// subprocess timeout, not seconds-scale latency.
+// Built-in fallbacks stay below the flagship ceiling; ck init discovers personal pools.
 const QUALITY_TIERS = {
   fast: {
-    description: 'quick scan, top issues only  (~$0.24 per review)',
+    description: 'quick scan, focused effort',
     claude: { model: 'haiku', effort: 'low' as const },
     codex:  { model: 'gpt-6-luna', effort: 'low' as const },
   },
   balanced: {
-    description: 'full review, all issues with explanations  (~$0.72 per review)',
+    description: 'full review, balanced effort',
     claude: { model: 'sonnet', effort: 'medium' as const },
     codex:  { model: 'gpt-6.1-sol', effort: 'medium' as const },
   },
   thorough: {
-    description: 'deep multi-pass, security + architecture  (~$1.20 per review)',
-    claude: { model: 'opus', effort: 'max' as const },
-    codex:  { model: 'gpt-6-astra', effort: 'high' as const },
+    description: 'security and architecture, higher effort within the review ceiling',
+    claude: { model: 'sonnet', effort: 'high' as const },
+    codex:  { model: 'gpt-6.1-sol', effort: 'high' as const },
   },
 } as const
 

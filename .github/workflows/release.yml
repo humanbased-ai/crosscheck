@@ -121,6 +121,11 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      # Before the tag, so a red test leaves no tag without a package. Not in
+      # prepublishOnly: that runs after the tag is pushed, and with the npm token
+      # in its environment.
+      - run: npm test
+
       - name: Tag the release
         env:
           NEW_VERSION: ${{ needs.compute.outputs.new_version }}

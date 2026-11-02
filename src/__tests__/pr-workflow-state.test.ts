@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { commitToRecord, decideReviewOnly, identifyNextWorkflowStep, type StepRecord } from '../lib/pr-workflow-state.js'
+import { commentToRecord, commitToRecord, decideReviewOnly, identifyNextWorkflowStep, type StepRecord } from '../lib/pr-workflow-state.js'
 import type { RawPRCommit } from '../github/client.js'
 import type { WorkflowStep } from '../lib/workflow.js'
 
@@ -298,6 +298,20 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.step?.type).toBe('review')
     expect(next.round).toBe(2)
     expect(next.stopReason).toBeUndefined()
+  })
+
+  it('reviews the new head after the first APPROVE on monorepo PR 7974', () => {
+    const approval = commentToRecord({
+      id: 6570384721,
+      body: '<!-- crosscheck: origin=codex reviewer=codex model=gpt-6-luna type=review round=1 verdict=APPROVE service=crosscheck sha=75e3037b7d20ff503f7a901894aea22e2f8be5c3 next_step=recheck -->',
+      created_at: '2026-11-02T06:09:08Z',
+    })
+
+    expect(approval).not.toBeNull()
+    expect(identifyNextWorkflowStep([approval!], workflow, '75e3037b7d20ff503f7a901894aea22e2f8be5c3').stopReason).toBe('approved')
+    const next = identifyNextWorkflowStep([approval!], workflow, '793385fb373c47bfec57e867051a2f06b8d25b09')
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(2)
   })
 
   it('reviews a new HEAD pushed after an APPROVE recheck', () => {

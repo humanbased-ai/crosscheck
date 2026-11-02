@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { modelDisplayName, primaryModelFromUsage, resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
+import { modelDisplayName, primaryModelFromUsage, resolveClaudeModel, resolveCodexModel, resolveOpenCodeModel } from '../lib/review-models.js'
+import { OpenCodeVendorConfigSchema } from '../config/schema.js'
 import type { CodexVendorConfig, QualityConfig, VendorConfig } from '../config/schema.js'
 
 const quality = (tier: QualityConfig['tier']): QualityConfig => ({
@@ -29,11 +30,8 @@ const claudeVendor = (model: string | null = null, auth: VendorConfig['auth'] = 
 describe('review model resolution', () => {
   it('resolves Claude models by tier', () => {
     expect(resolveClaudeModel(quality('fast'))).toBe('claude-haiku-5-5')
-    expect(resolveClaudeModel(quality('balanced'))).toBe('claude-sonnet-5')
-    // thorough moved from the legacy claude-opus-4-8 to claude-opus-5 — identical
-    // $5/$25 pricing, higher coding benchmark score. The stale pin was a silent
-    // capability loss.
-    expect(resolveClaudeModel(quality('thorough'))).toBe('claude-opus-5')
+    expect(resolveClaudeModel(quality('balanced'))).toBe('claude-sonnet-5-5')
+    expect(resolveClaudeModel(quality('thorough'))).toBe('claude-sonnet-5-5')
   })
 
   it('honors an explicit vendors.claude.model over the tier mapping', () => {
@@ -45,13 +43,13 @@ describe('review model resolution', () => {
   })
 
   it('falls back to the tier mapping when vendors.claude.model is unset', () => {
-    expect(resolveClaudeModel(quality('thorough'), claudeVendor(null))).toBe('claude-opus-5')
+    expect(resolveClaudeModel(quality('thorough'), claudeVendor(null))).toBe('claude-sonnet-5-5')
   })
 
   it('resolves Codex API-key models by tier and configured override', () => {
     expect(resolveCodexModel(quality('fast'), codexVendor('api-key'))).toBe('gpt-6-luna')
     expect(resolveCodexModel(quality('balanced'), codexVendor('api-key'))).toBe('gpt-6.1-sol')
-    expect(resolveCodexModel(quality('thorough'), codexVendor('api-key'))).toBe('gpt-6-astra')
+    expect(resolveCodexModel(quality('thorough'), codexVendor('api-key'))).toBe('gpt-6.1-sol')
     expect(resolveCodexModel(quality('thorough'), codexVendor('api-key', 'custom-model'))).toBe('custom-model')
   })
 
@@ -135,5 +133,25 @@ describe('primaryModelFromUsage', () => {
     expect(primaryModelFromUsage({})).toBeNull()
     // Arrays pass typeof === 'object' but their keys are indices, not model IDs
     expect(primaryModelFromUsage([{ outputTokens: 100 }])).toBeNull()
+  })
+})
+
+
+describe('OpenCode tier model selection', () => {
+  const vendor = () => OpenCodeVendorConfigSchema.parse({ enabled: true, model_tiers: {
+    fast: 'opencode/glm-5.3-flash', balanced: 'opencode/glm-5.3', thorough: 'opencode/kimi-k3',
+  } })
+
+  it('selects the configured tier and follows smart-mode consequence promotion', () => {
+    expect(resolveOpenCodeModel(quality('fast'), vendor())).toBe('opencode/glm-5.3-flash')
+    expect(resolveOpenCodeModel({ ...quality('fast'), mode: 'smart' }, vendor(), { tier: 'thorough' })).toBe('opencode/kimi-k3')
+    expect(resolveOpenCodeModel(quality('balanced'), vendor(), { tier: 'thorough' })).toBe('opencode/glm-5.3')
+  })
+
+  it('keeps a global pin ahead of tiers and leaves missing tiers to the operator default', () => {
+    expect(resolveOpenCodeModel(quality('fast'), { ...vendor(), model: 'custom/reviewer' })).toBe('custom/reviewer')
+    const partial = OpenCodeVendorConfigSchema.parse({ model_tiers: { fast: 'opencode/minimax-m3' } })
+    expect(resolveOpenCodeModel(quality('balanced'), partial)).toBeUndefined()
+    expect(resolveOpenCodeModel(quality('fast'), OpenCodeVendorConfigSchema.parse({}))).toBeUndefined()
   })
 })

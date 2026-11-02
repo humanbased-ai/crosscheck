@@ -1,7 +1,8 @@
 import chalk from 'chalk'
 import ora from 'ora'
 import { createGithubClient, fetchIssueComment } from '../github/client.js'
-import { getGithubToken } from '../config/loader.js'
+import { getGithubToken, loadConfig } from '../config/loader.js'
+import { isTrustedReviewAuthor } from '../lib/reviewer-identity.js'
 import { getPRMergeSummary, getRepoMergeConfig, mergePullRequest, type MergeMethod } from '../github/merge.js'
 import { fetchStandingVerdictRecords } from '../lib/pr-workflow-state.js'
 import { selectStandingVerdict } from '../lib/no-verdict.js'
@@ -126,15 +127,14 @@ export async function runMerge(prUrl: string, opts: MergeOpts = {}): Promise<voi
       octokit.rest.users.getAuthenticated(),
     ])
 
-    // A `crosscheck` annotation is just comment text on the PR — anything can post
-    // one, including the PR author. Only a comment authored by the token that is
-    // about to merge can be trusted as a real verdict; an unverifiable read
-    // (deleted comment, API failure) or a mismatched author fails closed to no
-    // standing verdict rather than trusting a possibly-forged one.
-    const records = rawRecords.length > 0
+    // An annotation is plain comment text. Trust only the actor or the configured
+    // reviewer App; unverifiable authors fail closed to no standing verdict.
+    const verdictComment = rawRecords.length > 0
       ? await fetchIssueComment(owner, repo, rawRecords[0].commentId, token)
-          .then(c => (c && c.user.login === me.data.login ? rawRecords : []))
-      : rawRecords
+      : null
+    const records = rawRecords.length === 0 || (verdictComment
+      && await isTrustedReviewAuthor(loadConfig(), { owner, repo }, me.data.login, verdictComment.user.login))
+      ? rawRecords : []
 
     const standing = selectStandingVerdict(records)
     // Only consulted at --tight, so it is not fetched for the cheaper gates.
