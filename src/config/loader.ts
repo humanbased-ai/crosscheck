@@ -36,7 +36,32 @@ export function loadConfig(explicitPath?: string): Config {
 }
 
 // Shared by getGithubToken() and status.ts so both resolve through identical logic.
-export function getGithubTokenSource(): { token: string; source: 'gh-keyring' | 'env' } | null {
+export function getGithubTokenSource(): { token: string; source: 'gh-keyring' | 'env' | 'app' } | null {
+  // A GitHub App installation token, when one is supplied, outranks both the
+  // keyring and `GITHUB_TOKEN`. It has to: the whole point of `CROSSCHECK_APP_*`
+  // is that the verdict is posted by the App rather than by a person's account,
+  // and every other source here resolves to a person. Precedence the other way
+  // round would leave the switch silently doing nothing on exactly the machines
+  // that have a `gh` session — which is all of them.
+  //
+  // `_FILE` exists because an installation token expires in an hour: a daemon
+  // can have a small re-mint loop write the file (`scripts/app-token.mjs`), and
+  // every `getGithubToken()` call re-reads it. A plain env var is baked into the
+  // process at boot and cannot be refreshed.
+  const appToken = (process.env.CROSSCHECK_APP_TOKEN ?? '').trim()
+  if (appToken) return { token: appToken, source: 'app' }
+  const appTokenFile = (process.env.CROSSCHECK_APP_TOKEN_FILE ?? '').trim()
+  if (appTokenFile) {
+    try {
+      const fromFile = readFileSync(appTokenFile, 'utf8').trim()
+      if (fromFile) return { token: fromFile, source: 'app' }
+    } catch {
+      // Fall through to the credential sources below rather than ignoring a
+      // configured file silently: an unreadable file is a stale-mint symptom,
+      // and the caller should still get *a* token if one exists.
+    }
+  }
+
   // Strip GITHUB_TOKEN / GH_TOKEN from the subprocess env before calling
   // `gh auth token`. When those vars are present (even invalid/expired), gh
   // treats them as the active credential and echoes them back — bypassing the
